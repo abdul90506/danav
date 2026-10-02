@@ -7,6 +7,14 @@
  * Grows section by section; every section is independent.
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+// Never let tests write their fake agent memories or workspaces into the real app data directory.
+const previousDataDir = process.env.DANAV_DATA_DIR;
+const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-agent-suite-'));
+process.env.DANAV_DATA_DIR = testDataDir;
 
 const results = { passed: 0, failed: 0 };
 const failures = [];
@@ -227,7 +235,7 @@ const args = process.argv.slice(2);
 globalThis.__agentTest = { test, args };
 
 // Later sections are registered by dynamic imports so one file stays readable.
-for (const mod of ['./agent/test-partial.js', './agent/test-edits.js', './agent/test-workspace.js', './agent/test-tools.js', './agent/test-loop.js', './agent/test-frontend.js', './agent/test-sandbox.js']) {
+for (const mod of ['./agent/test-partial.js', './agent/test-memory.js', './agent/test-journal.js', './agent/test-context.js', './agent/test-thinking.js', './agent/test-settings.js', './agent/test-edits.js', './agent/test-workspace.js', './agent/test-tools.js', './agent/test-loop.js', './agent/test-frontend.js', './agent/test-sandbox.js']) {
   try {
     await import(mod);
   } catch (err) {
@@ -237,5 +245,8 @@ for (const mod of ['./agent/test-partial.js', './agent/test-edits.js', './agent/
 
 await runAll();
 console.log(`\n${results.passed} passed, ${results.failed} failed`);
+if (previousDataDir === undefined) delete process.env.DANAV_DATA_DIR;
+else process.env.DANAV_DATA_DIR = previousDataDir;
+fs.rmSync(testDataDir, { recursive: true, force: true });
 // Servers started by the tests (fake LLM, temp apps) would keep the process alive.
 process.exit(results.failed ? 1 : 0);

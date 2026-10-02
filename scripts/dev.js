@@ -83,7 +83,11 @@ async function startBackend() {
   backend = spawn(process.execPath, ['server/index.js'], {
     cwd: rootDir,
     stdio: 'inherit',
-    env: { ...process.env, PORT: String(BACKEND_PORT) },
+    env: {
+      ...process.env,
+      PORT: String(BACKEND_PORT),
+      DANAV_HOST: process.env.DANAV_HOST || '127.0.0.1',
+    },
   });
 
   backend.on('exit', (code, signal) => {

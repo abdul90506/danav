@@ -9,6 +9,7 @@
  *   - a provider that rejects the thinking parameters is retried without them
  */
 import { createStreamSplitter } from '../streamSplitter.js';
+import { modelForProvider, normalizeThinkingLevel, thinkingParams } from './thinking.js';
 
 export class LlmError extends Error {
   constructor(message, { status, code } = {}) {
@@ -33,21 +34,6 @@ const sleep = (ms, signal) =>
 const retryBaseMs = () => (Number(process.env.DANAV_LLM_RETRY_BASE_MS) > 0 ? Number(process.env.DANAV_LLM_RETRY_BASE_MS) : 2000);
 
 export const maxTokens = () => (Number(process.env.DANAV_MAX_TOKENS) > 0 ? Number(process.env.DANAV_MAX_TOKENS) : 32768);
-
-/** Same thinking mapping the chat route uses, so both modes behave alike. */
-export function thinkingParams({ model, baseUrl, level }) {
-  if (!level || level === 'Auto') return {};
-  const lvl = String(level).toLowerCase();
-  const isGemini = baseUrl.toLowerCase().includes('generativelanguage.googleapis.com');
-  if (isGemini) {
-    if (String(model).toLowerCase().includes('2.5')) {
-      const budget = { low: 1024, medium: 8192, high: 24576 }[lvl] || 8192;
-      return { extra_body: { google: { thinking_config: { thinking_budget: budget, include_thoughts: true } } } };
-    }
-    return { extra_body: { google: { thinking_config: { thinking_level: lvl, include_thoughts: true } } } };
-  }
-  return { reasoning_effort: lvl };
-}
 
 function errorMessageFrom(status, text, model) {
   let msg = `Provider error (HTTP ${status})`;
@@ -74,27 +60,34 @@ function errorMessageFrom(status, text, model) {
  * @param {(info: {attempt:number, delayMs:number, reason:string}) => void} [o.onRetry]
  */
 export async function streamCompletion({
-  provider, model, thinkingLevel, messages, tools, signal, onText, onThinking, onToolDelta, onRetry,
+  provider, model, thinkingLevel, messages, tools, signal, onText, onThinking, onToolDelta, onRetry, maxOutputTokens,
 }) {
   const baseUrl = normalizeBaseUrl(provider.baseUrl);
   if (!baseUrl) throw new LlmError('The provider has no Base URL. Set one in Settings.');
   const endpoint = `${baseUrl}/chat/completions`;
+  const requestModel = modelForProvider(baseUrl, model);
+  const normalizedLevel = normalizeThinkingLevel(thinkingLevel);
+  const configuredThinking = thinkingParams({ model: requestModel, baseUrl, level: normalizedLevel });
+  const hasThinkingConfig = Object.keys(configuredThinking).length > 0;
+  const tokenLimit = Number.isFinite(maxOutputTokens)
+    ? Math.max(256, Math.min(maxTokens(), Math.floor(maxOutputTokens)))
+    : maxTokens();
   const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' };
   if (provider.apiKey) headers.Authorization = `Bearer ${String(provider.apiKey).trim()}`;
 
   const build = (withThinking) => {
-    const body = { model, messages, stream: true, max_tokens: maxTokens() };
+    const body = { model: requestModel, messages, stream: true, max_tokens: tokenLimit };
     // A wrap-up round passes no tools at all, so the model has to answer in words.
     if (Array.isArray(tools) && tools.length > 0) {
       body.tools = tools;
       body.tool_choice = 'auto';
     }
-    if (withThinking) Object.assign(body, thinkingParams({ model, baseUrl, level: thinkingLevel }));
+    if (withThinking) Object.assign(body, configuredThinking);
     return body;
   };
 
   // ---- open the stream (retrying whatever is retryable) --------------------
-  let withThinking = Boolean(thinkingLevel && thinkingLevel !== 'Auto');
+  let withThinking = hasThinkingConfig;
   let upstream = null;
   const maxAttempts = 4;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -116,7 +109,16 @@ export async function streamCompletion({
 
     const text = await res.text().catch(() => '');
     if (res.status === 400 && withThinking) {
-      withThinking = false; // some providers reject the thinking parameters
+      if (normalizedLevel !== 'Auto') {
+        if (Array.isArray(tools) && tools.length > 0 && /tool|function/i.test(text)) {
+          throw new LlmError(`This model or provider rejected tool calling, which Agent mode needs. Pick a model that supports tool calling. (${errorMessageFrom(400, text, model)})`, { status: 400, code: 'no_tools' });
+        }
+        const detail = errorMessageFrom(400, text, model);
+        throw new LlmError(`The provider rejected the selected ${normalizedLevel} thinking effort. Danav did not lower or remove it; check that this model and endpoint support that level. (${detail})`, { status: 400, code: 'thinking_unsupported' });
+      }
+      // Auto has no requested effort to preserve. Retry without optional thought
+      // summaries if a compatible endpoint rejects that display-only parameter.
+      withThinking = false;
       attempt--;
       continue;
     }

@@ -4,13 +4,14 @@ import type {
   Provider,
   ThinkingLevel,
 } from '../types';
+import { previewAuthHeaders } from './previewAuth';
 
 /**
  * Client for the Agent mode API. Every request carries `x-danav-agent: 1`:
  * the server refuses these routes without it, which is what stops other web
  * pages from driving them (browsers can't add that header cross-origin).
  */
-const HEADERS = { 'Content-Type': 'application/json', 'x-danav-agent': '1' };
+const agentHeaders = () => ({ 'Content-Type': 'application/json', 'x-danav-agent': '1', ...previewAuthHeaders() });
 
 export class AgentApiError extends Error {
   code?: string;
@@ -28,7 +29,7 @@ async function call<T = any>(method: string, url: string, body?: unknown): Promi
   try {
     res = await fetch(`/api/agent${url}`, {
       method,
-      headers: HEADERS,
+      headers: agentHeaders(),
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
@@ -96,10 +97,23 @@ export interface MemoryNote {
   id: string;
   text: string;
   createdAt: number;
+  updatedAt?: number;
+  category?: 'preference' | 'project' | 'decision' | 'workflow' | 'gotcha' | 'other';
+  importance?: number;
+  tags?: string[];
+}
+
+export interface MemoryRun {
+  id: string;
+  at: number;
+  stopReason: string;
+  changed: Array<{ path: string; added: number; removed: number }>;
+  checks: Array<{ name: string; passed: boolean; exitCode?: number; timedOut?: boolean; aborted?: boolean }>;
+  failures: number;
 }
 
 export const getMemory = (workspaceId: string) =>
-  call<{ notes: MemoryNote[] }>('GET', `/workspaces/${encodeURIComponent(workspaceId)}/memory`);
+  call<{ notes: MemoryNote[]; runs?: MemoryRun[] }>('GET', `/workspaces/${encodeURIComponent(workspaceId)}/memory`);
 
 export const deleteMemoryNote = (workspaceId: string, noteId: string) =>
   call<{ notes: MemoryNote[] }>('DELETE', `/workspaces/${encodeURIComponent(workspaceId)}/memory/${encodeURIComponent(noteId)}`);
@@ -154,7 +168,7 @@ export async function streamAgentRun(o: AgentStreamOptions): Promise<void> {
   try {
     const response = await fetch('/api/agent/chat', {
       method: 'POST',
-      headers: HEADERS,
+      headers: agentHeaders(),
       signal: o.signal,
       body: JSON.stringify({
         provider: {

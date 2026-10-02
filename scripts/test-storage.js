@@ -1,5 +1,5 @@
 import assert from 'assert';
-import { sanitizeConversations } from '../src/services/storage.ts';
+import { getStoredProviders, sanitizeConversations, sanitizeProvidersForClient } from '../src/services/storage.ts';
 
 /**
  * Regression tests for how a stored conversation is revived.
@@ -102,6 +102,31 @@ await test('garbage input does not throw', () => {
   assert.deepStrictEqual(sanitizeConversations(undefined), []);
   const out = sanitizeConversations([{ id: 'c', title: 't' }]);
   assert.deepStrictEqual(out[0].messages, []);
+});
+
+await test('legacy provider keys are removed from localStorage but available for one-time backend migration', () => {
+  const key = 'danav_chat_providers_v2';
+  const secret = 'storage-legacy-provider-secret';
+  const values = new Map([[key, JSON.stringify([{
+    id: 'legacy', name: 'Legacy', baseUrl: 'https://example.test/v1', apiType: 'openai', apiKey: secret, models: [],
+  }])]]);
+  const previous = globalThis.localStorage;
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem: (k) => values.get(k) ?? null, setItem: (k, value) => values.set(k, value) },
+  });
+  try {
+    const loaded = getStoredProviders();
+    assert.equal(loaded[0].apiKey, secret, 'the current app boot can migrate a legacy key');
+    assert.equal(loaded[0].apiKeyConfigured, true);
+    assert.doesNotMatch(values.get(key), /storage-legacy-provider-secret/, 'the saved browser copy has no key');
+    const safe = sanitizeProvidersForClient(loaded);
+    assert.equal(safe[0].apiKey, undefined);
+    assert.equal(safe[0].apiKeyConfigured, true);
+  } finally {
+    if (previous === undefined) delete globalThis.localStorage;
+    else Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: previous });
+  }
 });
 
 console.log('\n====================================================');

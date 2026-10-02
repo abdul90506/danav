@@ -32,6 +32,7 @@ import {
   saveStoredConversations,
   saveStoredProviders,
   saveStoredTheme,
+  sanitizeProvidersForClient,
 } from './services/storage';
 import {
   streamChatCompletion,
@@ -42,6 +43,7 @@ import {
   generateAIChatTitle,
 } from './services/api';
 import {
+  AgentApiError,
   answerApproval,
   deleteWorkspace as deleteAgentWorkspace,
   getAgentConfig,
@@ -51,6 +53,7 @@ import {
 import { runAgentTurn } from './agent/runAgentTurn';
 import { collectActivity } from './agent/format';
 import { SmoothStreamer } from './utils/smoothStream';
+import { savePreviewAccessCode } from './services/previewAuth';
 
 export const App: React.FC = () => {
   // Theme state
@@ -69,6 +72,15 @@ export const App: React.FC = () => {
 
   // Settings Modal state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  // Temporary access gate for a public sandbox preview. The token is entered by
+  // the user and kept only in this tab's sessionStorage; it is never bundled.
+  const [previewAuthRequired, setPreviewAuthRequired] = useState(false);
+  const [previewAuthenticated, setPreviewAuthenticated] = useState(false);
+  const [previewAuthChecking, setPreviewAuthChecking] = useState(true);
+  const [previewTokenInput, setPreviewTokenInput] = useState('');
+  const [previewAuthError, setPreviewAuthError] = useState('');
+  const [previewAuthBusy, setPreviewAuthBusy] = useState(false);
 
   // Agent mode: server capabilities, the workspaces, and the dialog / files panel
   const [agentConfig, setAgentConfig] = useState<AgentConfig | null>(null);
@@ -99,13 +111,77 @@ export const App: React.FC = () => {
   // the saved chats.
   const [backendHydrated, setBackendHydrated] = useState(false);
 
-  // Fetch settings and conversations from Backend on mount
+  // Discover whether this backend requires the one-time sandbox access code.
+  // The check endpoint is intentionally safe to call before authentication.
   useEffect(() => {
-    fetchBackendSettings().then((backendSettings) => {
+    let cancelled = false;
+    fetch('/api/preview-auth/check', { cache: 'no-store' })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null);
+        if (cancelled) return;
+        if (response.status === 401 && result?.required) {
+          setPreviewAuthRequired(true);
+          setPreviewAuthenticated(false);
+          // Do not revive an old browser-stored provider key in this isolated
+          // preview. Keep provider definitions, but require a fresh key.
+          const safeProviders = sanitizeProvidersForClient(getStoredProviders())
+            .map((provider) => ({ ...provider, apiKeyConfigured: false }));
+          setProviders(safeProviders);
+          saveStoredProviders(safeProviders);
+        } else if (response.ok) {
+          setPreviewAuthRequired(Boolean(result?.required));
+          setPreviewAuthenticated(Boolean(result?.authenticated));
+        } else {
+          // If the preview backend is still booting, let the app render and let
+          // its normal API retry/hydration path recover once the server is ready.
+          setPreviewAuthRequired(false);
+          setPreviewAuthenticated(true);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPreviewAuthRequired(false);
+        setPreviewAuthenticated(true);
+      })
+      .finally(() => {
+        if (!cancelled) setPreviewAuthChecking(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Fetch settings and conversations only after the temporary preview gate opens.
+  useEffect(() => {
+    if (!previewAuthenticated) return;
+    fetchBackendSettings().then(async (backendSettings) => {
       if (backendSettings) {
-        if (Array.isArray(backendSettings.providers) && backendSettings.providers.length > 0) {
-          setProviders(backendSettings.providers);
-          saveStoredProviders(backendSettings.providers);
+        if (Array.isArray(backendSettings.providers)) {
+          let needsKeyMigration = false;
+          const hydratedProviders = backendSettings.providers.map((remoteProvider) => {
+            const localProvider = providers.find((candidate) => candidate.id === remoteProvider.id);
+            const localKey = typeof localProvider?.apiKey === 'string' ? localProvider.apiKey.trim() : '';
+            const sameEndpoint = Boolean(localProvider)
+              && String(localProvider?.baseUrl || '').trim().replace(/\/+$/, '') === String(remoteProvider.baseUrl || '').trim().replace(/\/+$/, '')
+              && localProvider?.apiType === remoteProvider.apiType;
+            if (!previewAuthRequired && !remoteProvider.apiKeyConfigured && localKey && sameEndpoint) {
+              needsKeyMigration = true;
+              return { ...remoteProvider, apiKey: localKey, apiKeyConfigured: true };
+            }
+            return remoteProvider;
+          });
+
+          // Upgrade credentials that existed only in old browser storage. This
+          // is a one-time same-provider/same-endpoint transfer, never a GET response.
+          const migrated = !needsKeyMigration || await saveBackendSettings({ providers: hydratedProviders });
+          if (migrated) {
+            const safeProviders = sanitizeProvidersForClient(hydratedProviders);
+            setProviders(safeProviders);
+            saveStoredProviders(safeProviders);
+          } else {
+            // Keep the current tab usable if the backend is temporarily read-only;
+            // localStorage remains key-free and a later settings save retries.
+            setProviders(providers);
+            saveStoredProviders(providers);
+          }
         }
         if (backendSettings.theme) {
           setTheme(backendSettings.theme);
@@ -150,7 +226,7 @@ export const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [previewAuthenticated]);
 
   // Conversations state
   const [conversations, setConversations] = useState<Conversation[]>(() => {
@@ -269,15 +345,20 @@ export const App: React.FC = () => {
   };
 
   // Handle Save Providers from Settings
-  const handleSaveProviders = (newProviders: Provider[]) => {
-    setProviders(newProviders);
-    saveStoredProviders(newProviders);
-    saveBackendSettings({
+  const handleSaveProviders = async (newProviders: Provider[]): Promise<boolean> => {
+    // Persist first so a just-added provider can be used immediately without
+    // racing its credential write. Credentials never enter React state/storage.
+    const saved = await saveBackendSettings({
       providers: newProviders,
       theme,
       lastSelectedProviderId,
       lastSelectedModelId,
     });
+    if (!saved) return false;
+    const safeProviders = sanitizeProvidersForClient(newProviders);
+    setProviders(safeProviders);
+    saveStoredProviders(safeProviders);
+    return true;
   };
 
   // Create New Chat: retains the exact model, provider and thinking level
@@ -415,20 +496,56 @@ export const App: React.FC = () => {
   const refreshAgent = useCallback(async () => {
     try {
       setAgentConfig(await getAgentConfig());
-    } catch {
-      /* an older server without agent routes: the toggle explains itself on first use */
+    } catch (error) {
+      if (error instanceof AgentApiError && error.code === 'preview_auth_required') {
+        setPreviewAuthRequired(true);
+        setPreviewAuthenticated(false);
+        setPreviewAuthError('This preview access code has expired or is no longer valid.');
+      }
+      return false;
     }
     try {
       setWorkspaces(await listWorkspaces());
       setWorkspacesLoaded(true);
-    } catch {
-      /* ignore */
+    } catch (error) {
+      if (error instanceof AgentApiError && error.code === 'preview_auth_required') {
+        setPreviewAuthRequired(true);
+        setPreviewAuthenticated(false);
+        setPreviewAuthError('This preview access code has expired or is no longer valid.');
+      }
+      return false;
     }
+    return true;
   }, []);
 
   useEffect(() => {
-    refreshAgent();
-  }, [refreshAgent]);
+    if (previewAuthenticated) void refreshAgent();
+  }, [previewAuthenticated, refreshAgent]);
+
+  const handlePreviewUnlock = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const code = previewTokenInput.trim();
+    if (!code || previewAuthBusy) return;
+    setPreviewAuthBusy(true);
+    setPreviewAuthError('');
+    try {
+      const response = await fetch('/api/preview-auth/check', {
+        headers: { 'x-danav-preview-token': code },
+        cache: 'no-store',
+      });
+      if (!response.ok) {
+        setPreviewAuthError('That access code was not accepted. Try again.');
+        return;
+      }
+      savePreviewAccessCode(code);
+      setPreviewAuthenticated(true);
+      setPreviewTokenInput('');
+    } catch {
+      setPreviewAuthError('Could not reach the preview backend. Try again in a moment.');
+    } finally {
+      setPreviewAuthBusy(false);
+    }
+  };
 
   const patchActive = (patch: Partial<Conversation>) => {
     if (!activeConversation) return;
@@ -1004,7 +1121,7 @@ export const App: React.FC = () => {
   );
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 font-sans">
+    <div className="app-viewport flex w-screen overflow-hidden bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 font-sans">
       {/* Sidebar */}
       <Sidebar
         conversations={conversations}
@@ -1088,7 +1205,7 @@ export const App: React.FC = () => {
             />
 
             {/* Floating Compact Chat Input at Bottom with subtle bottom fade */}
-            <div className="absolute bottom-0 left-0 right-0 z-20 pointer-events-none pt-10 pb-3 sm:pb-4 px-4 bg-gradient-to-t from-white via-white/85 to-transparent dark:from-zinc-950 dark:via-zinc-950/85 dark:to-transparent">
+            <div className="absolute bottom-0 left-0 right-0 z-20 pointer-events-none pt-10 safe-bottom px-4 bg-gradient-to-t from-white via-white/85 to-transparent dark:from-zinc-950 dark:via-zinc-950/85 dark:to-transparent">
               <div className="pointer-events-auto">
                 <ChatInput
                   isCentered={false}
@@ -1146,6 +1263,39 @@ export const App: React.FC = () => {
         mediaType={activeMoviePlayer.mediaType}
         title={activeMoviePlayer.title}
       />
+
+      {previewAuthChecking ? (
+        <div className="fixed inset-0 z-[200] grid place-items-center bg-zinc-950/80 p-4 text-sm text-zinc-200" role="status">Checking the private preview…</div>
+      ) : previewAuthRequired && !previewAuthenticated ? (
+        <div className="fixed inset-0 z-[200] grid place-items-center bg-zinc-950/80 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="preview-auth-title">
+          <form onSubmit={handlePreviewUnlock} className="w-full max-w-sm rounded-2xl border border-zinc-700 bg-zinc-900 p-6 text-zinc-100 shadow-2xl">
+            <div className="mb-5">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo-300">Private sandbox</p>
+              <h1 id="preview-auth-title" className="mt-2 text-xl font-semibold">Unlock Danav preview</h1>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">Enter the temporary access code for this preview. It stays in this tab only.</p>
+            </div>
+            <label htmlFor="preview-access-code" className="mb-1.5 block text-xs font-medium text-zinc-300">Access code</label>
+            <input
+              id="preview-access-code"
+              type="password"
+              autoComplete="current-password"
+              value={previewTokenInput}
+              onChange={(event) => setPreviewTokenInput(event.target.value)}
+              className="h-11 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 font-mono text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20"
+              placeholder="Paste the preview access code"
+              autoFocus
+            />
+            {previewAuthError && <p className="mt-2 text-xs text-rose-300" role="alert">{previewAuthError}</p>}
+            <button
+              type="submit"
+              disabled={previewAuthBusy || !previewTokenInput.trim()}
+              className="mt-4 inline-flex h-10 w-full items-center justify-center rounded-lg bg-indigo-500 px-4 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {previewAuthBusy ? 'Checking…' : 'Continue to preview'}
+            </button>
+          </form>
+        </div>
+      ) : null}
     </div>
   );
 };

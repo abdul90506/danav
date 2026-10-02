@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { ApiType, Model, Provider, Theme } from '../types';
 import { fetchProviderModels, testProviderConnection } from '../services/api';
+import { buildEditedProvider } from './providerSettings.js';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -28,7 +29,7 @@ interface SettingsModalProps {
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   providers: Provider[];
-  onSaveProviders: (providers: Provider[]) => void;
+  onSaveProviders: (providers: Provider[]) => Promise<boolean> | boolean | void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -50,6 +51,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [formName, setFormName] = useState('');
   const [formBaseUrl, setFormBaseUrl] = useState('');
   const [formApiKey, setFormApiKey] = useState('');
+  const [formHasStoredApiKey, setFormHasStoredApiKey] = useState(false);
+  const [clearSavedApiKey, setClearSavedApiKey] = useState(false);
+  const [savingProvider, setSavingProvider] = useState(false);
+  const [providerSaveError, setProviderSaveError] = useState('');
   const [formApiType, setFormApiType] = useState<ApiType>('openai');
   const [formModels, setFormModels] = useState<Model[]>([]);
 
@@ -80,6 +85,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setFormName('');
     setFormBaseUrl('https://vyceai.com/v1');
     setFormApiKey('');
+    setFormHasStoredApiKey(false);
+    setClearSavedApiKey(false);
+    setShowApiKey(false);
     setFormApiType('openai');
     setFormModels([]);
     setFetchedCandidateModels([]);
@@ -88,6 +96,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setModelFilterQuery('');
     setTestingStatus({ loading: false });
     setFetchingStatus({ loading: false });
+    setProviderSaveError('');
   };
 
   const startEditProvider = (p: Provider) => {
@@ -95,7 +104,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsAddingNew(false);
     setFormName(p.name);
     setFormBaseUrl(p.baseUrl);
-    setFormApiKey(p.apiKey || '');
+    // Server keys are never returned to the browser. An empty field keeps the
+    // saved key; entering a value replaces it, and a separate control removes it.
+    setFormApiKey('');
+    setFormHasStoredApiKey(Boolean(p.apiKeyConfigured || p.apiKey));
+    setClearSavedApiKey(false);
+    setShowApiKey(false);
     setFormApiType(p.apiType);
     setFormModels(p.models || []);
     setFetchedCandidateModels(p.models || []);
@@ -104,6 +118,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setModelFilterQuery('');
     setTestingStatus({ loading: false });
     setFetchingStatus({ loading: false });
+    setProviderSaveError('');
   };
 
   const cancelProviderForm = () => {
@@ -112,11 +127,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsModelPickerOpen(false);
     setTestingStatus({ loading: false });
     setFetchingStatus({ loading: false });
+    setProviderSaveError('');
   };
 
   const handleTestConnection = async () => {
     setTestingStatus({ loading: true });
     const result = await testProviderConnection({
+      id: editingProviderId || undefined,
       baseUrl: formBaseUrl,
       apiKey: formApiKey,
       apiType: formApiType,
@@ -201,12 +218,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setFormModels((prev) => prev.filter((m) => m.id !== id));
   };
 
-  const handleSaveProvider = () => {
-    if (!formName.trim() || !formBaseUrl.trim()) return;
+  const handleSaveProvider = async () => {
+    if (!formName.trim() || !formBaseUrl.trim() || savingProvider) return;
 
+    let updatedProviders: Provider[];
     if (isAddingNew) {
+      const providerId = `provider-${Date.now()}`;
       const newProvider: Provider = {
-        id: `provider-${Date.now()}`,
+        id: providerId,
         name: formName.trim(),
         baseUrl: formBaseUrl.trim(),
         apiKey: formApiKey.trim(),
@@ -215,34 +234,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         enabled: true,
         models:
           formModels.length > 0
-            ? formModels
-            : [
-                {
-                  id: 'default-model',
-                  name: `${formName.trim()} Default`,
-                  providerId: `provider-${Date.now()}`,
-                },
-              ],
+            ? formModels.map((model) => ({ ...model, providerId }))
+            : [{ id: 'default-model', name: `${formName.trim()} Default`, providerId }],
       };
-      onSaveProviders([...providers, newProvider]);
+      updatedProviders = [...providers, newProvider];
     } else if (editingProviderId) {
-      const updated = providers.map((p) => {
-        if (p.id === editingProviderId) {
-          return {
-            ...p,
-            name: formName.trim(),
-            baseUrl: formBaseUrl.trim(),
-            apiKey: formApiKey.trim(),
-            apiType: formApiType,
-            models: formModels.map((m) => ({ ...m, providerId: p.id })),
-          };
-        }
-        return p;
-      });
-      onSaveProviders(updated);
+      updatedProviders = providers.map((p) =>
+        p.id === editingProviderId
+          ? buildEditedProvider(p, {
+              name: formName,
+              baseUrl: formBaseUrl,
+              apiKey: formApiKey,
+              apiType: formApiType,
+              models: formModels,
+              clearSavedApiKey,
+            })
+          : p
+      );
+    } else {
+      return;
     }
 
-    cancelProviderForm();
+    setSavingProvider(true);
+    setProviderSaveError('');
+    try {
+      const saved = await onSaveProviders(updatedProviders);
+      if (saved === false) {
+        setProviderSaveError('Could not save provider settings. Check the server connection and try again.');
+        return;
+      }
+      cancelProviderForm();
+    } catch {
+      setProviderSaveError('Could not save provider settings. Check the server connection and try again.');
+    } finally {
+      setSavingProvider(false);
+    }
   };
 
   const handleDeleteProvider = (providerId: string) => {
@@ -517,8 +543,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       <input
                         type={showApiKey ? 'text' : 'password'}
                         value={formApiKey}
-                        onChange={(e) => setFormApiKey(e.target.value)}
-                        placeholder="sk-..."
+                        onChange={(e) => {
+                          setFormApiKey(e.target.value);
+                          setClearSavedApiKey(false);
+                        }}
+                        placeholder={formHasStoredApiKey ? 'Saved securely — enter a new key to replace' : 'sk-...'}
                         className="w-full h-8 pl-8 pr-8 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-400 text-zinc-900 dark:text-zinc-100 font-mono"
                       />
                       <button
@@ -533,6 +562,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         )}
                       </button>
                     </div>
+                    {formHasStoredApiKey && (
+                      <div className="mt-1 flex items-start justify-between gap-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+                        <span>
+                          {clearSavedApiKey
+                            ? 'The saved key will be removed when you save.'
+                            : formApiKey
+                              ? 'The new key will replace the one stored on this server.'
+                              : 'A key is stored securely on this server. Leave blank to keep it.'}
+                        </span>
+                        {!formApiKey && (
+                          <button
+                            type="button"
+                            onClick={() => setClearSavedApiKey((value) => !value)}
+                            className="shrink-0 underline hover:text-zinc-800 dark:hover:text-zinc-200"
+                          >
+                            {clearSavedApiKey ? 'Undo' : 'Remove saved key'}
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* Actions: Test Connection & Fetch Models */}
@@ -560,6 +609,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
 
                   {/* Status feedback */}
+                  {providerSaveError && (
+                    <div role="alert" className="flex items-center gap-2 p-2 rounded-lg text-xs bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>{providerSaveError}</span>
+                    </div>
+                  )}
                   {testingStatus.message && (
                     <div
                       className={`flex items-center gap-2 p-2 rounded-lg text-xs ${
@@ -747,16 +802,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <button
                       type="button"
                       onClick={cancelProviderForm}
-                      className="h-8 px-3.5 rounded-lg border border-zinc-300 dark:border-zinc-700 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                      disabled={savingProvider}
+                      className="h-8 px-3.5 rounded-lg border border-zinc-300 dark:border-zinc-700 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50"
                     >
                       Cancel
                     </button>
                     <button
                       type="button"
                       onClick={handleSaveProvider}
-                      className="h-8 px-4 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-colors shadow-sm"
+                      disabled={savingProvider}
+                      className="h-8 px-4 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-colors shadow-sm disabled:opacity-50"
                     >
-                      Save Provider
+                      {savingProvider ? 'Saving…' : 'Save Provider'}
                     </button>
                   </div>
                 </div>

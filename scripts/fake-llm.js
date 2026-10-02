@@ -145,6 +145,21 @@ export const scenarios = {
         }
       : { text: 'Done.' },
 
+  /** Runs a recognizable verification command for the private run-journal tests. */
+  check: ({ roundIdx }) => roundIdx === 0
+    ? { text: 'Running the focused test suite now.', toolCalls: [{ name: 'run_command', args: { command: 'npm run test:agent' } }] }
+    : { text: 'The focused test command completed.' },
+
+  /** Parent-agent delegation plus a child response with no tools. */
+  delegate: ({ roundIdx, messages }) => {
+    if (String(messages?.[0]?.content || '').includes('read-only software-review subagent')) {
+      return { text: 'Review: src/review.ts calls trim before validating the value; add an empty-input regression test.' };
+    }
+    return roundIdx === 0
+      ? { text: 'I will delegate one focused, read-only review.', toolCalls: [{ name: 'delegate_task', args: { task: 'Review the handler for edge cases.', paths: ['src/review.ts'] } }] }
+      : { text: 'The independent review found a possible empty-input edge case; I will verify it before changing anything.' };
+  },
+
   /** Several independent read-only calls in one round. */
   parallel: ({ roundIdx }) =>
     roundIdx === 0
@@ -272,6 +287,8 @@ const byModel = {
   'fake-batch': scenarios.batch,
   'fake-truncate': scenarios.truncate,
   'fake-parallel': scenarios.parallel,
+  'fake-check': scenarios.check,
+  'fake-delegate': scenarios.delegate,
 };
 
 export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {
@@ -300,11 +317,22 @@ export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end('{"error":{"message":"tools are not supported by this model"}}');
     }
+    if (payload.model === 'fake-context') {
+      const chars = JSON.stringify(payload.messages || []).length;
+      if (chars > 35_000) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end('{"error":{"message":"This model maximum context length was exceeded. Reduce the input messages."}}');
+      }
+    }
 
     const scenario = byModel[payload.model] || scenarios.build;
     const roundIdx = payload.messages.filter((m) => m.role === 'assistant' && m.tool_calls?.length).length;
     const withTools = Array.isArray(payload.tools) && payload.tools.length > 0;
-    const round = withTools ? scenario({ roundIdx, messages: payload.messages }) : { text: 'Wrapping up without using more tools.' };
+    const isDelegatedChild = payload.model === 'fake-delegate'
+      && String(payload.messages?.[0]?.content || '').includes('read-only software-review subagent');
+    const round = isDelegatedChild
+      ? scenario({ roundIdx, messages: payload.messages })
+      : withTools ? scenario({ roundIdx, messages: payload.messages }) : { text: 'Wrapping up without using more tools.' };
     const delay = round.delayMs ?? chunkDelayMs;
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });

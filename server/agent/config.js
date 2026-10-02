@@ -15,14 +15,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const dataDir = () => process.env.DANAV_DATA_DIR || path.join(__dirname, '..', 'data');
 
-function ensureDataDir() {
+export function ensureDataDir() {
   const dir = dataDir();
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(dir, 0o700); } catch { /* best effort on unusual filesystems */ }
+  }
   return dir;
 }
 
 /** tmp-file + rename, so a crash never leaves a half-written JSON file. */
-export function atomicWrite(file, contents, mode) {
+export function atomicWrite(file, contents, mode = 0o600) {
   const tmp = `${file}.${process.pid}.tmp`;
   const fd = fs.openSync(tmp, 'w', mode);
   try {

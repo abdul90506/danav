@@ -12,6 +12,7 @@ import { registerAgentRoutes, _activeRuns } from '../../server/agent/routes.js';
 import { resolveApproval } from '../../server/agent/approvals.js';
 import { countLines } from '../../server/agent/textops.js';
 import { normalizeAgentBlockForDisk } from '../../server/agent/persist.js';
+import { readRunJournal } from '../../server/agent/journal.js';
 import { genId } from '../../server/agent/util.js';
 import { _resetStoreCache } from '../../server/agent/store.js';
 
@@ -31,21 +32,31 @@ async function agentRun({ model = 'fake-build', autoRun = true, history, signal,
   const ws = workspace || new LocalWorkspace({ id: 'ws-loop', kind: 'local', name: 'loop', root: dir, autoRun });
   await ws.init();
   const events = [];
-  const result = await runAgent({
-    provider: { baseUrl: l.baseUrl, apiKey: 'test-key-1234567890' },
-    model,
-    thinkingLevel: 'Auto',
-    history: history || [{ role: 'user', content: 'build me a landing page' }],
-    activity: [],
-    workspace: ws,
-    runSearchTool: async () => ({ success: false, error: 'offline' }),
-    send: (e) => {
-      events.push(e);
-      onEvent?.(e);
-    },
-    signal: signal || new AbortController().signal,
-    runId: genId('run'),
-  });
+  const previousDataDir = process.env.DANAV_DATA_DIR;
+  const testDataDir = tmp('danav-loop-data-');
+  process.env.DANAV_DATA_DIR = testDataDir;
+  let result;
+  try {
+    result = await runAgent({
+      provider: { baseUrl: l.baseUrl, apiKey: 'test-key-1234567890' },
+      model,
+      thinkingLevel: 'Auto',
+      history: history || [{ role: 'user', content: 'build me a landing page' }],
+      activity: [],
+      workspace: ws,
+      runSearchTool: async () => ({ success: false, error: 'offline' }),
+      send: (e) => {
+        events.push(e);
+        onEvent?.(e);
+      },
+      signal: signal || new AbortController().signal,
+      runId: genId('run'),
+    });
+  } finally {
+    if (previousDataDir === undefined) delete process.env.DANAV_DATA_DIR;
+    else process.env.DANAV_DATA_DIR = previousDataDir;
+    fs.rmSync(testDataDir, { recursive: true, force: true });
+  }
   return { events, result, ws, dir, requests: l.requests };
 }
 
@@ -140,6 +151,86 @@ test('happy path: plan, write, read, multi-edit, edit, command, search, list —
   assertConsistentTranscript(requests.at(-1).messages);
   const finalText = events.filter((e) => e.content).map((e) => e.content).join('');
   assert.match(finalText, /Done! I created index\.html/);
+});
+
+test('runAgent wires delegate_task to a bounded child completion with only supplied excerpts', async () => {
+  const root = tmp('danav-delegate-loop-');
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'src', 'review.ts'), 'export const normalize = (value: string) => value.trim();\n');
+  const ws = new LocalWorkspace({ id: 'ws-delegate-loop', kind: 'local', name: 'delegate', root, autoRun: true });
+  await ws.init();
+  try {
+    const { events, result, requests } = await agentRun({
+      model: 'fake-delegate',
+      workspace: ws,
+      history: [{ role: 'user', content: 'Ask for a second opinion on the handler.' }],
+    });
+    assert.equal(result.stopReason, 'completed');
+    const action = agentEvents(events, 'action_end').find((a) => a.result?.kind === 'delegate');
+    assert.ok(action?.ok, 'the delegated review should complete through the normal tool lifecycle');
+    assert.equal(action.result.kind, 'delegate');
+
+    const child = requests.find((r) => String(r.messages?.[0]?.content || '').includes('read-only software-review subagent'));
+    assert.ok(child, 'the loop should make a separate child completion request');
+    assert.equal(child.tools, undefined, 'the child has no tools and therefore cannot modify the workspace');
+    assert.match(JSON.stringify(child.messages), /src\/review\.ts/);
+    assert.match(JSON.stringify(child.messages), /value\.trim/);
+    const parentFollowup = requests.find((r) => r.tools?.length && r.messages.some((m) => m.role === 'tool'));
+    assert.ok(parentFollowup);
+    assert.match(JSON.stringify(parentFollowup.messages), /empty-input regression test/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('successful verification is journaled automatically and available in the next workspace run', async () => {
+  const l = await getLlm();
+  const previousDataDir = process.env.DANAV_DATA_DIR;
+  const dataDir = tmp('danav-journal-loop-data-');
+  const root = tmp('danav-journal-loop-workspace-');
+  process.env.DANAV_DATA_DIR = dataDir;
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+    name: 'journal-fixture', private: true,
+    scripts: { 'test:agent': 'node -e "console.log(42)"' },
+  }, null, 2));
+  const ws = new LocalWorkspace({ id: 'ws-journal-loop', kind: 'local', name: 'journal', root, autoRun: true });
+  await ws.init();
+  const run = async (model, request) => {
+    const events = [];
+    const result = await runAgent({
+      provider: { baseUrl: l.baseUrl, apiKey: 'test-key-1234567890' },
+      model,
+      thinkingLevel: 'Auto',
+      history: [{ role: 'user', content: request }],
+      activity: [],
+      workspace: ws,
+      runSearchTool: async () => ({ success: false, error: 'offline' }),
+      send: (e) => events.push(e),
+      signal: new AbortController().signal,
+      runId: genId('run'),
+    });
+    return { events, result };
+  };
+  try {
+    const first = await run('fake-check', 'run the focused test');
+    assert.equal(first.result.stopReason, 'completed');
+    const records = readRunJournal(ws.id);
+    assert.equal(records.length, 1);
+    assert.ok(records[0].checks.some((c) => c.name === 'npm run test:agent' && c.passed));
+
+    l.requests.length = 0;
+    const second = await run('fake-build', 'what was the test command?');
+    assert.equal(second.result.stopReason, 'completed');
+    assert.match(l.requests[0].messages[0].content, /Recent workspace evidence/);
+    assert.match(l.requests[0].messages[0].content, /npm run test:agent passed/);
+    const onDisk = fs.readFileSync(path.join(dataDir, 'agent-runs', `${ws.id}.json`), 'utf8');
+    assert.doesNotMatch(onDisk, /what was the test command/i, 'journal never stores the user prompt');
+  } finally {
+    if (previousDataDir === undefined) delete process.env.DANAV_DATA_DIR;
+    else process.env.DANAV_DATA_DIR = previousDataDir;
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('live progress: the action row appears early and its line count grows while the model writes', async () => {
@@ -614,11 +705,53 @@ test('context pruning: old tool output and file bodies are elided first; whole r
   assert.equal(b[1].content, 'hi');
   assert.ok(assistants(b).length >= 3);
   assert.equal(assistants(b).at(-1).tool_calls[0].id, 'c11');
+  JSON.parse(assistants(b).at(-1).tool_calls[0].function.arguments);
 
-  // 3) under budget: untouched
+  // 3) an emergency provider-sized budget can compact even the newest file body while keeping its tool pair valid
+  const d = [{ role: 'system', content: 'sys' }, { role: 'user', content: 'keep this current request' }];
+  for (let i = 0; i < 3; i++) {
+    d.push({ role: 'assistant', content: null, tool_calls: [{ id: `z${i}`, type: 'function', function: { name: 'write_file', arguments: JSON.stringify({ path: `new${i}.js`, content: 'x'.repeat(5000) }) } }] });
+    d.push({ role: 'tool', tool_call_id: `z${i}`, content: 'y'.repeat(10_000) });
+  }
+  const r3 = pruneMessages(d, 3000);
+  assert.equal(r3.overBudget, false);
+  assert.ok(r3.droppedRounds >= 1);
+  assert.match(d[1].content, /keep this current request/);
+  assertConsistentTranscript(d);
+  const lastArgs = JSON.parse(d.find((m) => m.role === 'assistant' && m.tool_calls)?.tool_calls[0].function.arguments);
+  assert.match(lastArgs.content, /omitted from history/);
+
+  // 4) under budget: untouched
   const c = build();
   assert.equal(pruneMessages(c, 1_000_000).pruned, false);
   assert.equal(c.length, 26);
+});
+
+test('provider context-limit errors trigger bounded history compaction and a safe retry', async () => {
+  const history = [
+    { role: 'user', content: 'ARCHIVE_MARKER '.repeat(7000) },
+    { role: 'assistant', content: 'Older summary one.' },
+    { role: 'user', content: 'Older question two.' },
+    { role: 'assistant', content: 'Older answer two.' },
+    { role: 'user', content: 'Older question three.' },
+    { role: 'assistant', content: 'Older answer three.' },
+    { role: 'user', content: 'Older question four.' },
+    { role: 'assistant', content: 'Older answer four.' },
+    { role: 'user', content: 'build me a landing page' },
+  ];
+  const { events, result, requests } = await agentRun({ model: 'fake-context', history });
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(result.contextRetries, 1);
+  assert.ok(requests.length >= 2, 'the oversized request is retried after compaction');
+  const firstChars = JSON.stringify(requests[0].messages).length;
+  const retryChars = JSON.stringify(requests[1].messages).length;
+  assert.ok(firstChars > 35_000, `first prompt exceeds the fake provider limit: ${firstChars}`);
+  assert.ok(retryChars < 35_000, `compacted retry fits the provider limit: ${retryChars}`);
+  const retriedMessages = JSON.stringify(requests[1].messages);
+  assert.match(retriedMessages, /build me a landing page/, 'the current task survives compaction');
+  assert.ok(retriedMessages.length < firstChars / 2, 'the oversized history is dramatically smaller');
+  assert.match(retriedMessages, /older conversation omitted/, 'compaction clearly marks retained fragments of old context');
+  assert.ok(events.some((e) => /context limit hit.*retrying/i.test(e.status || '')), 'the user sees why the agent is retrying');
 });
 
 test('provider errors surface as a clear error event (after retrying), and the run still ends cleanly', async () => {
@@ -845,6 +978,9 @@ test('routes: config never reveals the Novita key; workspace creation rules', as
 
     const a = await app.api('POST', '/api/agent/workspaces', { name: 'My Cool App!', kind: 'local' });
     assert.equal(a.status, 200);
+    const memory = await app.api('GET', `/api/agent/workspaces/${a.json.workspace.id}/memory`);
+    assert.deepEqual(memory.json.notes, []);
+    assert.deepEqual(memory.json.runs, []);
     assert.equal(a.json.workspace.kind, 'local');
     assert.equal(a.json.workspace.autoRun, false); // local defaults to asking
     assert.equal(path.dirname(a.json.workspace.root), app.wsDir);
@@ -939,6 +1075,9 @@ test('routes: /chat streams the whole run over SSE, enforces one run per workspa
     assert.ok(events.some((e) => e.agent?.type === 'run_start'));
     assert.equal(events.find((e) => e.agent?.type === 'run_end').agent.stopReason, 'completed');
     assert.equal(_activeRuns.has(ws.id), false, 'lock released');
+    const memory = await app.api('GET', `/api/agent/workspaces/${ws.id}/memory`);
+    assert.equal(memory.json.runs.length, 1);
+    assert.equal(memory.json.runs[0].changed[0].path, 'index.html', 'the UI endpoint exposes only the compact change journal');
 
     // client disconnect cancels the run and frees the workspace
     const ac = new AbortController();

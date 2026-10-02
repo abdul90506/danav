@@ -7,7 +7,7 @@ dist-ssr
 !.env.example
 .DS_Store
 
-# Persistent user data & keys
-server/data/*.json
-server/data/*.tmp
+# Persistent user data, chat history, workspace memory and keys. Keep every data
+# file private and out of source control, including nested agent-memory files.
+server/data/**
 !server/data/.gitkeep

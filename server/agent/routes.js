@@ -20,6 +20,7 @@ import {
 import { resolveApproval } from './approvals.js';
 import { runAgent } from './loop.js';
 import { clearNotes, readNotes, removeNotes } from './memory.js';
+import { readRunJournal } from './journal.js';
 import { TOOL_DEFINITIONS } from './tools.js';
 import { createRedactor, genId } from './util.js';
 import { WorkspaceError } from './workspaces/base.js';
@@ -51,7 +52,7 @@ function sendError(res, err) {
 
 const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((err) => sendError(res, err));
 
-export function registerAgentRoutes(app, { runSearchTool }) {
+export function registerAgentRoutes(app, { runSearchTool, resolveProvider = (provider) => provider }) {
   const router = express.Router();
   router.use(agentRequestGuard);
 
@@ -152,7 +153,7 @@ export function registerAgentRoutes(app, { runSearchTool }) {
   // ------------------------------------------------------------------ memory
   router.get('/workspaces/:id/memory', wrap(async (req, res) => {
     await openWorkspace(req.params.id); // 404 for an unknown workspace
-    res.json({ success: true, notes: readNotes(req.params.id) });
+    res.json({ success: true, notes: readNotes(req.params.id), runs: readRunJournal(req.params.id, 12) });
   }));
 
   router.delete('/workspaces/:id/memory/:noteId', wrap(async (req, res) => {
@@ -178,7 +179,8 @@ export function registerAgentRoutes(app, { runSearchTool }) {
 
   // -------------------------------------------------------------------- chat
   router.post('/chat', async (req, res) => {
-    const { provider, model, thinkingLevel, messages, workspaceId, activity } = req.body || {};
+    const { provider: suppliedProvider, model, thinkingLevel, messages, workspaceId, activity } = req.body || {};
+    const provider = resolveProvider(suppliedProvider);
     if (!provider || typeof provider !== 'object') return res.status(400).json({ error: 'Provider configuration is missing.' });
     if (provider.apiType === 'mock') {
       return res.status(400).json({ error: 'The Demo provider cannot run the agent. Pick a real model (it must support tool calling).' });

@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
-import { assertPublicUrl, buildToolset, displayArgs, isPrivateAddress, peekPartialArgs, portsInCommand, resolveSafeUrl, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
+import { assertPublicUrl, buildToolset, displayArgs, isPrivateAddress, peekPartialArgs, portsInCommand, READ_ONLY_TOOLS, resolveSafeUrl, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
 import { createRedactor } from '../../server/agent/util.js';
 
 const { test } = globalThis.__agentTest;
@@ -13,13 +13,14 @@ const isWin = process.platform === 'win32';
 
 console.log('\n[tools]');
 
-async function setup({ autoRun = true, search, probe } = {}) {
+async function setup({ autoRun = true, search, probe, runSubagent } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-tools-'));
   const ws = new LocalWorkspace({ id: 'ws-t', kind: 'local', name: 't', root: dir, autoRun });
   await ws.init();
   const tools = buildToolset({
     workspace: ws,
     runSearchTool: search || (async () => ({ success: false, error: 'offline' })),
+    runSubagent,
     redact: createRedactor(),
     lookup: async () => [{ address: '93.184.216.34' }], // tests never touch real DNS
     probe: probe || (async () => ({ status: 200, headers: new Headers(), body: null })), // ...or the real network
@@ -41,6 +42,70 @@ test('every tool has a schema and an implementation', async () => {
   assert.equal(new Set(names).size, names.length, 'tool names must be unique');
   for (const n of names) assert.ok(tools.has(n), `missing implementation for ${n}`);
   for (const d of TOOL_DEFINITIONS) assert.equal(d.function.parameters.type, 'object');
+});
+
+test('memory tools save structured notes, search relevant history, and reject known secrets', async () => {
+  const previousDir = process.env.DANAV_DATA_DIR;
+  const previousKey = process.env.NOVITA_API_KEY;
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-memory-tools-'));
+  process.env.DANAV_DATA_DIR = data;
+  process.env.NOVITA_API_KEY = 'test_memory_secret_token_123456789012345';
+  try {
+    const { tools, run } = await setup();
+    assert.ok(tools.definitions.some((d) => d.function.name === 'search_memory'));
+    assert.ok(READ_ONLY_TOOLS.has('search_memory'));
+    const saved = await run('remember', {
+      note: 'Run the focused suite with npm run test:agent',
+      category: 'workflow', importance: 4, tags: ['tests'],
+    });
+    assert.equal(saved.ok, true);
+    assert.equal(saved.ui.category, 'workflow');
+    const found = await run('search_memory', { query: 'npm test agent' });
+    assert.equal(found.ok, true);
+    assert.equal(found.ui.count, 1);
+    assert.match(found.output, /npm run test:agent/);
+
+    const rejected = await run('remember', { note: `NOVITA_API_KEY=${process.env.NOVITA_API_KEY}` });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.output, /will not save/);
+    assert.doesNotMatch(rejected.output, /test_memory_secret_token/);
+  } finally {
+    if (previousDir === undefined) delete process.env.DANAV_DATA_DIR;
+    else process.env.DANAV_DATA_DIR = previousDir;
+    if (previousKey === undefined) delete process.env.NOVITA_API_KEY;
+    else process.env.NOVITA_API_KEY = previousKey;
+    fs.rmSync(data, { recursive: true, force: true });
+  }
+});
+
+test('delegate_task runs a bounded read-only second opinion and excludes secret files', async () => {
+  let received;
+  const { run, dir, ctx, tools } = await setup({
+    runSubagent: async (input) => {
+      received = input;
+      return 'The handler misses an empty-input guard; add a regression test.';
+    },
+  });
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'handler.ts'), 'export function handler(value: string) { return value.trim(); }\n');
+  fs.writeFileSync(path.join(dir, '.env'), 'DO_NOT_SEND=this-is-a-test-secret\n');
+
+  assert.ok(READ_ONLY_TOOLS.has('delegate_task'));
+  assert.ok(tools.definitions.some((d) => d.function.name === 'delegate_task'));
+  const r = await run('delegate_task', { task: 'Review the handler for likely edge cases.', paths: ['src/handler.ts', '.env'] });
+  assert.equal(r.ok, true);
+  assert.match(r.output, /empty-input guard/);
+  assert.match(r.output, /sensitive path excluded/);
+  assert.deepEqual(received.files.map((f) => f.path), ['src/handler.ts']);
+  assert.match(received.files[0].content, /value\.trim/);
+  assert.doesNotMatch(JSON.stringify(received), /DO_NOT_SEND|this-is-a-test-secret/);
+  assert.equal(fs.readFileSync(path.join(dir, 'src', 'handler.ts'), 'utf8'), 'export function handler(value: string) { return value.trim(); }\n');
+  assert.equal(ctx.state.subagentCalls, 1);
+
+  await run('delegate_task', { task: 'Review one more independent part.', paths: ['src/handler.ts'] });
+  const overLimit = await run('delegate_task', { task: 'Review a third task.', paths: ['src/handler.ts'] });
+  assert.equal(overLimit.ok, false);
+  assert.match(overLimit.output, /limit of two delegated reviews/);
 });
 
 test('write_file creates a file and reports +lines', async () => {

@@ -5,7 +5,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { atomicWrite, dataDir } from './config.js';
+import { atomicWrite, dataDir, ensureDataDir } from './config.js';
 
 let cache = null;
 let cacheFile = null;
@@ -26,7 +26,7 @@ function load() {
 }
 
 function save() {
-  fs.mkdirSync(dataDir(), { recursive: true });
+  ensureDataDir();
   atomicWrite(file(), JSON.stringify(cache, null, 2));
 }
 

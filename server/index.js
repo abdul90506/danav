@@ -3,12 +3,15 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import { timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { createStreamSplitter } from './streamSplitter.js';
 import { normalizeToolExecutionsForDisk } from './toolTrail.js';
 import { fetchViaCurl } from './curlFetch.js';
 import { registerAgentRoutes } from './agent/routes.js';
 import { normalizeAgentBlockForDisk } from './agent/persist.js';
+import { modelForProvider, normalizeThinkingLevel, thinkingParams } from './agent/thinking.js';
+import { mergeSettingsPatch, publicSettings, resolveConfiguredProvider } from './settings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,11 +23,37 @@ dotenv.config({ path: path.join(__dirname, '..', '.env') });
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Open CORS for the chat API, but NOT for /api/agent: those routes can run commands
-// and touch files, so a random web page must not be able to call them cross-origin.
+function previewTokenMatches(req) {
+  const expected = Buffer.from(String(process.env.DANAV_PREVIEW_TOKEN || ''));
+  if (!expected.length) return true;
+  const supplied = Buffer.from(String(req.headers['x-danav-preview-token'] || ''));
+  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+}
+
+// The UI calls its APIs through same-origin relative URLs (or the Vite proxy).
+// Never grant cross-origin access to settings, provider credentials or Agent.
 const openCors = cors();
-app.use((req, res, next) => (req.path.startsWith('/api/agent') ? next() : openCors(req, res, next)));
+const credentialRoutes = new Set([
+  '/api/settings', '/api/chat', '/api/chat/title', '/api/providers/test',
+  '/api/providers/models', '/api/preview-auth/check',
+]);
+app.use((req, res, next) => {
+  const normalizedPath = req.path.replace(/\/+$/, '').toLowerCase() || '/';
+  const protectedRoute = req.path.toLowerCase().startsWith('/api/agent') || credentialRoutes.has(normalizedPath);
+  // The public preview uses Vite on a single origin and an access token for API
+  // calls, so don't add permissive CORS headers to ANY API in that mode.
+  if (process.env.DANAV_PREVIEW_TOKEN && normalizedPath.startsWith('/api/')) return next();
+  return protectedRoute ? next() : openCors(req, res, next);
+});
 app.use(express.json({ limit: '10mb' }));
+app.use((req, res, next) => {
+  const normalizedPath = req.path.replace(/\/+$/, '').toLowerCase() || '/';
+  if (!process.env.DANAV_PREVIEW_TOKEN || !normalizedPath.startsWith('/api/') || normalizedPath === '/api/preview-auth/check') return next();
+  if (!previewTokenMatches(req)) {
+    return res.status(401).json({ success: false, error: 'Preview access code required.', code: 'preview_auth_required' });
+  }
+  next();
+});
 
 /**
  * Never let a missing/!object body crash a handler.
@@ -258,8 +287,14 @@ async function fetchViaReaderProxy(targetUrl, timeoutMs = 10000) {
 const DATA_DIR = process.env.DANAV_DATA_DIR || path.join(__dirname, 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+// The settings file can contain provider API keys. Restrict this store to the
+// account running Danav on POSIX systems; Windows uses its normal ACL model.
+if (process.platform !== 'win32') {
+  try { fs.chmodSync(DATA_DIR, 0o700); } catch { /* best effort on unusual filesystems */ }
+  if (fs.existsSync(SETTINGS_FILE)) {
+    try { fs.chmodSync(SETTINGS_FILE, 0o600); } catch { /* best effort on unusual filesystems */ }
+  }
 }
 
 /**
@@ -274,7 +309,7 @@ if (!fs.existsSync(DATA_DIR)) {
  */
 function atomicWriteFileSync(filePath, contents) {
   const tmp = `${filePath}.${process.pid}.tmp`;
-  const fd = fs.openSync(tmp, 'w');
+  const fd = fs.openSync(tmp, 'w', 0o600);
   try {
     fs.writeFileSync(fd, contents, 'utf-8');
     fs.fsyncSync(fd);
@@ -359,22 +394,36 @@ function writeSettingsToDisk(settings) {
   }
 }
 
-// Settings API Endpoints
+// Safe access-code check for the isolated public preview. It never returns the configured token.
+app.get('/api/preview-auth/check', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const required = Boolean(process.env.DANAV_PREVIEW_TOKEN);
+  const authenticated = !required || previewTokenMatches(req);
+  return res.status(authenticated ? 200 : 401).json({ required, authenticated });
+});
+
+// Settings API Endpoints. Provider keys stay on disk and are never reflected to the browser.
 app.get('/api/settings', (req, res) => {
+  res.set('Cache-Control', 'no-store');
   const settings = readSettingsFromDisk();
-  return res.json({ success: true, settings });
+  return res.json({ success: true, settings: publicSettings(settings) });
 });
 
 app.post('/api/settings', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!req.is('application/json') || !req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    return res.status(400).json({ success: false, error: 'Settings must be sent as a JSON object.' });
+  }
+  if (Object.hasOwn(req.body, 'providers') && !Array.isArray(req.body.providers)) {
+    return res.status(400).json({ success: false, error: 'Providers must be an array.' });
+  }
+
   const current = readSettingsFromDisk();
-  const updated = {
-    ...current,
-    ...req.body,
-    updatedAt: Date.now(),
-  };
+  const updated = mergeSettingsPatch(current, req.body);
+  updated.updatedAt = Date.now();
   const ok = writeSettingsToDisk(updated);
   if (ok) {
-    return res.json({ success: true, settings: updated });
+    return res.json({ success: true, settings: publicSettings(updated) });
   }
   return res.status(500).json({ success: false, error: 'Could not save settings to backend' });
 });
@@ -625,7 +674,8 @@ app.post('/api/conversations/restore', (req, res) => {
 
 // Ask the active model for a short chat title.
 app.post('/api/chat/title', async (req, res) => {
-  const { provider, model, message } = req.body;
+  const { provider: suppliedProvider, model, message } = req.body || {};
+  const provider = providerWithStoredCredentials(suppliedProvider);
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'Message is required' });
   }
@@ -698,9 +748,14 @@ function normalizeBaseUrl(url) {
   return cleaned;
 }
 
+function providerWithStoredCredentials(provider) {
+  return resolveConfiguredProvider(provider, readSettingsFromDisk());
+}
+
 // Test Provider Connection
 app.post('/api/providers/test', async (req, res) => {
-  const { baseUrl, apiKey, apiType } = req.body;
+  const resolved = providerWithStoredCredentials(req.body || {});
+  const { baseUrl, apiKey, apiType } = resolved;
 
   if (apiType === 'mock') {
     return res.json({ success: true, message: 'Built-in Demo provider is ready.' });
@@ -776,7 +831,8 @@ app.post('/api/providers/test', async (req, res) => {
 
 // Fetch Models
 app.post('/api/providers/models', async (req, res) => {
-  const { baseUrl, apiKey, apiType } = req.body;
+  const resolved = providerWithStoredCredentials(req.body || {});
+  const { baseUrl, apiKey, apiType } = resolved;
 
   if (apiType === 'mock') {
     return res.json({
@@ -1131,7 +1187,8 @@ const CHAT_TOOL_SYSTEM_PROMPT =
   '- If a tool fails, say so plainly rather than inventing the information.';
 
 app.post('/api/chat', async (req, res) => {
-  const { provider, model: modelInput, messages, thinkingLevel, toolsEnabled } = req.body;
+  const { provider: suppliedProvider, model: modelInput, messages, thinkingLevel, toolsEnabled } = req.body || {};
+  const provider = providerWithStoredCredentials(suppliedProvider);
 
   if (!provider) {
     return res.status(400).json({ error: 'Provider configuration is missing' });
@@ -1197,39 +1254,16 @@ app.post('/api/chat', async (req, res) => {
     conversation.unshift({ role: 'system', content: CHAT_TOOL_SYSTEM_PROMPT });
   }
 
-  // Check provider type: Google Gemini OpenAI-compatible endpoint vs standard
-  const isGemini = baseUrl.toLowerCase().includes('generativelanguage.googleapis.com');
-  const wantThinking = Boolean(thinkingLevel && thinkingLevel !== 'Auto');
-  const lvl = wantThinking ? String(thinkingLevel).toLowerCase() : 'medium';
-
-  const applyThinking = (body) => {
-    if (wantThinking && isGemini) {
-      // Official Google Gemini OpenAI compatibility thinking configuration
-      if (model.toLowerCase().includes('2.5')) {
-        const budgetMap = { low: 1024, medium: 8192, high: 24576 };
-        body.extra_body = {
-          google: {
-            thinking_config: { thinking_budget: budgetMap[lvl] || 8192, include_thoughts: true },
-          },
-        };
-      } else {
-        // Gemini 3.x series (e.g. gemini-3.5-flash, gemini-3.1-flash-lite, etc.)
-        body.extra_body = {
-          google: {
-            thinking_config: { thinking_level: lvl, include_thoughts: true },
-          },
-        };
-      }
-    } else if (wantThinking) {
-      // Standard OpenAI, DeepSeek, Groq, OpenRouter, Vyce AI, etc.
-      body.reasoning_effort = lvl;
-    }
-    return body;
-  };
+  // Keep the request shape identical in chat and Agent mode. Gemini's Auto
+  // effort leaves the model default alone while requesting thought summaries.
+  const selectedThinkingLevel = normalizeThinkingLevel(thinkingLevel);
+  const requestModel = modelForProvider(baseUrl, model);
+  const configuredThinking = thinkingParams({ model: requestModel, baseUrl, level: selectedThinkingLevel });
+  const hasThinkingConfig = Object.keys(configuredThinking).length > 0;
 
   const buildRequestBody = (withTools, withThinking) => {
     const body = {
-      model,
+      model: requestModel,
       messages: conversation,
       stream: true,
       max_tokens: CHAT_MAX_TOKENS,
@@ -1238,7 +1272,7 @@ app.post('/api/chat', async (req, res) => {
       body.tools = CHAT_TOOLS;
       body.tool_choice = 'auto';
     }
-    if (withThinking) applyThinking(body);
+    if (withThinking) Object.assign(body, configuredThinking);
     return body;
   };
 
@@ -1481,30 +1515,42 @@ app.post('/api/chat', async (req, res) => {
     // Each rung drops one feature: some providers reject the thinking config,
     // and a few proxies reject `tools` outright. Losing a feature beats losing
     // the whole turn.
-    const ladder = [{ tools: useTools, thinking: wantThinking }];
-    if (wantThinking) ladder.push({ tools: useTools, thinking: false });
-    if (useTools) ladder.push({ tools: false, thinking: false });
+    // Preserve an explicitly selected effort before sacrificing optional tools.
+    // Auto may fall back from the optional thought-summary flag, but a chosen
+    // Low/Medium/High level is never silently dropped.
+    const ladder = [{ tools: useTools, thinking: hasThinkingConfig }];
+    if (useTools) ladder.push({ tools: false, thinking: hasThinkingConfig });
+    if (selectedThinkingLevel === 'Auto' && hasThinkingConfig) {
+      ladder.push({ tools: useTools, thinking: false });
+      if (useTools) ladder.push({ tools: false, thinking: false });
+    }
 
     let upstreamResponse = null;
     let toolsActive = false;
+    let thinkingActive = false;
+    let failedStep = ladder[0];
+    let lastErrorBody = '';
     for (let i = 0; i < ladder.length; i++) {
       const step = ladder[i];
+      failedStep = step;
       upstreamResponse = await callProvider(step.tools, step.thinking);
       if (upstreamResponse.ok) {
         toolsActive = step.tools;
+        thinkingActive = step.thinking;
         break;
       }
       // 401 / 404 / 429 are real errors — no point retrying a different shape.
       if (upstreamResponse.status !== 400) break;
+      lastErrorBody = await upstreamResponse.text().catch(() => '');
       if (i < ladder.length - 1) {
         console.log(
-          `Provider rejected request (HTTP 400) on ${model}; retrying with a reduced feature set`
+          `Provider rejected request (HTTP 400) on ${model}; retrying while preserving selected reasoning effort`
         );
       }
     }
 
     if (!upstreamResponse.ok) {
-      const errText = await upstreamResponse.text();
+      const errText = lastErrorBody || await upstreamResponse.text().catch(() => '');
       let errorMsg = `Provider error (HTTP ${upstreamResponse.status})`;
       try {
         const parsed = JSON.parse(errText);
@@ -1525,7 +1571,14 @@ app.post('/api/chat', async (req, res) => {
         errorMsg = 'Rate limit reached or quota exceeded on provider.';
       }
 
-      return res.status(upstreamResponse.status).json({ error: errorMsg });
+      const code = upstreamResponse.status === 400 && selectedThinkingLevel !== 'Auto' && failedStep.thinking
+        ? 'thinking_unsupported'
+        : undefined;
+      if (code) {
+        errorMsg = `The provider rejected the selected ${selectedThinkingLevel} thinking effort. Danav did not lower or remove it; check that this model and endpoint support that level. (${errorMsg})`;
+      }
+
+      return res.status(upstreamResponse.status).json({ error: errorMsg.slice(0, 1000), ...(code ? { code } : {}) });
     }
 
     // Set SSE headers
@@ -1538,7 +1591,10 @@ app.post('/api/chat', async (req, res) => {
       res.flushHeaders();
     }
 
-    writeEvent({ status: toolsActive ? 'Researching...' : 'Generating...' });
+    const startupNotices = [];
+    if (useTools && !toolsActive) startupNotices.push('Provider rejected web tools; continuing without web search.');
+    if (hasThinkingConfig && !thinkingActive) startupNotices.push('Provider rejected Gemini thought summaries; using its default effort without a thought box.');
+    writeEvent({ status: startupNotices.length ? startupNotices.join(' ') : toolsActive ? 'Researching...' : 'Generating...' });
 
     // ---- Rounds -------------------------------------------------------------
     // Rounds 0..MAX_TOOL_ROUNDS-1 may call tools. If the model is still asking
@@ -1554,7 +1610,7 @@ app.post('/api/chat', async (req, res) => {
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (round > 0) {
-        upstream = await callProvider(toolsActive, wantThinking);
+        upstream = await callProvider(toolsActive, thinkingActive);
         if (!upstream.ok) {
           const body = await upstream.text().catch(() => '');
           writeEvent({
@@ -1626,7 +1682,7 @@ app.post('/api/chat', async (req, res) => {
         });
       }
 
-      const finalRes = await callProvider(false, wantThinking, flat);
+      const finalRes = await callProvider(false, thinkingActive, flat);
       if (!finalRes.ok) {
         const body = await finalRes.text().catch(() => '');
         writeEvent({
@@ -2437,7 +2493,7 @@ async function handleSearchTool(req, res) {
 app.post('/api/search', handleSearchTool);
 
 // Agent mode: workspaces, files, commands, and the agent run itself.
-registerAgentRoutes(app, { runSearchTool });
+registerAgentRoutes(app, { runSearchTool, resolveProvider: providerWithStoredCredentials });
 
 /**
  * Run one of the read-only web tools and hand back its plain result object.
@@ -2518,6 +2574,8 @@ app.get('*', (req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend server running on http://localhost:${PORT}`);
-});
+const listen = () => console.log(`Backend server running on http://localhost:${PORT}`);
+// The Vite dev server proxies /api requests locally. Keep its backend private by
+// default in dev so the exposed Vite preview is the only public entry point.
+if (process.env.DANAV_HOST) app.listen(PORT, process.env.DANAV_HOST, listen);
+else app.listen(PORT, listen);

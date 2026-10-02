@@ -417,13 +417,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   );
 
   const thinkingOptions: Array<{ level: ThinkingLevel; iconClass: string; desc: string }> = [
+    { level: 'Auto', iconClass: 'text-zinc-400', desc: 'Use the model’s default effort' },
     { level: 'Low', iconClass: 'text-zinc-400', desc: 'Fast, concise answers' },
     { level: 'Medium', iconClass: 'text-zinc-600 dark:text-zinc-300', desc: 'Balanced depth' },
-    { level: 'High', iconClass: 'text-indigo-500 dark:text-indigo-400', desc: 'Deep thorough reasoning' },
+    { level: 'High', iconClass: 'text-indigo-500 dark:text-indigo-400', desc: 'Deeper reasoning and checks' },
   ];
 
-  const currentDisplayThinking =
-    thinkingLevel === 'Auto' ? 'Med' : thinkingLevel === 'Medium' ? 'Med' : thinkingLevel;
+  // Never label Auto as Medium: Gemini Flash-Lite has its own Auto default.
+  const currentDisplayThinking = thinkingLevel === 'Medium' ? 'Med' : thinkingLevel;
 
   // --------------------------------------------------------------------------
   // CENTERED MODE: Clean Card in Center of Screen (Welcome Screen)
@@ -609,7 +610,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                           setThinkingDropdownOpen(false);
                         }}
                         className={`flex items-center justify-between w-full px-2.5 py-1.5 text-left transition-colors cursor-pointer ${
-                          (thinkingLevel === opt.level || (thinkingLevel === 'Auto' && opt.level === 'Medium'))
+                          thinkingLevel === opt.level
                             ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-white font-medium'
                             : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800/50'
                         }`}
@@ -621,7 +622,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                             <div className="text-[9.5px] text-zinc-400">{opt.desc}</div>
                           </div>
                         </div>
-                        {(thinkingLevel === opt.level || (thinkingLevel === 'Auto' && opt.level === 'Medium')) && (
+                        {thinkingLevel === opt.level && (
                           <Check className="w-3 h-3 text-zinc-900 dark:text-white shrink-0 ml-1.5" />
                         )}
                       </button>
@@ -849,7 +850,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                       setThinkingDropdownOpen(false);
                     }}
                     className={`flex items-center justify-between w-full px-2.5 py-1.5 text-left transition-colors cursor-pointer ${
-                      (thinkingLevel === opt.level || (thinkingLevel === 'Auto' && opt.level === 'Medium'))
+                      thinkingLevel === opt.level
                         ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-white font-medium'
                         : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800/50'
                     }`}
@@ -861,7 +862,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                         <div className="text-[9.5px] text-zinc-400">{opt.desc}</div>
                       </div>
                     </div>
-                    {(thinkingLevel === opt.level || (thinkingLevel === 'Auto' && opt.level === 'Medium')) && (
+                    {thinkingLevel === opt.level && (
                       <Check className="w-3 h-3 text-zinc-900 dark:text-white shrink-0 ml-1.5" />
                     )}
                   </button>

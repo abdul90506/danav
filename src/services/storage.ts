@@ -48,6 +48,19 @@ export function saveStoredTheme(theme: Theme): void {
   }
 }
 
+export function sanitizeProvidersForClient(providers: Provider[]): Provider[] {
+  return (Array.isArray(providers) ? providers : [])
+    .filter((provider): provider is Provider => Boolean(provider && typeof provider === 'object'))
+    .map((provider) => {
+      const { apiKey, ...safeProvider } = provider;
+      delete safeProvider.clearApiKey;
+      return {
+        ...safeProvider,
+        apiKeyConfigured: Boolean((typeof apiKey === 'string' && apiKey.trim()) || provider.apiKeyConfigured),
+      };
+    });
+}
+
 export function getStoredProviders(): Provider[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.PROVIDERS);
@@ -57,20 +70,30 @@ export function getStoredProviders(): Provider[] {
         // If old mock provider was cached, migrate to Vyce AI
         if (parsed.some((p) => p.apiType === 'mock')) {
           saveStoredProviders(DEFAULT_PROVIDERS);
-          return DEFAULT_PROVIDERS;
+          return sanitizeProvidersForClient(DEFAULT_PROVIDERS);
         }
-        return parsed;
+        // Remove legacy clear-text keys from localStorage immediately, but keep
+        // the already-loaded key in memory for one backend migration attempt.
+        // A successful settings read/save replaces this with a key-free server view.
+        const safe = sanitizeProvidersForClient(parsed);
+        saveStoredProviders(safe);
+        return parsed.map((provider: Provider) => {
+          const copy = { ...provider };
+          delete copy.clearApiKey;
+          copy.apiKeyConfigured = Boolean((typeof provider.apiKey === 'string' && provider.apiKey.trim()) || provider.apiKeyConfigured);
+          return copy;
+        });
       }
     }
   } catch (e) {
     console.error('Failed reading providers from localStorage', e);
   }
-  return DEFAULT_PROVIDERS;
+  return sanitizeProvidersForClient(DEFAULT_PROVIDERS);
 }
 
 export function saveStoredProviders(providers: Provider[]): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.PROVIDERS, JSON.stringify(providers));
+    localStorage.setItem(STORAGE_KEYS.PROVIDERS, JSON.stringify(sanitizeProvidersForClient(providers)));
   } catch (e) {
     console.error('Failed saving providers to localStorage', e);
   }

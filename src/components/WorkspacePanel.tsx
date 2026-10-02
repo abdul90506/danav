@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Brain, ChevronRight, Cloud, Laptop, Loader2, RefreshCw, Trash2, X } from 'lucide-react';
 import type { AgentWorkspace } from '../types';
-import { clearMemory, deleteMemoryNote, getFile, getMemory, getTree, type MemoryNote, type TreeEntry } from '../services/agentApi';
+import { clearMemory, deleteMemoryNote, getFile, getMemory, getTree, type MemoryNote, type MemoryRun, type TreeEntry } from '../services/agentApi';
 import { FileTypeIcon } from './FileTypeIcon';
 
 interface WorkspacePanelProps {
@@ -23,6 +23,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
   const [fileLoading, setFileLoading] = useState(false);
   const [view, setView] = useState<'files' | 'memory'>('files');
   const [notes, setNotes] = useState<MemoryNote[]>([]);
+  const [runs, setRuns] = useState<MemoryRun[]>([]);
   const openRef = useRef(open);
   openRef.current = open;
 
@@ -49,7 +50,9 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
 
   const loadNotes = useCallback(async () => {
     try {
-      setNotes((await getMemory(workspace.id)).notes);
+      const memory = await getMemory(workspace.id);
+      setNotes(memory.notes);
+      setRuns(memory.runs || []);
     } catch {
       /* memory is optional */
     }
@@ -58,6 +61,8 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
   // new workspace: start over
   useEffect(() => {
     setView('files');
+    setNotes([]);
+    setRuns([]);
     loadNotes();
     setTree({});
     setOpen(new Set());
@@ -200,13 +205,19 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
         {view === 'memory' && !file ? (
           <div className="p-3 text-[12.5px]" data-testid="memory-view">
             <p className="text-zinc-500 dark:text-zinc-400 leading-relaxed mb-3">
-              Notes the agent saved for itself. They are shown to it at the start of every run in this workspace.
+              Durable workspace notes. Relevant notes and preferences are surfaced at the start of a run; older notes can be searched when needed. Check or delete anything that is stale.
             </p>
-            {notes.length === 0 && <div className="text-zinc-400 py-4">Nothing remembered yet. The agent adds notes as it learns how your project works.</div>}
+            {notes.length === 0 && runs.length === 0 && <div className="text-zinc-400 py-4">No memory yet. Durable notes and verified work will appear here as the agent uses this workspace.</div>}
             <ul className="space-y-1.5">
               {notes.map((n) => (
                 <li key={n.id} className="group flex items-start gap-2 rounded-lg px-2.5 py-2 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/70 dark:border-zinc-800">
-                  <span className="flex-1 text-zinc-700 dark:text-zinc-200 leading-snug">{n.text}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[10px] uppercase tracking-wide text-zinc-400 mb-1">
+                      {n.category || 'project'} · priority {n.importance ?? 3}/5
+                    </div>
+                    <div className="text-zinc-700 dark:text-zinc-200 leading-snug">{n.text}</div>
+                    {!!n.tags?.length && <div className="text-[10px] text-zinc-400 mt-1">{n.tags.join(' · ')}</div>}
+                  </div>
                   <button
                     onClick={async () => setNotes((await deleteMemoryNote(workspace.id, n.id)).notes)}
                     className="shrink-0 p-1 rounded text-zinc-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 focus:opacity-100"
@@ -217,9 +228,27 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
                 </li>
               ))}
             </ul>
+            <div className="mt-5 mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Recent verified work</div>
+            {runs.length === 0 ? (
+              <div className="text-[11.5px] text-zinc-400 py-2">No completed changes or checks recorded yet.</div>
+            ) : (
+              <ul className="space-y-1.5">
+                {runs.map((run) => (
+                  <li key={run.id} className="rounded-lg px-2.5 py-2 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200/70 dark:border-zinc-800">
+                    <div className="flex items-center justify-between gap-2 text-[10px] text-zinc-400">
+                      <span>{new Date(run.at).toLocaleString()}</span>
+                      <span className={run.stopReason === 'completed' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}>{run.stopReason}</span>
+                    </div>
+                    {!!run.changed.length && <div className="mt-1 text-[11.5px] text-zinc-600 dark:text-zinc-300 break-words">{run.changed.slice(0, 4).map((f) => f.path).join(' · ')}{run.changed.length > 4 ? ` · +${run.changed.length - 4} more` : ''}</div>}
+                    {!!run.checks.length && <div className="mt-1 flex flex-wrap gap-1">{run.checks.slice(0, 4).map((check, i) => <span key={`${check.name}-${i}`} className={`px-1.5 py-0.5 rounded text-[10px] ${check.passed ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'}`}>{check.name} {check.passed ? 'passed' : check.aborted ? 'stopped' : check.timedOut ? 'timed out' : `failed${check.exitCode !== undefined ? ` (${check.exitCode})` : ''}`}</span>)}</div>}
+                    {run.failures > 0 && <div className="mt-1 text-[10px] text-rose-500">{run.failures} tool failure{run.failures === 1 ? '' : 's'}</div>}
+                  </li>
+                ))}
+              </ul>
+            )}
             {notes.length > 1 && (
               <button onClick={async () => setNotes((await clearMemory(workspace.id)).notes)} className="mt-3 text-[11.5px] text-zinc-400 hover:text-rose-500">
-                Forget everything
+                Forget all notes
               </button>
             )}
           </div>

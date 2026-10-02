@@ -15,7 +15,7 @@ import net from 'node:net';
 import { applyAnyEdits, applyEdit, diffSummary, numberLines, splitLines, stripLineNumberPrefix } from './textops.js';
 import { formatOutline, outline } from './outline.js';
 import { checkSyntax, syntaxWarning } from './check.js';
-import { addNote, readNotes, removeNotes } from './memory.js';
+import { addNote, readNotes, removeNotes, searchNotes } from './memory.js';
 import { peekPartialArgs, salvageWrite, extractStringFields } from './partial.js';
 import { limits } from './config.js';
 import { WorkspaceError } from './workspaces/base.js';
@@ -77,6 +77,17 @@ const clampInt = (v, min, max, fallback) => {
 };
 
 const asBool = (v) => v === true || v === 'true' || v === 1;
+
+function isSensitiveAgentPath(value) {
+  const normalized = String(value || '').replace(/\\/g, '/').replace(/^\.\//, '');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.some((p) => ['.git', '.ssh', '.gnupg', '.aws', '.kube'].includes(p.toLowerCase()))) return true;
+  const base = parts.at(-1) || '';
+  if (/^\.env(?:$|\.)/i.test(base)) return true;
+  if (/^(?:id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\.|$)/i.test(base)) return true;
+  if (/\.(?:pem|key|p12|pfx|jks|keystore)$/i.test(base)) return true;
+  return /^(?:credentials|secrets?)(?:\.(?:json|ya?ml|toml|txt))?$/i.test(base);
+}
 
 const clip = (s, n) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
 
@@ -455,9 +466,29 @@ export const TOOL_DEFINITIONS = [
   ),
   fn('image_search', 'Find images on the web (returns URLs you can download with curl into the workspace).', { query: { type: 'string' } }, ['query']),
   fn(
+    'search_memory',
+    'Search older durable notes saved for THIS workspace. Use when a past decision, user preference, workflow, or gotcha may matter. Notes are helpful hints, not proof: verify mutable facts against the current project.',
+    { query: { type: 'string', description: 'A few specific terms from the current task.' }, limit: { type: 'integer', description: 'Maximum results (1–10, default 6).' } },
+    ['query']
+  ),
+  fn(
+    'delegate_task',
+    'Ask a bounded read-only subagent for an independent review or investigation. It can inspect only the workspace files you name; it cannot edit files, run commands, or use web tools. Use for a genuinely independent second opinion that could catch a mistake, not for trivial work. Main agent must verify its findings.',
+    {
+      task: { type: 'string', description: 'A specific analysis question or review goal (max 1200 characters).' },
+      paths: { type: 'array', items: { type: 'string' }, description: 'Up to 6 relevant workspace-relative file paths. Secret files are excluded.' },
+    },
+    ['task']
+  ),
+  fn(
     'remember',
-    'Save ONE short, durable note about THIS workspace that you will see at the start of every future run: how to run / test / build it, a convention or decision and why, a gotcha you hit, something the user prefers (language, style, libraries). Max ~300 characters, one fact per note. Do NOT save what is obvious from the files, temporary task state, or secrets.',
-    { note: { type: 'string', description: 'The fact to remember.' } },
+    'Save ONE short, durable, workspace-relevant fact for future runs: a verified command, decision and why, reusable gotcha, or user preference. Use category preference/project/decision/workflow/gotcha/other and priority 1–5. Max ~300 characters. Do NOT save secrets, temporary task state, or facts obvious from current files. If a fact is corrected, forget the old note.',
+    {
+      note: { type: 'string', description: 'One durable fact.' },
+      category: { type: 'string', enum: ['preference', 'project', 'decision', 'workflow', 'gotcha', 'other'] },
+      importance: { type: 'integer', description: '1–5; reserve 5 for durable, repeatedly useful facts.' },
+      tags: { type: 'array', items: { type: 'string' } },
+    },
     ['note']
   ),
   fn(
@@ -486,8 +517,8 @@ export const TOOL_DEFINITIONS = [
 ];
 
 export const READ_ONLY_TOOLS = new Set([
-  'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'list_processes', 'read_process_output', 'web_search', 'fetch_url',
-  'image_search',
+  'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'list_processes', 'read_process_output', 'web_search', 'fetch_url', 'search_memory',
+  'image_search', 'delegate_task',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -526,7 +557,9 @@ export function displayArgs(name, rawArgs) {
     case 'stop_process': pick.id = s('id'); break;
     case 'get_preview_url': pick.port = a.port; break;
     case 'web_search':
-    case 'image_search': pick.query = s('query'); break;
+    case 'image_search':
+    case 'search_memory': pick.query = s('query'); break;
+    case 'delegate_task': pick.task = s('task', 240); pick.files = Array.isArray(a.paths) ? Math.min(a.paths.length, 6) : 0; break;
     case 'fetch_url': pick.url = s('url'); break;
     default: break;
   }
@@ -545,9 +578,10 @@ export { peekPartialArgs };
  * @param {object} deps
  * @param {import('./workspaces/base.js').BaseWorkspace} deps.workspace
  * @param {(tool: string, args: object) => Promise<any>} deps.runSearchTool web tools from the server
+ * @param {(input: { task: string, files: Array<{path:string,content:string}>, signal?: AbortSignal }) => Promise<string>} [deps.runSubagent]
  * @param {(text: string) => string} deps.redact
  */
-export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, probe }) {
+export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact, lookup, probe }) {
   const safe = (s) => redact(String(s ?? ''));
   const rel = (abs) => ws.displayPath(abs);
 
@@ -1293,18 +1327,88 @@ export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, pro
       };
     },
 
+    // ------------------------------------------------------------- delegation
+    async delegate_task(args, ctx) {
+      const task = reqStr(args, 'task').trim().slice(0, 1200);
+      if (!task) throw new ToolError('Give the delegated reviewer a specific, non-empty task.');
+      if (typeof runSubagent !== 'function') throw new ToolError('Read-only subagents are unavailable for this run. Continue the investigation yourself.');
+      const state = ctx.state || (ctx.state = {});
+      state.subagentCalls = Number(state.subagentCalls) || 0;
+      if (state.subagentCalls >= 2) throw new ToolError('This run has reached its limit of two delegated reviews. Continue with the evidence already gathered.');
+      state.subagentCalls++;
+
+      const files = [];
+      const skipped = [];
+      let budget = 36_000;
+      const requestedPaths = Array.isArray(args.paths) ? args.paths.filter((p) => typeof p === 'string').slice(0, 6) : [];
+      for (const requested of requestedPaths) {
+        const display = requested.replace(/\\/g, '/').trim();
+        if (!display || isSensitiveAgentPath(display)) {
+          skipped.push(display ? `${clip(display, 120)} (sensitive path excluded)` : '(empty path)');
+          continue;
+        }
+        try {
+          const abs = await target(display);
+          const stat = await ws.stat(abs);
+          if (stat.type !== 'file') {
+            skipped.push(`${clip(display, 120)} (not a file)`);
+            continue;
+          }
+          if (stat.size > 16_000) {
+            skipped.push(`${clip(display, 120)} (over the 16 KB/file limit)`);
+            continue;
+          }
+          const read = await ws.readText(abs, { maxBytes: 16_000 });
+          if (read.binary) {
+            skipped.push(`${clip(display, 120)} (binary file)`);
+            continue;
+          }
+          const safeContent = safe(read.text || '');
+          const remaining = budget - rel(abs).length - 32;
+          if (remaining <= 0) break;
+          const content = safeContent.length > remaining ? `${safeContent.slice(0, remaining)}\n[truncated for delegated review]` : safeContent;
+          files.push({ path: rel(abs), content });
+          budget -= rel(abs).length + content.length + 32;
+        } catch (err) {
+          skipped.push(`${clip(display, 120)} (${safe(err.message || 'unavailable')})`);
+        }
+      }
+
+      const report = await runSubagent({ task, files, signal: ctx.signal });
+      const answer = safe(typeof report === 'string' ? report : report?.text || '').trim().slice(0, 7000);
+      if (!answer) throw new ToolError('The delegated reviewer returned no report. Continue the investigation yourself.');
+      const skippedNote = skipped.length ? `\n\nFiles excluded or unavailable: ${skipped.join('; ')}` : '';
+      return {
+        output: `Read-only subagent report (verify before relying on it):\n${answer}${skippedNote}`,
+        ui: { kind: 'delegate', task: clip(task, 240), files: files.length },
+      };
+    },
+
     // ----------------------------------------------------------------- memory
+    async search_memory(args) {
+      const query = reqStr(args, 'query');
+      const matches = searchNotes(ws.id, query, clampInt(args.limit, 1, 10, 6));
+      const output = matches.length
+        ? matches.map((n, i) => `${i + 1}. [${n.category}, priority ${n.importance}/5] ${n.text}`).join('\n')
+        : 'No saved memory matched that query.';
+      return {
+        output,
+        ui: { kind: 'memory_search', query: clip(query, 160), count: matches.length },
+      };
+    },
+
     async remember(args) {
       const note = reqStr(args, 'note');
+      if (redact(note) !== note) throw new ToolError('Memory will not save a note containing a known secret. Save a redacted summary instead.');
       let r;
       try {
-        r = addNote(ws.id, note);
+        r = addNote(ws.id, note, { category: args.category, importance: args.importance, tags: args.tags });
       } catch (e) {
         throw new ToolError(e.message);
       }
       return {
-        output: r.added ? `Saved to workspace memory (${r.total} notes): ${r.note.text}` : `Already in memory: "${r.note.text}" (nothing added).`,
-        ui: { kind: 'remember', note: clip(r.note.text, 300), saved: r.added, total: r.total },
+        output: r.added ? `Saved to workspace memory (${r.total} notes): ${r.note.text}` : `Already in memory: "${r.note.text}" (updated its metadata; ${r.total} notes total).`,
+        ui: { kind: 'remember', note: clip(r.note.text, 300), saved: r.added, total: r.total, category: r.note.category, importance: r.note.importance },
       };
     },
 

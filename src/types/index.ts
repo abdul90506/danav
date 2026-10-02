@@ -16,7 +16,11 @@ export interface Provider {
   id: string;
   name: string;
   baseUrl: string;
+  /** Sent only when the user is entering/replacing a key; never loaded from settings responses. */
   apiKey?: string;
+  apiKeyConfigured?: boolean;
+  /** One-shot settings update intent; removed before provider state is persisted. */
+  clearApiKey?: boolean;
   apiType: ApiType;
   models: Model[];
   isCustom?: boolean;

@@ -7,6 +7,7 @@ import type {
   ToolExecution,
 } from '../types';
 import { sanitizeConversations } from './storage.ts';
+import { previewAuthHeaders } from './previewAuth';
 
 export interface TestProviderResponse {
   success: boolean;
@@ -21,12 +22,12 @@ export interface FetchModelsResponse {
 }
 
 export async function testProviderConnection(
-  provider: Pick<Provider, 'baseUrl' | 'apiKey' | 'apiType'>
+  provider: Pick<Provider, 'baseUrl' | 'apiKey' | 'apiType'> & { id?: string }
 ): Promise<TestProviderResponse> {
   try {
     const res = await fetch('/api/providers/test', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...previewAuthHeaders() },
       body: JSON.stringify(provider),
     });
 
@@ -55,7 +56,7 @@ export async function fetchProviderModels(
   try {
     const res = await fetch('/api/providers/models', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...previewAuthHeaders() },
       body: JSON.stringify(provider),
     });
 
@@ -162,6 +163,7 @@ export async function streamChatCompletion({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...previewAuthHeaders(),
         },
         body: JSON.stringify(payload),
         signal,
@@ -294,7 +296,7 @@ export async function fetchBackendSettings(): Promise<{
   lastSelectedModelId?: string;
 } | null> {
   try {
-    const res = await fetch('/api/settings');
+    const res = await fetch('/api/settings', { headers: previewAuthHeaders() });
     if (res.ok) {
       const data = await res.json();
       return data.settings || null;
@@ -314,7 +316,7 @@ export async function saveBackendSettings(settings: {
   try {
     const res = await fetch('/api/settings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...previewAuthHeaders() },
       body: JSON.stringify(settings),
     });
     return res.ok;
@@ -336,7 +338,7 @@ export async function generateAIChatTitle({
   try {
     const res = await fetch('/api/chat/title', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...previewAuthHeaders() },
       body: JSON.stringify({
         provider: {
           baseUrl: provider.baseUrl,
@@ -364,7 +366,7 @@ export interface BackendConversationsData {
 
 export async function fetchBackendConversations(): Promise<BackendConversationsData | null> {
   try {
-    const res = await fetch('/api/conversations');
+    const res = await fetch('/api/conversations', { headers: previewAuthHeaders() });
     if (res.ok) {
       const data = await res.json();
       if (data.success && Array.isArray(data.conversations)) {
@@ -388,7 +390,7 @@ export async function saveBackendConversations(
     const sanitized = sanitizeConversations(conversations);
     const res = await fetch('/api/conversations', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...previewAuthHeaders() },
       body: JSON.stringify({ conversations: sanitized, activeChatId }),
     });
     return res.ok;
