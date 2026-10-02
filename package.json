@@ -16,9 +16,12 @@
     "test:markdown": "node --experimental-strip-types scripts/test-markdown.js",
     "test:splitter": "node scripts/test-splitter.js",
     "test:tooltrail": "node scripts/test-tooltrail.js",
-    "test:suites": "npm run test:splitter && npm run test:tooltrail && npm run test:markdown && npm run test:storage && npm run test:api",
+    "test:suites": "npm run test:splitter && npm run test:tooltrail && npm run test:markdown && npm run test:storage && npm run test:api && npm run test:agent",
     "typecheck": "tsc --noEmit",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "test:agent": "node scripts/test-agent.js",
+    "test:agent:sandbox": "node --env-file=.env scripts/test-agent.js --sandbox",
+    "fake-llm": "node scripts/fake-llm.js"
   },
   "dependencies": {
     "@types/prismjs": "^1.26.6",
@@ -26,6 +29,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "lucide-react": "^1.16.0",
+    "novita-sandbox": "^2.1.1",
     "prismjs": "^1.30.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

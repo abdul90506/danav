@@ -28,22 +28,14 @@ A modern, clean, professional AI chatbot application built with a flat 2D interf
   - "Test Connection" button with instant diagnostic feedback.
   - "Fetch Models" button queries `/v1/models` and populates the model selector in real time.
   - Built-in Demo provider for out-of-the-box offline testing.
-- **AI Agent Mode** (the **Agent** toggle next to the model picker):
-  - **Chronological transcript**: every step is rendered in the exact order the model produced it — Thinking panel, then each tool action, then the sentence written about it. Nothing is reordered or hidden, so an action and the text describing it always stay together.
-  - **Live actions**: files, edits, terminal commands and searches appear as compact action rows while they run, with `+/-` line counts and expandable output.
-  - **Thinking**: rendered in the same collapsible *Thinking* panel as normal chat mode.
-  - **Workspace tools**: `list_dir`, `read_file`, `write_file`, `edit_file`, `run_command`, `web_search`, `image_search`, `fetch_url`, `file_search`, `grep_search`, `delete_file`.
-  - **Persistent memory**: per-workspace memory of every file created/edited, command run and search performed. Injected back into the agent on each turn, so it never rebuilds work it already did — even after a reload.
-  - **Context management**: long sessions are compacted into a rolling summary against a token budget, so the agent never overflows the model's context window mid-task. The **memory pill** in the top-right shows context usage and everything the agent remembers.
-  - **Honest completion**: if the model tries to stop right after a tool call without saying anything, the agent nudges it to actually report what it did — and never fabricates a "successfully updated" message. Finished turns always collapse their Thinking panel.
-  - **Self-recovery**: a failed tool feeds a `[RECOVERY]` hint back to the model; if the same action fails repeatedly the agent stops looping and explains the blocker. Step budget remaining is shown to the model, and exhausting it produces a real wrap-up summary instead of silence.
+- **AI Agent Mode** (the **Agent** pill above the message box) — the model builds instead of describing: it creates and edits files, runs commands, reads the output and fixes what breaks, in a **cloud sandbox** or a **folder on this machine**. Every step is a plain line of text, in the order it happened (see [Agent mode](#-agent-mode)).
 - **Resilient search & fetching**:
   - `web_search` cascades through DuckDuckGo HTML → DuckDuckGo Lite → Bing → Mojeek → DDG Instant Answer → Wikipedia, so one blocked engine never fails a query. Results are deduped (max 2 per domain) and returned as structured cards.
   - `fetch_url` detects anti-bot/security interstitials (Cloudflare challenges, captchas, 403/429) and automatically retries through a reader proxy. If a page still can't be read it fails honestly instead of feeding the model a captcha page.
   - Long queries and URLs render on a single truncated line in the action row.
 - **Persistent Storage**:
   - Conversations, active chat, custom providers, and theme preferences survive page refreshes via local storage.
-  - Agent memory is persisted server-side in `server/data/memory.json`, keyed by workspace.
+  - Agent workspaces are listed in `server/data/agent-workspaces.json` (names, paths, sandbox ids — never keys or file contents).
 
 ## 🚀 Getting Started
 
@@ -78,6 +70,66 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 3. Click **Add Provider**, enter your base URL (e.g., `https://api.openai.com/v1`, `https://api.groq.com/openai/v1`, or `http://localhost:11434`), enter your API key, and click **Fetch Models**.
 4. Click **Save Provider**. Your newly fetched models will appear in the top model selector.
 
+## 🤖 Agent mode
+
+Turn on **Agent** and the model stops *describing* code and starts *building* it. You watch every step as it happens, as plain text — no cards, no status boxes:
+
+```
+Creating  📄 index.html  +77 −98          ← the label shimmers while it runs; +N counts up live as the model writes
+Analyzed  📄 src/App.tsx  L1–L120
+Edited    📄 style.css  L12–L18, L40  +9 −4 · 2 edits      ← click for the diff
+Ran       $ npm test  · 4.2s              ← click for the output
+Started   $ vite --host 0.0.0.0  bg-1 :5173
+Preview ready on port 5173  abc-5173.sandbox.novita.ai ↗
+```
+
+### Two kinds of workspace
+
+| | ☁ Cloud sandbox | 💻 This machine |
+|---|---|---|
+| Runs on | an isolated Linux micro-VM from [Novita Agent Sandbox](https://novita.ai) (root, Node, Python, git, gcc) | the computer running Danav — files appear right on your disk |
+| Commands | run without asking (it is disposable) | **ask first** by default — *Allow / Always allow / Deny* in the chat |
+| Web apps | get a public preview link (`get_preview_url`) | `http://localhost:PORT` |
+| Lifetime | pauses after 30 idle minutes and resumes in ~1 s with files intact; deleting the workspace kills it | a normal folder (`~/danav-workspaces/<name>` by default) |
+
+### Set up
+
+1. **Sandbox:** create a key at *novita.ai → Key Management*, then either put `NOVITA_API_KEY=sk_…` in `.env` (copy `.env.example`) or paste it in the *New workspace* dialog. The key lives on the server only — it is never sent to the browser, never shown in a response, and removed from anything the agent reads or runs.
+2. Click **Agent → New workspace…**, pick *Cloud sandbox* or *This machine*, and describe what to build.
+3. Use any model that supports **tool calling** (OpenAI-compatible `tools`). `Think` levels are passed through.
+
+**Files** (next to the workspace chip) opens a side panel with the workspace's file tree and a viewer; it refreshes while the agent works.
+
+### Tools
+
+`list_dir` · `read_file` (line ranges) · `write_file` · `edit_file` · `multi_edit` (several edits, atomically) · `delete_file` · `move_file` · `create_dir` · `grep_search` · `file_search` · `run_command` (foreground, or `background` for servers) · `read_process_output` · `stop_process` · `get_preview_url` · `web_search` · `fetch_url` · `image_search` · `update_plan`
+
+Edits are exact-match with guidance when they miss (closest lines are shown), tolerate indentation drift, keep CRLF files CRLF, and report real `+added −removed` and line ranges computed from a Myers diff.
+
+### Safety model
+
+- **Local file tools cannot leave the workspace folder** (`..`, absolute paths and symlinks are checked; `.ssh`, `.aws`, `.gnupg`, `.kube` are blocked; `.git` is read-only for the file tools).
+- **Commands run with the app's own secrets stripped from their environment**, and anything resembling those secrets is redacted from file/command output before it reaches the model or the chat. Catastrophic commands (`rm -rf /`, `mkfs`, fork bombs, …) are blocked outright on local workspaces — a heuristic, not a sandbox: that is why local workspaces ask before running commands.
+- **The web cannot be a way in:** `fetch_url` refuses localhost, private, link-local and cloud-metadata addresses, so a hostile page cannot make the agent read your local services.
+- **Agent routes are not reachable from other websites:** `/api/agent/*` sends no CORS headers, requires a custom header, and only answers on `localhost` unless you list more hosts in `DANAV_ALLOWED_HOSTS`. If you expose Danav publicly, put it behind authentication first — whoever can reach it can run commands in your workspaces.
+- Runs are bounded (steps, time, per-command timeout), one run per workspace at a time, and **Stop** kills whatever is running — including child processes.
+
+### Configuration
+
+| Variable | Default | |
+|---|---|---|
+| `NOVITA_API_KEY` | – | cloud sandboxes |
+| `DANAV_WORKSPACES_DIR` | `~/danav-workspaces` | where new local workspaces go |
+| `DANAV_ALLOW_ANY_LOCAL_PATH` | off | `1` lets a local workspace be any folder (never your whole home folder) |
+| `DANAV_ALLOWED_HOSTS` | loopback only | extra hostnames for `/api/agent/*` (e.g. `.trycloudflare.com`) |
+| `NOVITA_SANDBOX_TIMEOUT_MINUTES` | 30 | idle time before a sandbox pauses |
+| `DANAV_AGENT_MAX_STEPS` / `_MAX_RUN_MINUTES` | 80 / 45 | limits for one run |
+| `DANAV_AGENT_COMMAND_TIMEOUT_SECONDS` | 120 | default per-command timeout (max 900) |
+| `DANAV_AGENT_CONTEXT_CHARS` | 420000 | old tool output is trimmed beyond this |
+| `DANAV_MAX_TOKENS` | 32768 | output cap per model round |
+
+On **Windows**, local commands run in PowerShell (set `DANAV_SHELL=cmd` for `cmd.exe`).
+
 ## 🧪 Testing
 
 Full app / streaming suite (requires the backend and Vite dev server running):
@@ -85,8 +137,14 @@ Full app / streaming suite (requires the backend and Vite dev server running):
 node scripts/test-all.js
 ```
 
-Agent + memory suite (requires the backend running on port 3001):
+The repo's unit suites (`test:splitter`, `test:tooltrail`, `test:markdown`, `test:storage`, `test:api`, `test:agent`) run together with `npm run test:suites`. The TypeScript ones use `--experimental-strip-types`, so they need **Node 22.6+** (`test:agent` works on Node 20 too).
+
+Agent mode (no API keys or network needed — a scripted fake LLM drives the real loop, tools, HTTP routes and the UI's data path):
 ```bash
 npm run test:agent
 ```
-Override the target with `AGENT_TEST_URL=http://localhost:3011 npm run test:agent`.
+Also hit a **real** Novita sandbox (creates one sandbox, uses it, kills it):
+```bash
+npm run test:agent:sandbox        # needs NOVITA_API_KEY in .env
+```
+Try Agent mode in the browser without a model key: `npm run fake-llm`, then add a provider with base URL `http://127.0.0.1:4010/v1` and model `fake-build`.

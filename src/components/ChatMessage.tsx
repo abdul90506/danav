@@ -2,11 +2,13 @@ import React, { useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Check, Copy, Brain, ChevronDown, Pencil, RotateCcw, Play, File, Folder } from 'lucide-react';
-import { Message, MessageBlock, MovieItem } from '../types';
+import { AgentAction, Message, MessageBlock, MovieItem } from '../types';
 import { CodeBlock } from './CodeBlock';
 import { ToolExecutionCard } from './ToolExecutionCard';
 import { MovieCard } from './MovieCard';
 import { normalizeMessageContent } from '../utils/markdownNormalize';
+import { AgentActionRow } from './AgentActionRow';
+import { changedSummary, isLive, stopNotice } from '../agent/format';
 
 interface ChatMessageProps {
   message: Message;
@@ -14,6 +16,8 @@ interface ChatMessageProps {
   onRegenerateResponse?: (assistantMessageId: string) => void;
   onContinueResponse?: (assistantMessageId: string) => void;
   onWatchMedia?: (mediaId: string, mediaType: 'movie' | 'tv' | string, title?: string) => void;
+  /** Agent mode: the user answered an "Allow this command?" prompt. */
+  onAgentApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
 }
 
 /**
@@ -191,6 +195,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
   onRegenerateResponse,
   onContinueResponse,
   onWatchMedia,
+  onAgentApproval,
 }) => {
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -204,6 +209,8 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
 
   const safeMessageContent = normalizeMessageContent(message.content || '');
   const blocks = getMessageBlocks(message);
+  // An agent turn is a chronological list of narration + actions; it renders as one timeline.
+  const isAgentTimeline = Boolean(message.agent) || blocks.some((b) => b.type === 'text' || b.type === 'action');
 
   const handleCopyMessage = async () => {
     try {
@@ -625,12 +632,92 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
   // `Boolean(message.isGenerating)`.
   const isWorking = Boolean(message.isGenerating);
 
+  /** thinking / narration / action rows, in order; consecutive actions share one tight group */
+  const renderAgentTimeline = () => {
+    const out: React.ReactNode[] = [];
+    let group: AgentAction[] = [];
+    const flush = () => {
+      if (group.length === 0) return;
+      const first = group[0].id;
+      out.push(
+        <div key={`g-${first}`} className="my-1.5 space-y-px">
+          {group.map((a) => (
+            <AgentActionRow key={a.id} action={a} onApproval={onAgentApproval} />
+          ))}
+        </div>
+      );
+      group = [];
+    };
+    for (const block of blocks) {
+      if (block.type === 'action') {
+        group.push(block.action);
+        continue;
+      }
+      flush();
+      if (block.type === 'thinking') {
+        out.push(
+          <div key={block.id} className="my-1">
+            <ThinkingSection
+              thinkingContent={block.content}
+              isStillThinking={Boolean(block.isStillThinking && !message.error)}
+              thinkingDuration={block.duration}
+            />
+          </div>
+        );
+      } else if (block.type === 'text') {
+        out.push(
+          block.notice ? (
+            <div key={block.id} className="my-1.5 text-[12px] italic text-zinc-400 dark:text-zinc-500">
+              {block.content}
+            </div>
+          ) : (
+            <div key={block.id} className="markdown-body my-2">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} urlTransform={(uri) => uri}>
+                {normalizeMessageContent(block.content)}
+              </ReactMarkdown>
+            </div>
+          )
+        );
+      }
+    }
+    flush();
+    return out;
+  };
+
+  // "Working…" fills the quiet moments between steps (the model is deciding what to do next).
+  const lastBlock = blocks[blocks.length - 1];
+  const showWorking =
+    Boolean(message.isGenerating) &&
+    !message.error &&
+    (!lastBlock ||
+      (lastBlock.type === 'action' && !isLive(lastBlock.action)) ||
+      (lastBlock.type === 'thinking' && !lastBlock.isStillThinking) ||
+      (lastBlock.type === 'text' && Boolean(lastBlock.notice)));
+  const workingText = message.agentStatus && message.agentStatus !== 'Working…' ? message.agentStatus : 'Working…';
+
+  const summary = !message.isGenerating ? changedSummary(message.agentRun?.changed) : undefined;
+  const notice = !message.isGenerating ? stopNotice(message.agentRun?.stopReason) : undefined;
+  const runFooter =
+    summary || notice ? (
+      <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-zinc-400 dark:text-zinc-500 select-none" data-testid="agent-run-footer">
+        {summary && (
+          <span>
+            Changed {summary.files} file{summary.files === 1 ? '' : 's'}{' '}
+            {summary.added > 0 && <span className="font-mono text-emerald-600 dark:text-emerald-400">+{summary.added}</span>}
+            {summary.added > 0 && summary.removed > 0 && ' '}
+            {summary.removed > 0 && <span className="font-mono text-rose-500 dark:text-rose-400">−{summary.removed}</span>}
+          </span>
+        )}
+        {notice && <span>{notice}</span>}
+      </div>
+    ) : null;
+
   // Assistant / AI Message: left-aligned, natural flow
   return (
     <div className="flex justify-start w-full group mb-6 text-left">
       <div className="w-full text-zinc-900 dark:text-zinc-100">
         {/* Timeline blocks: tools and thinking rendered in chronological sequence */}
-        {blocks.length > 0 && (
+        {blocks.length > 0 && !isAgentTimeline && (
           <div className="mb-2 space-y-1">
             {blocks.map((block) => {
               if (block.type === 'tool') {
@@ -660,16 +747,30 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
           </div>
         )}
 
+        {/* Agent turn: thinking, narration and actions in the exact order they happened */}
+        {isAgentTimeline && (
+          <div data-testid="agent-timeline">
+            {renderAgentTimeline()}
+            {showWorking && (
+              <div className="mt-1 text-[13px] leading-6 select-none">
+                <span className="agent-shimmer">{workingText}</span>
+              </div>
+            )}
+            {runFooter}
+          </div>
+        )}
+
         {/* Typing dot — ONLY while actually generating. Suppressed while
             tool/thinking cards are on screen or content is present. */}
-        {message.isGenerating &&
+        {!isAgentTimeline &&
+        message.isGenerating &&
         !safeMessageContent.trim() &&
         !message.error &&
         blocks.length === 0 ? (
           <div className="flex items-center h-6">
             <span className="w-2 h-2 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
           </div>
-        ) : safeMessageContent.trim() ? (
+        ) : safeMessageContent.trim() && !isAgentTimeline ? (
           <div className="markdown-body">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}

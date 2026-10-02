@@ -1,11 +1,17 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { PanelLeft } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { ChatArea } from './components/ChatArea';
 import { ChatInput } from './components/ChatInput';
 import { SettingsModal } from './components/SettingsModal';
 import { MoviePlayerModal } from './components/MoviePlayerModal';
+import { AgentControls } from './components/AgentControls';
+import { WorkspaceDialog } from './components/WorkspaceDialog';
+import { WorkspacePanel } from './components/WorkspacePanel';
 import {
+  AgentAction,
+  AgentConfig,
+  AgentWorkspace,
   Conversation,
   Message,
   MessageBlock,
@@ -35,6 +41,15 @@ import {
   saveBackendConversations,
   generateAIChatTitle,
 } from './services/api';
+import {
+  answerApproval,
+  deleteWorkspace as deleteAgentWorkspace,
+  getAgentConfig,
+  listWorkspaces,
+  updateWorkspace as updateAgentWorkspace,
+} from './services/agentApi';
+import { runAgentTurn } from './agent/runAgentTurn';
+import { collectActivity } from './agent/format';
 import { SmoothStreamer } from './utils/smoothStream';
 
 export const App: React.FC = () => {
@@ -55,6 +70,14 @@ export const App: React.FC = () => {
   // Settings Modal state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
+  // Agent mode: server capabilities, the workspaces, and the dialog / files panel
+  const [agentConfig, setAgentConfig] = useState<AgentConfig | null>(null);
+  const [workspaces, setWorkspaces] = useState<AgentWorkspace[]>([]);
+  const [workspacesLoaded, setWorkspacesLoaded] = useState(false);
+  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [filesRefresh, setFilesRefresh] = useState(0);
+
   // FlixRaid Movie Player Modal state
   const [activeMoviePlayer, setActiveMoviePlayer] = useState<{
     isOpen: boolean;
@@ -69,6 +92,12 @@ export const App: React.FC = () => {
 
   // Backend save debouncer ref
   const backendSaveTimerRef = useRef<any>(null);
+
+  // Has the server's copy of the conversations been READ yet?
+  // Until it has, this tab's local state (which is just one empty chat in a fresh browser
+  // profile) must never be pushed over it — that is how a slow first request used to wipe
+  // the saved chats.
+  const [backendHydrated, setBackendHydrated] = useState(false);
 
   // Fetch settings and conversations from Backend on mount
   useEffect(() => {
@@ -91,21 +120,36 @@ export const App: React.FC = () => {
       }
     });
 
-    fetchBackendConversations().then((data) => {
-      if (data && Array.isArray(data.conversations) && data.conversations.length > 0) {
-        setConversations(data.conversations);
-        saveStoredConversations(data.conversations);
-        if (data.activeChatId) {
-          setActiveChatId(data.activeChatId);
-          saveStoredActiveChatId(data.activeChatId);
+    let cancelled = false;
+    const RETRY_MS = [2000, 4000, 8000, 15000];
+    const hydrate = async (attempt = 0) => {
+      const data = await fetchBackendConversations();
+      if (cancelled) return;
+      if (data) {
+        if (Array.isArray(data.conversations) && data.conversations.length > 0) {
+          setConversations(data.conversations);
+          saveStoredConversations(data.conversations);
+          if (data.activeChatId) {
+            setActiveChatId(data.activeChatId);
+            saveStoredActiveChatId(data.activeChatId);
+          }
+        } else {
+          const local = getStoredConversations();
+          if (local.length > 0) {
+            saveBackendConversations(local, getStoredActiveChatId());
+          }
         }
-      } else {
-        const local = getStoredConversations();
-        if (local.length > 0) {
-          saveBackendConversations(local, getStoredActiveChatId());
-        }
+        setBackendHydrated(true);
+      } else if (attempt < RETRY_MS.length) {
+        // The server did not answer (starting up, a proxy hiccup): try again rather than
+        // guessing — saving before we have read it could overwrite what it holds.
+        setTimeout(() => hydrate(attempt + 1), RETRY_MS[attempt]);
       }
-    });
+    };
+    hydrate();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Conversations state
@@ -164,6 +208,8 @@ export const App: React.FC = () => {
   // Persist conversations to both LocalStorage and Backend Disk
   useEffect(() => {
     saveStoredConversations(conversations);
+    // Not before the server's own copy has been read (see backendHydrated above).
+    if (!backendHydrated) return;
     if (backendSaveTimerRef.current) clearTimeout(backendSaveTimerRef.current);
     backendSaveTimerRef.current = setTimeout(() => {
       saveBackendConversations(conversations, activeChatId);
@@ -171,7 +217,7 @@ export const App: React.FC = () => {
     return () => {
       if (backendSaveTimerRef.current) clearTimeout(backendSaveTimerRef.current);
     };
-  }, [conversations, activeChatId]);
+  }, [conversations, activeChatId, backendHydrated]);
 
   // Persist activeChatId
   useEffect(() => {
@@ -246,6 +292,9 @@ export const App: React.FC = () => {
 
     const newChat = createNewConversation(currentProvId, currentModId);
     newChat.thinkingLevel = currentThinking;
+    // Starting another chat while in Agent mode keeps you in Agent mode, in the same workspace.
+    newChat.agentMode = activeConversation?.agentMode;
+    newChat.agentWorkspaceId = activeConversation?.agentWorkspaceId ?? null;
 
     setConversations((prev) => [newChat, ...prev]);
     setActiveChatId(newChat.id);
@@ -362,6 +411,99 @@ export const App: React.FC = () => {
     );
   };
 
+  // ---- Agent mode ------------------------------------------------------------
+  const refreshAgent = useCallback(async () => {
+    try {
+      setAgentConfig(await getAgentConfig());
+    } catch {
+      /* an older server without agent routes: the toggle explains itself on first use */
+    }
+    try {
+      setWorkspaces(await listWorkspaces());
+      setWorkspacesLoaded(true);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshAgent();
+  }, [refreshAgent]);
+
+  const patchActive = (patch: Partial<Conversation>) => {
+    if (!activeConversation) return;
+    setConversations((prev) =>
+      prev.map((c) => (c.id === activeConversation.id ? { ...c, ...patch, updatedAt: Date.now() } : c))
+    );
+  };
+
+  // A workspace that was deleted elsewhere must not stay selected.
+  useEffect(() => {
+    if (!workspacesLoaded) return;
+    setConversations((prev) => {
+      const ids = new Set(workspaces.map((w) => w.id));
+      return prev.some((c) => c.agentWorkspaceId && !ids.has(c.agentWorkspaceId))
+        ? prev.map((c) => (c.agentWorkspaceId && !ids.has(c.agentWorkspaceId) ? { ...c, agentWorkspaceId: null } : c))
+        : prev;
+    });
+  }, [workspaces, workspacesLoaded]);
+
+  const activeWorkspace = useMemo(
+    () => workspaces.find((w) => w.id === activeConversation?.agentWorkspaceId) || null,
+    [workspaces, activeConversation?.agentWorkspaceId]
+  );
+
+  const handleToggleAgent = () => {
+    const turningOn = !activeConversation?.agentMode;
+    patchActive({ agentMode: turningOn });
+    if (!turningOn) setFilesOpen(false);
+    // Turning it on with nothing to work in: go straight to creating a workspace.
+    if (turningOn && !activeConversation?.agentWorkspaceId && workspaces.length === 0) setWorkspaceDialogOpen(true);
+    else if (turningOn && !activeConversation?.agentWorkspaceId && workspaces.length > 0) {
+      patchActive({ agentMode: true, agentWorkspaceId: workspaces[0].id });
+    }
+  };
+
+  const handleWorkspaceCreated = async (ws: AgentWorkspace) => {
+    await refreshAgent();
+    patchActive({ agentMode: true, agentWorkspaceId: ws.id });
+    setWorkspaceDialogOpen(false);
+  };
+
+  const handleDeleteWorkspace = async (id: string) => {
+    try {
+      await deleteAgentWorkspace(id);
+    } catch (e: any) {
+      alert(e?.message || 'Could not delete the workspace.');
+      return;
+    }
+    await refreshAgent();
+    setConversations((prev) => prev.map((c) => (c.agentWorkspaceId === id ? { ...c, agentWorkspaceId: null } : c)));
+  };
+
+  const handleToggleAutoRun = async (id: string, autoRun: boolean) => {
+    try {
+      await updateAgentWorkspace(id, { autoRun });
+    } catch (e: any) {
+      alert(e?.message || 'Could not change that setting.');
+    }
+    refreshAgent();
+  };
+
+  const handleAgentApproval = async (action: AgentAction, allow: boolean, always: boolean) => {
+    if (!action.approval) return;
+    try {
+      await answerApproval(action.approval.key, {
+        allow,
+        always,
+        workspaceId: activeConversation?.agentWorkspaceId || undefined,
+      });
+      if (always) refreshAgent();
+    } catch {
+      /* the run already ended — nothing is waiting any more */
+    }
+  };
+
   // Send Message
   const handleSendMessage = async (
     textToSend?: string,
@@ -393,6 +535,15 @@ export const App: React.FC = () => {
       return;
     }
 
+    // Agent mode works IN a workspace. Without one, ask for it (the typed text stays in the box).
+    const agentWorkspace = activeConversation.agentMode
+      ? workspaces.find((w) => w.id === activeConversation.agentWorkspaceId)
+      : undefined;
+    if (activeConversation.agentMode && !agentWorkspace) {
+      setWorkspaceDialogOpen(true);
+      return;
+    }
+
     const messageContent = rawText || (currentAttachments[0] ? `Attached file: ${currentAttachments[0].name}` : '');
 
     // User message
@@ -414,6 +565,7 @@ export const App: React.FC = () => {
       isGenerating: true,
       blocks: [],
       toolExecutions: [],
+      ...(agentWorkspace ? { agent: true } : {}),
     };
 
     // Auto-update conversation title: use quick fallback first, then update with AI-generated title
@@ -486,6 +638,73 @@ export const App: React.FC = () => {
       })),
       { role: 'user' as const, content: augmentedPrompt },
     ];
+
+    // ---- Agent mode: the model works in the workspace with real tools --------
+    if (agentWorkspace) {
+      const convId = activeConversation.id;
+      const patchAssistant = (patch: Partial<Message>) =>
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id !== convId
+              ? c
+              : {
+                  ...c,
+                  messages: c.messages.map((m) => (m.id === assistantMessageId ? { ...m, ...patch } : m)),
+                  updatedAt: Date.now(),
+                }
+          )
+        );
+      const MUTATING = new Set(['write_file', 'edit_file', 'multi_edit', 'delete_file', 'move_file', 'create_dir', 'run_command']);
+      let settledMutations = 0;
+
+      await runAgentTurn({
+        provider: activeProvider,
+        model: activeModelId,
+        thinkingLevel: activeConversation.thinkingLevel,
+        messages: historyPayload,
+        workspaceId: agentWorkspace.id,
+        activity: collectActivity(existingMessages),
+        signal: controller.signal,
+        onStreamers: (text, thinking) => {
+          contentStreamerRef.current = text;
+          thinkingStreamerRef.current = thinking;
+        },
+        onUpdate: (snap, status) => {
+          patchAssistant({
+            content: snap.content,
+            thinkingContent: snap.thinkingContent,
+            blocks: snap.blocks,
+            agent: true,
+            agentRun: snap.agentRun,
+            agentStatus: status,
+          });
+          // keep an open Files panel live while the agent works
+          const settled = snap.blocks.filter(
+            (b) => b.type === 'action' && MUTATING.has(b.action.tool) && (b.action.status === 'done' || b.action.status === 'error')
+          ).length;
+          if (settled !== settledMutations) {
+            settledMutations = settled;
+            setFilesRefresh((n) => n + 1);
+          }
+        },
+        onFinish: (snap, error) => {
+          patchAssistant({
+            content: snap.content || (error ? 'Unable to complete the request.' : ''),
+            thinkingContent: snap.thinkingContent,
+            blocks: snap.blocks,
+            agent: true,
+            agentRun: snap.agentRun,
+            agentStatus: undefined,
+            isGenerating: false,
+            ...(error ? { error } : {}),
+          });
+          setIsLoading(false);
+          abortControllerRef.current = null;
+          setFilesRefresh((n) => n + 1);
+        },
+      });
+      return;
+    }
 
     // Tool activity and chronological blocks for THIS turn.
     let toolExecutions: ToolExecution[] = [];
@@ -767,6 +986,23 @@ export const App: React.FC = () => {
     handleSendMessage('Continue');
   };
 
+  const agentOn = Boolean(activeConversation?.agentMode);
+  const agentControlsNode = (
+    <AgentControls
+      enabled={agentOn}
+      onToggle={handleToggleAgent}
+      workspaces={workspaces}
+      activeWorkspaceId={activeConversation?.agentWorkspaceId ?? null}
+      onSelectWorkspace={(id) => patchActive({ agentWorkspaceId: id })}
+      onCreate={() => setWorkspaceDialogOpen(true)}
+      onDelete={handleDeleteWorkspace}
+      onToggleAutoRun={handleToggleAutoRun}
+      filesOpen={filesOpen}
+      onToggleFiles={() => setFilesOpen((v) => !v)}
+      busy={isLoading}
+    />
+  );
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 font-sans">
       {/* Sidebar */}
@@ -803,10 +1039,12 @@ export const App: React.FC = () => {
           <div className="flex-1 flex flex-col items-center justify-center w-full px-4 -translate-y-6 sm:-translate-y-8 animate-in fade-in duration-200">
             <div className="text-center mb-6 select-none">
               <h1 className="text-2xl sm:text-3xl font-semibold text-zinc-900 dark:text-zinc-100 tracking-tight mb-2">
-                How can I help you today?
+                {agentOn ? 'What should we build?' : 'How can I help you today?'}
               </h1>
               <p className="text-xs sm:text-sm text-zinc-400 dark:text-zinc-500">
-                Ask anything, write code, or explore ideas.
+                {agentOn
+                  ? 'Agent mode: I create files, run commands and show you the result.'
+                  : 'Ask anything, write code, or explore ideas.'}
               </p>
             </div>
 
@@ -817,13 +1055,14 @@ export const App: React.FC = () => {
               onSend={(atts) => handleSendMessage(undefined, atts, true)}
               isLoading={isLoading}
               onStop={handleStop}
-              placeholder="Ask anything..."
+              placeholder={agentOn ? 'Describe what to build or change…' : 'Ask anything...'}
               providers={providers}
               selectedProviderId={activeConversation?.selectedProviderId || providers[0]?.id}
               selectedModelId={activeModelId}
               thinkingLevel={activeConversation?.thinkingLevel || 'Auto'}
               onSelectModel={handleSelectModel}
               onSelectThinkingLevel={handleSelectThinkingLevel}
+              agentControls={agentControlsNode}
             />
           </div>
         ) : (
@@ -836,6 +1075,8 @@ export const App: React.FC = () => {
               onEditUserMessage={handleEditUserMessage}
               onRegenerateResponse={handleRegenerateResponse}
               onContinueResponse={handleContinueResponse}
+              onAgentApproval={handleAgentApproval}
+              agentMode={agentOn}
               onWatchMedia={(id, type, title) => {
                 setActiveMoviePlayer({
                   isOpen: true,
@@ -856,19 +1097,25 @@ export const App: React.FC = () => {
                   onSend={(atts) => handleSendMessage(undefined, atts, true)}
                   isLoading={isLoading}
                   onStop={handleStop}
-                  placeholder="Ask anything..."
+                  placeholder={agentOn ? 'Describe what to build or change…' : 'Ask anything...'}
                   providers={providers}
                   selectedProviderId={activeConversation.selectedProviderId || providers[0]?.id}
                   selectedModelId={activeModelId}
                   thinkingLevel={activeConversation.thinkingLevel || 'Auto'}
                   onSelectModel={handleSelectModel}
                   onSelectThinkingLevel={handleSelectThinkingLevel}
+                  agentControls={agentControlsNode}
                 />
               </div>
             </div>
           </div>
         )}
       </div>
+
+      {/* Agent mode: browse the workspace the agent is working in */}
+      {agentOn && filesOpen && activeWorkspace && (
+        <WorkspacePanel workspace={activeWorkspace} refreshToken={filesRefresh} onClose={() => setFilesOpen(false)} />
+      )}
 
       {/* Settings Modal */}
       <SettingsModal
@@ -878,6 +1125,15 @@ export const App: React.FC = () => {
         onThemeChange={handleThemeChange}
         providers={providers}
         onSaveProviders={handleSaveProviders}
+      />
+
+      {/* Agent mode: create a workspace (cloud sandbox or a folder on this machine) */}
+      <WorkspaceDialog
+        isOpen={workspaceDialogOpen}
+        onClose={() => setWorkspaceDialogOpen(false)}
+        config={agentConfig}
+        onCreated={handleWorkspaceCreated}
+        onConfigChanged={refreshAgent}
       />
 
       {/* FlixRaid Movie & Series Streaming Player Modal */}

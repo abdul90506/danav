@@ -81,6 +81,145 @@ export interface ToolExecution {
   movies?: MovieItem[];
 }
 
+// ---------------------------------------------------------------------------
+// Agent mode
+// ---------------------------------------------------------------------------
+
+export type AgentActionStatus =
+  | 'pending' // the model is still writing the tool call
+  | 'queued' // written, waiting for the actions before it to finish
+  | 'running'
+  | 'awaiting_approval'
+  | 'done'
+  | 'error'
+  | 'denied';
+
+export interface AgentDiffLine {
+  /** ' ' context, '+' added, '-' removed */
+  t: ' ' | '+' | '-';
+  n?: number;
+  o?: number;
+  s: string;
+}
+
+export interface AgentDiffHunk {
+  newStart: number;
+  lines: AgentDiffLine[];
+}
+
+/** The server's small summary of what a tool did — never file contents. */
+export interface AgentActionResult {
+  kind: string;
+  ok?: boolean;
+  path?: string;
+  from?: string;
+  to?: string;
+  created?: boolean;
+  added?: number;
+  removed?: number;
+  totalLines?: number;
+  startLine?: number;
+  endLine?: number;
+  truncated?: boolean;
+  ranges?: Array<[number, number]>;
+  edits?: number;
+  replacements?: number;
+  hunks?: AgentDiffHunk[];
+  /** A multi-file edit: what happened to each file. */
+  changes?: Array<{
+    path: string;
+    added: number;
+    removed: number;
+    edits?: number;
+    ranges?: Array<[number, number]>;
+    hunks?: AgentDiffHunk[];
+    totalLines?: number;
+  }>;
+  language?: string;
+  note?: string;
+  saved?: boolean;
+  replacement?: string;
+  fileCount?: number;
+  dryRun?: boolean;
+  /** A write rescued from a call that was cut off by the output limit. */
+  partial?: boolean;
+  /** Result of the syntax check run right after a write. */
+  check?: { lang: string; ok: boolean; message?: string; path?: string };
+  command?: string;
+  exitCode?: number | null;
+  durationMs?: number;
+  timedOut?: boolean;
+  aborted?: boolean;
+  denied?: boolean;
+  id?: string;
+  pid?: number;
+  exited?: boolean;
+  reused?: boolean;
+  listening?: boolean;
+  running?: boolean;
+  ports?: number[];
+  pattern?: string;
+  count?: number;
+  files?: number;
+  query?: string;
+  url?: string;
+  title?: string;
+  port?: number;
+  status?: number;
+  isDir?: boolean;
+  images?: ToolImage[];
+  todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>;
+  done?: number;
+  total?: number;
+}
+
+/** One thing the agent did: edit a file, run a command, search… */
+export interface AgentAction {
+  id: string;
+  tool: string;
+  status: AgentActionStatus;
+  /** Small, safe arguments for display (path, command, query…). */
+  args?: Record<string, any>;
+  /**
+   * Live numbers while the model is still writing this call: "+N −M" as lines are written, and the
+   * last few lines being typed. Gone once the action finishes (the result carries the exact numbers).
+   */
+  progress?: { added: number; removed?: number; tail?: string[] };
+  result?: AgentActionResult;
+  /** Terminal output (bounded). */
+  output?: string;
+  error?: string;
+  approval?: { key: string; command: string } | null;
+  startedAt?: number;
+  endedAt?: number;
+  durationMs?: number;
+}
+
+export interface AgentWorkspace {
+  id: string;
+  name: string;
+  kind: 'sandbox' | 'local';
+  root: string;
+  autoRun: boolean;
+  sandboxId?: string;
+  createdAt?: number;
+}
+
+export interface AgentConfig {
+  novita: { configured: boolean; source: 'env' | 'saved' | null };
+  local: { workspacesDir: string; allowAnyPath: boolean; platform: string };
+  limits: { maxSteps: number; commandTimeoutSeconds: number };
+  tools: string[];
+}
+
+export interface AgentRunSummary {
+  stopReason?: string;
+  steps?: number;
+  toolCalls?: number;
+  durationMs?: number;
+  changed?: Array<{ path: string; added: number; removed: number }>;
+}
+
 export type MessageBlock =
   | {
       id: string;
@@ -93,6 +232,19 @@ export type MessageBlock =
       id: string;
       type: 'tool';
       tool: ToolExecution;
+    }
+  | {
+      /** The agent's narration, in order with the actions around it. */
+      id: string;
+      type: 'text';
+      content: string;
+      /** A one-line system notice (e.g. "sandbox was recreated"), shown muted. */
+      notice?: boolean;
+    }
+  | {
+      id: string;
+      type: 'action';
+      action: AgentAction;
     };
 
 export interface Message {
@@ -107,6 +259,11 @@ export interface Message {
   isGenerating?: boolean;
   toolExecutions?: ToolExecution[];
   blocks?: MessageBlock[];
+  /** Produced by an agent run (chronological text + action blocks). */
+  agent?: boolean;
+  agentRun?: AgentRunSummary;
+  /** Transient note while an agent turn runs ("Provider busy — retrying…"). */
+  agentStatus?: string;
 }
 
 export interface Conversation {
@@ -117,6 +274,9 @@ export interface Conversation {
   selectedModelId: string;
   thinkingLevel: ThinkingLevel;
   isPinned?: boolean;
+  /** Agent mode: the model works in a workspace with real tools. */
+  agentMode?: boolean;
+  agentWorkspaceId?: string | null;
   createdAt: number;
   updatedAt: number;
 }

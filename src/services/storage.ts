@@ -1,4 +1,4 @@
-import type { Conversation, Provider, Theme } from '../types';
+import type { AgentAction, Conversation, MessageBlock, Provider, Theme } from '../types';
 
 const STORAGE_KEYS = {
   CONVERSATIONS: 'danav_chat_history_v2',
@@ -76,6 +76,25 @@ export function saveStoredProviders(providers: Provider[]): void {
   }
 }
 
+const LIVE_ACTION = new Set(['pending', 'queued', 'running', 'awaiting_approval']);
+
+/**
+ * An agent action as it is kept between sessions: one that never finished is
+ * settled as interrupted (it must not come back shimmering), and terminal
+ * output is bounded so a long build can't fill localStorage.
+ */
+function settleAction(a: AgentAction): AgentAction {
+  const next: AgentAction = { ...a };
+  if (LIVE_ACTION.has(a.status)) {
+    next.status = 'error';
+    next.error = 'Interrupted';
+    next.approval = null;
+    delete next.progress;
+  }
+  if (typeof next.output === 'string' && next.output.length > 4000) next.output = next.output.slice(-4000);
+  return next;
+}
+
 export function sanitizeConversations(conversations: Conversation[]): Conversation[] {
   if (!Array.isArray(conversations)) return [];
   return conversations.map((conv) => ({
@@ -96,22 +115,23 @@ export function sanitizeConversations(conversations: Conversation[]): Conversati
         : {}),
       ...(msg.blocks
         ? {
-            blocks: msg.blocks.map((b) =>
-              b.type === 'tool'
-                ? {
-                    ...b,
-                    tool:
-                      b.tool.status === 'running'
-                        ? { ...b.tool, status: 'done' as const, ok: false }
-                        : b.tool,
-                  }
-                : {
-                    ...b,
-                    isStillThinking: false,
-                  }
-            ),
+            blocks: msg.blocks.map((b): MessageBlock => {
+              if (b.type === 'tool') {
+                return {
+                  ...b,
+                  tool:
+                    b.tool.status === 'running'
+                      ? { ...b.tool, status: 'done' as const, ok: false }
+                      : b.tool,
+                };
+              }
+              if (b.type === 'action') return { ...b, action: settleAction(b.action) };
+              if (b.type === 'text') return b;
+              return { ...b, isStillThinking: false };
+            }),
           }
         : {}),
+      ...(msg.agentStatus ? { agentStatus: undefined } : {}),
     })),
   }));
 }

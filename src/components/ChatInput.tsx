@@ -29,6 +29,8 @@ interface ChatInputProps {
   thinkingLevel: ThinkingLevel;
   onSelectModel: (providerId: string, modelId: string) => void;
   onSelectThinkingLevel: (level: ThinkingLevel) => void;
+  /** Agent switch + workspace picker, shown in a row above the message box. */
+  agentControls?: React.ReactNode;
 }
 
 // Compact, responsive Model Selector Popup with Provider Tabs and Search Filter
@@ -247,6 +249,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   thinkingLevel,
   onSelectModel,
   onSelectThinkingLevel,
+  agentControls,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
@@ -428,6 +431,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   if (isCentered) {
     return (
       <div className="relative w-full max-w-2xl sm:max-w-3xl mx-auto px-4 select-none">
+        {agentControls}
         {/* Hidden File and Folder Inputs */}
         <input
           ref={fileInputRef}
@@ -668,6 +672,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   // --------------------------------------------------------------------------
   return (
     <div className="relative w-full max-w-3xl mx-auto select-none">
+      {agentControls}
       {/* Hidden File and Folder Inputs */}
       <input
         ref={fileInputRef}

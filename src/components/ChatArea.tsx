@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { Sparkles, RotateCcw, ArrowDown } from 'lucide-react';
-import { Message } from '../types';
+import { AgentAction, Message } from '../types';
 import { ChatMessage } from './ChatMessage';
 
 interface ChatAreaProps {
@@ -12,6 +12,10 @@ interface ChatAreaProps {
   onRegenerateResponse?: (assistantMessageId: string) => void;
   onContinueResponse?: (assistantMessageId: string) => void;
   onWatchMedia?: (mediaId: string, mediaType: 'movie' | 'tv' | string, title?: string) => void;
+  /** Agent mode: the user answered an "Allow this command?" prompt. */
+  onAgentApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
+  /** Agent mode shows an extra controls row above the input, so leave more room below the messages. */
+  agentMode?: boolean;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -22,6 +26,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onRegenerateResponse,
   onContinueResponse,
   onWatchMedia,
+  onAgentApproval,
+  agentMode,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -104,7 +110,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         onScroll={handleScroll}
         className="h-full overflow-y-auto w-full"
       >
-        <div className="max-w-3xl w-full mx-auto px-4 sm:px-6 pt-6 pb-28 sm:pb-32 space-y-2">
+        <div className={`max-w-3xl w-full mx-auto px-4 sm:px-6 pt-6 space-y-2 ${agentMode ? 'pb-40 sm:pb-44' : 'pb-28 sm:pb-32'}`}>
           {messages.length === 0 ? (
             // Clean Empty State
             <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-4 pt-12">
@@ -129,6 +135,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   onRegenerateResponse={onRegenerateResponse}
                   onContinueResponse={onContinueResponse}
                   onWatchMedia={onWatchMedia}
+                  onAgentApproval={onAgentApproval}
                 />
               ))}
 

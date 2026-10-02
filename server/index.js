@@ -1,3 +1,4 @@
+import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
@@ -6,14 +7,23 @@ import { fileURLToPath } from 'url';
 import { createStreamSplitter } from './streamSplitter.js';
 import { normalizeToolExecutionsForDisk } from './toolTrail.js';
 import { fetchViaCurl } from './curlFetch.js';
+import { registerAgentRoutes } from './agent/routes.js';
+import { normalizeAgentBlockForDisk } from './agent/persist.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Keys and options live in <repo>/.env (gitignored) — found no matter where the server is started from.
+// Variables already set in the shell win over the file.
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+// Open CORS for the chat API, but NOT for /api/agent: those routes can run commands
+// and touch files, so a random web page must not be able to call them cross-origin.
+const openCors = cors();
+app.use((req, res, next) => (req.path.startsWith('/api/agent') ? next() : openCors(req, res, next)));
 app.use(express.json({ limit: '10mb' }));
 
 /**
@@ -245,7 +255,7 @@ async function fetchViaReaderProxy(targetUrl, timeoutMs = 10000) {
 }
 
 // Persistent Settings on Server Disk
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.DANAV_DATA_DIR || path.join(__dirname, 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 if (!fs.existsSync(DATA_DIR)) {
@@ -454,9 +464,13 @@ function cleanConversationsForDisk(conversations) {
             ? msg.blocks
                 .filter(
                   (b) =>
-                    b && typeof b === 'object' && (b.type === 'tool' || b.type === 'thinking')
+                    b &&
+                    typeof b === 'object' &&
+                    (b.type === 'tool' || b.type === 'thinking' || b.type === 'text' || b.type === 'action')
                 )
                 .map((b) => {
+                  // Agent turns: the model's narration and each action it took.
+                  if (b.type === 'text' || b.type === 'action') return normalizeAgentBlockForDisk(b);
                   if (b.type === 'tool' && b.tool) {
                     const normList = normalizeToolExecutionsForDisk([b.tool]);
                     return {
@@ -473,6 +487,7 @@ function cleanConversationsForDisk(conversations) {
                     isStillThinking: false,
                   };
                 })
+                .filter(Boolean)
             : undefined;
 
         const { blocks, ...rest } = msg;
@@ -2407,6 +2422,9 @@ async function handleSearchTool(req, res) {
 }
 
 app.post('/api/search', handleSearchTool);
+
+// Agent mode: workspaces, files, commands, and the agent run itself.
+registerAgentRoutes(app, { runSearchTool });
 
 /**
  * Run one of the read-only web tools and hand back its plain result object.

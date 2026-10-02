@@ -488,3 +488,48 @@
     animation: none;
   }
 }
+
+
+/* ==========================================================================
+   Agent mode
+   ========================================================================== */
+
+/* One shimmer sweeps across a whole action label ("Creating  index.html")
+   while it is running; the finished label is plain text. */
+@keyframes agentShimmer {
+  from { background-position: 100% 0; }
+  to   { background-position: 0% 0; }
+}
+
+.agent-shimmer {
+  color: transparent;
+  background-image: linear-gradient(
+    100deg,
+    rgb(161 161 170) 35%,
+    rgb(24 24 27) 50%,
+    rgb(161 161 170) 65%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: agentShimmer 1.7s linear infinite;
+}
+
+.dark .agent-shimmer {
+  background-image: linear-gradient(
+    100deg,
+    rgb(113 113 122) 35%,
+    rgb(250 250 250) 50%,
+    rgb(113 113 122) 65%
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-shimmer {
+    animation: none;
+    background-image: none;
+    -webkit-text-fill-color: currentColor;
+    color: rgb(113 113 122);
+  }
+}
