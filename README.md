@@ -83,7 +83,9 @@ Started   $ vite --host 0.0.0.0  bg-1 :5173
 Preview ready on port 5173  abc-5173.sandbox.novita.ai ↗
 ```
 
-A file is always *watched* being written, never dumped. Providers that stream tool calls (OpenAI, Gemini, …) drive `+N` directly from the token stream. Providers that hand over a whole call in one frame — Vyce/Agnes and several proxies do — get the body replayed instead: the same partial-argument reader is fed growing prefixes of the finished JSON, so the count climbs and the last lines scroll exactly as if it were being typed. Only the display is paced; the write itself happens at full speed, and the row finishes on the numbers the real diff reports.
+**The file is really being written while you watch.** A `write_file` call is a promise that a file will exist, so the file is created the moment its path is known and every complete line after that is written straight to disk — the workspace panel, a dev server's watcher and `cat` all see the same growing file. The `+N` in the chat is a *reading of that file*, never a promise about it: it is capped at the number of lines actually on disk, so the count can lag behind the model but can never run ahead of the file.
+
+Providers differ in how the body arrives. Those that stream tool calls (OpenAI, Gemini, …) drive it from the token stream. Those that hand over the whole call in one frame — Vyce/Agnes and several proxies do — get the body replayed through the same partial-argument reader, at the same pace, into the same file; nothing about the write changes except who sets the tempo. Either way the row finishes on the numbers the real diff reports, and a run that is **Stopped** mid-write puts the file back exactly as it was.
 
 ### Two kinds of workspace
 

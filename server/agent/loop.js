@@ -82,20 +82,26 @@ function replayTracker(tools, name, argsText) {
  * Walk the finished arguments from "body just opened" to "whole call", publishing the
  * progress of each prefix. @returns the number of updates sent.
  */
-async function replayBody({ text, tracker, send, id, signal }) {
+async function replayBody({ text, tracker, send, id, signal, writer }) {
   const from = bodyStartIndex(text);
   const steps = revealSteps(text.length);
   let sent = 0;
   for (let s = 1; s <= steps; s++) {
     if (signal?.aborted) return sent;
     const cut = from + Math.round(((text.length - from) * s) / steps);
-    const { progress } = tracker.update(text.slice(0, cut));
+    const { progress, body } = tracker.update(text.slice(0, cut));
+    // The lines go on disk FIRST, and the number published is the one the file really has: the
+    // count in the chat is a reading of the file, never a promise about it.
+    let real = null;
+    if (writer) real = await writer.push(body, { force: s === steps }); // the last line always lands
     if (progress) {
+      if (real !== null && progress.added > real) progress.added = real;
       send({ agent: { type: 'action_update', id, patch: { progress } } });
       sent++;
     }
     if (s < steps) await new Promise((r) => setTimeout(r, REVEAL_TICK_MS));
   }
+  if (writer) writer.push(text ? JSON.parse(text).content ?? '' : '', { force: true });
   return sent;
 }
 
@@ -198,7 +204,11 @@ export async function runAgent({
 }) {
   const redact = createRedactor([provider.apiKey]);
   const tools = buildToolset({ workspace, runSearchTool, redact });
-  const state = { readFiles: new Set(), plan: [], changed: new Map(), singleEdits: new Map() };
+  const state = {
+    readFiles: new Set(), plan: [], changed: new Map(), singleEdits: new Map(),
+    /** Files being written straight to disk while the model writes them (see tools.liveWrite). */
+    liveWriters: [], committedWrites: new Set(),
+  };
   const startedAt = Date.now();
   const deadline = startedAt + limits.maxRunMs();
   const maxSteps = limits.maxSteps();
@@ -260,6 +270,28 @@ export async function runAgent({
       const live = new Map(); // tool-call slot -> { uiId, lastSent, lastKey }
       const useTools = !wrapUp;
 
+      /**
+       * The one live writer for this call. Created through a single promise, so a call can never end
+       * up with two writers fighting over the same file — one of them would "roll back" the other's
+       * finished work when the run ends.
+       */
+      const writerFor = (st, pathText) => {
+        // Never discard a creation that is already in flight: the caller would otherwise believe
+        // there is no writer while one is about to appear and start writing.
+        if (!pathText) return st.writerPromise || Promise.resolve(null);
+        if (!st.writerPromise) {
+          st.writerPromise = tools
+            .liveWrite(pathText)
+            .then((w) => {
+              st.writer = w;
+              if (w) state.liveWriters.push(w);
+              return w;
+            })
+            .catch(() => null);
+        }
+        return st.writerPromise;
+      };
+
       const onDelta = (slot) => {
         if (!useTools || !slot.name) return;
         const now = Date.now();
@@ -267,12 +299,14 @@ export async function runAgent({
         if (!st) {
           st = {
             uiId: genId('a'), firstAt: now, lastSent: now, lastKey: '',
-            deltas: 0, published: false, replay: null, tracker: tools.progressTracker(slot.name),
+            deltas: 0, published: false, replay: null, writer: null, writerPending: false,
+            tracker: tools.progressTracker(slot.name),
           };
           live.set(slot, st);
         }
         st.deltas++;
-        const { args, progress } = st.tracker.update(slot.args);
+        const { args, progress, body } = st.tracker.update(slot.args);
+
 
         // A body that lands WHOLE within a blink of the call starting (Vyce/agnes send one frame;
         // Gemini and some proxies send the name and then the entire body) has nothing to stream.
@@ -288,6 +322,21 @@ export async function runAgent({
           return;
         }
         st.replay = null; // it turned out to be a real stream after all: follow it as usual
+
+        // Following a real stream: the file starts existing the moment its path is known, and every
+        // line that arrives after that lands on disk as it arrives. A replay paces its own writes.
+        if (slot.name === 'write_file' && body !== undefined && args.path) {
+          st.lastBody = body;
+          writerFor(st, args.path).then((w) => {
+            if (w && !st.replay) w.push(st.lastBody || '');
+          });
+        }
+        // A live stream cannot wait for the disk, so the count is capped at what the file really
+        // holds: the chat may lag behind the model, but it never runs ahead of the file.
+        if (progress && st.writer) {
+          const real = st.writer.linesOnDisk();
+          if (progress.added > real) progress.added = real;
+        }
 
         if (st.deltas === 1) {
           send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args, ...(progress ? { progress } : {}) } });
@@ -339,7 +388,8 @@ export async function runAgent({
       const prepared = calls.map((slot) => {
         const st = live.get(slot) || {
           uiId: genId('a'), firstAt: Date.now(), lastSent: 0, lastKey: '',
-          deltas: 0, published: false, replay: null, tracker: tools.progressTracker(slot.name),
+          deltas: 0, published: false, replay: null, writer: null, writerPending: false,
+          tracker: tools.progressTracker(slot.name),
         };
         const isNew = !live.has(slot);
         live.set(slot, st);
@@ -414,7 +464,12 @@ export async function runAgent({
         if (st.replay) {
           const { text, tracker } = st.replay;
           st.replay = null;
-          await replayBody({ text, tracker, send, id, signal });
+          // No writer yet (a provider that sent no deltas at all): the file starts existing now.
+          if (name === 'write_file') st.writer = await writerFor(st, args.path);
+          await replayBody({ text, tracker, send, id, signal, writer: name === 'write_file' ? st.writer : null });
+          // Stopped while the file was still being written: do NOT run the tool. Bailing out here is
+          // what lets the run's cleanup put the half-written file back the way it was.
+          if (signal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
         }
 
         // coalesce terminal output so a chatty build doesn't flood the stream
@@ -446,13 +501,26 @@ export async function runAgent({
           },
         };
 
+        // Every line written so far is already on disk; let the last of them land, and tell the
+        // tool what the file held BEFORE — otherwise it would diff against our own draft.
+        let execArgs = args;
+        const writer = name === 'write_file' ? await writerFor(st, args.path) : null;
+        st.writer = writer || st.writer || null;
+        if (writer) {
+          await writer.settle();
+          writer.close(); // from here the file is the tool's, not the stream's
+          execArgs = { ...args, _original: writer.original, _originalExisted: writer.existed };
+        }
+
         const t0 = Date.now();
         let res;
         // A big write_file that hits the output limit arrives as unfinished JSON. Throwing it away wastes
         // everything the model wrote: keep every complete line, and tell it to carry on with append_file.
         const rescued = argError && round.finishReason === 'length' ? tools.salvageWrite(name, slot.args) : null;
         if (rescued) {
-          const saved = await tools.execute(name, { path: rescued.path, content: rescued.content, _partial: true }, ctx);
+          const salvaged = { path: rescued.path, content: rescued.content, _partial: true };
+          if (writer) Object.assign(salvaged, { _original: writer.original, _originalExisted: writer.existed });
+          const saved = await tools.execute(name, salvaged, ctx);
           if (saved.ok) {
             const tailLines = splitLines(rescued.content).slice(-3).join('\n');
             res = {
@@ -473,9 +541,11 @@ export async function runAgent({
           const msg = `Unknown tool "${name}". Available tools: ${tools.definitions.map((d) => d.function.name).join(', ')}.`;
           res = { ok: false, output: `Error: ${msg}`, error: msg, ui: { kind: name, ok: false } };
         } else {
-          res = await tools.execute(name, args, ctx);
+          res = await tools.execute(name, execArgs, ctx);
         }
         flushOut();
+        // A write that landed needs no undo; one that did not must leave the file as it was.
+        if (writer && res?.ok) state.committedWrites.add(writer);
 
         send({
           agent: {
@@ -549,6 +619,10 @@ export async function runAgent({
       send({ error: message });
     }
   } finally {
+    // A run that stopped mid-write must not leave half a file behind: put back what was there.
+    for (const w of state.liveWriters) {
+      if (!state.committedWrites.has(w)) await w.rollback().catch(() => {});
+    }
     cancelApprovalsFor(`${runId}:`);
     send({
       agent: {

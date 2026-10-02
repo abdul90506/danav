@@ -10,6 +10,7 @@
  * local folder and in a cloud sandbox.
  */
 import dns from 'node:dns/promises';
+import path from 'node:path';
 import net from 'node:net';
 import { applyAnyEdits, applyEdit, diffSummary, numberLines, splitLines, stripLineNumberPrefix } from './textops.js';
 import { formatOutline, outline } from './outline.js';
@@ -624,7 +625,7 @@ export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, pro
         prime(peek.args.path);
         // Until we know whether this overwrites something, "+N" would mean "lines written" now and
         // "lines that differ" a moment later, and the counter would jump backwards. Wait for it.
-        if (!oldKnown) return { args: peek.args };
+        if (!oldKnown) return { args: peek.args, body };
         if (peek.progress) {
           // the exact numbers arrive with the result; until then the live ones only ever grow
           maxAdded = Math.max(maxAdded, peek.progress.added);
@@ -634,7 +635,122 @@ export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, pro
             peek.progress.removed = maxRemoved;
           }
         }
-        return peek;
+        return { ...peek, body };
+      },
+    };
+  };
+
+  /**
+   * Write a file to disk WHILE it is being written.
+   *
+   * A write_file call is a promise that a file will exist, and nothing about that has to wait for
+   * the last token: the moment the path is known the file is created, and every complete line that
+   * arrives after that goes straight onto the disk. The workspace panel, a dev server's watcher,
+   * `cat` and the "+N" in the chat then all describe ONE real, growing file — the counter is not an
+   * animation standing in for the write, it is the length of the file that is really there.
+   *
+   * @returns {Promise<null | { original: string, existed: boolean, push(text): void, settle(): Promise<number>, rollback(): Promise<void> }>}
+   *   null when it must not be used (blocked path, directory, binary file, unreadable).
+   */
+  const liveWrite = async (pathText) => {
+    if (!pathText) return null;
+    let abs;
+    try {
+      abs = await target(pathText);
+      guardWrite(abs);
+    } catch {
+      return null; // the real tool will explain the problem properly
+    }
+    let original = '';
+    let existed = false;
+    try {
+      const st = await ws.stat(abs);
+      if (st.type === 'dir') return null;
+      if (st.type === 'file') {
+        const r = await ws.readText(abs);
+        if (r.binary) return null; // never half-write a binary
+        existed = true;
+        original = r.text;
+      }
+    } catch {
+      return null;
+    }
+
+    // A sandbox write is a network round trip; a local one is a syscall. Pace accordingly.
+    const minGapMs = ws.kind === 'sandbox' ? 400 : 80;
+    let chain = Promise.resolve();
+    const enqueue = (fn) => {
+      chain = chain.then(fn, fn);
+      return chain;
+    };
+    let onDisk = -1; // characters currently on disk
+    let lastAt = 0;
+    let created = false;
+    let lines = 0;
+    let closed = false;
+
+    const flush = (text) =>
+      enqueue(async () => {
+        try {
+          if (!created) {
+            await ws.mkdirp(path.dirname(abs));
+            created = true;
+          }
+          await ws.writeText(abs, text);
+          onDisk = text.length;
+          lines = text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+        } catch {
+          /* the tool's own final write is the one that must succeed */
+        }
+      });
+
+    return {
+      abs,
+      original,
+      existed,
+      /**
+       * Put every COMPLETE line written so far on disk. Throttled, and it resolves with the line
+       * count that is really on the disk afterwards — so a caller can publish that number instead
+       * of one the file has not caught up with yet.
+       */
+      push(fullText, { force = false } = {}) {
+        if (closed) return Promise.resolve(lines); // the call is over; the file belongs to the tool
+        const cut = String(fullText || '').lastIndexOf('\n');
+        const text = cut === -1 ? '' : String(fullText).slice(0, cut + 1);
+        if (text.length === onDisk) return Promise.resolve(lines);
+        // One write only ever grows: a late, shorter push must not shrink the file back.
+        if (created && text.length < onDisk) return Promise.resolve(lines);
+        const now = Date.now();
+        if (!force && created && now - lastAt < minGapMs) return Promise.resolve(lines);
+        lastAt = now;
+        return flush(text).then(() => lines);
+      },
+      /** Lines really on the disk right now. */
+      linesOnDisk() {
+        return lines;
+      },
+      /** Wait for the queued writes; @returns the line count really on disk. */
+      settle() {
+        return enqueue(async () => lines);
+      },
+      /**
+       * The tool call is over: from here the file belongs to the tool. A push that is still in
+       * flight (the stream callback that queued it has not run yet) must not land afterwards and
+       * overwrite what the tool — or a later append_file — wrote.
+       */
+      close() {
+        closed = true;
+      },
+      /** Put the file back the way it was (run stopped before the write finished). */
+      rollback() {
+        return enqueue(async () => {
+          try {
+            if (existed) await ws.writeText(abs, original);
+            else if (created) await ws.remove(abs, {});
+          } catch {
+            /* nothing sensible left to do */
+          }
+        });
       },
     };
   };
@@ -723,7 +839,13 @@ export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, pro
       let existed = false;
       const st = await ws.stat(abs);
       if (st.type === 'dir') throw new ToolError(`${rel(abs)} is a directory.`);
-      if (st.type === 'file') {
+      if (typeof args._original === 'string') {
+        // The loop wrote this file progressively WHILE it was being written, so what is on disk now
+        // is a half-written copy of the new content. Diff against the text that was really there
+        // before, not against our own draft.
+        existed = args._originalExisted !== false;
+        old = args._original;
+      } else if (st.type === 'file') {
         existed = true;
         try {
           const r = await ws.readText(abs);
@@ -1285,6 +1407,7 @@ export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, pro
     displayArgs,
     peek: peekPartialArgs,
     progressTracker,
+    liveWrite,
     salvageWrite,
 
     /**

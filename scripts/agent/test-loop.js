@@ -266,6 +266,131 @@ test('a stream squeezed inside the throttle window still counts up (replay cover
   }
 });
 
+test('the file really exists and grows ON DISK while it is being written', async () => {
+  // The counter in the chat is not an animation standing in for the write. Every time the chat
+  // reports "+N", the file on disk is read straight away and must already hold those lines.
+  const l = await getLlm();
+  const dir = tmp('danav-disk-');
+  const ws = new LocalWorkspace({ id: 'ws-disk', kind: 'local', name: 'disk', root: dir, autoRun: true });
+  await ws.init();
+  const file = path.join(dir, 'big.js');
+
+  const samples = []; // { claimed, onDisk }
+  const send = (e) => {
+    const added = e.agent?.patch?.progress?.added;
+    if (added === undefined) return;
+    let onDisk = -1;
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      onDisk = text.endsWith('\n') ? text.split('\n').length - 1 : text.split('\n').length;
+    } catch {
+      onDisk = -1; // not created yet
+    }
+    samples.push({ claimed: added, onDisk });
+  };
+
+  await runAgent({
+    provider: { baseUrl: l.baseUrl },
+    model: 'fake-burst',
+    history: [{ role: 'user', content: 'go' }],
+    workspace: ws,
+    runSearchTool: async () => ({}),
+    send,
+    signal: new AbortController().signal,
+    runId: genId('run'),
+  });
+
+  assert.ok(samples.length >= 3, `the write was reported in several steps: ${samples.length}`);
+  const created = samples.filter((s) => s.onDisk >= 0);
+  assert.ok(created.length >= 3, `the file existed while it was being written: ${JSON.stringify(samples)}`);
+  assert.ok(created.some((s) => s.onDisk > 0 && s.onDisk < 200), `it was caught half-written: ${JSON.stringify(created)}`);
+
+  for (let i = 1; i < created.length; i++) {
+    assert.ok(created[i].onDisk >= created[i - 1].onDisk, `the file never shrinks: ${JSON.stringify(created)}`);
+  }
+  // the claim never runs ahead of the real file (at most the one line still being typed)
+  for (const s of created) {
+    assert.ok(s.claimed <= s.onDisk + 1, `chat says +${s.claimed} but the file holds ${s.onDisk} lines`);
+  }
+  assert.equal(created.at(-1).onDisk >= 188, true, `it reaches (nearly) the full file: ${created.at(-1).onDisk}`);
+  assert.equal(fs.readFileSync(file, 'utf8').trimEnd().split('\n').length, 200, 'the file on disk ends up complete');
+});
+
+test('an overwrite diffs against what was REALLY there, not against the half-written draft', async () => {
+  const l = await getLlm();
+  const dir = tmp('danav-owdiff-');
+  fs.writeFileSync(path.join(dir, 'big.js'), Array.from({ length: 30 }, (_, i) => `old line ${i + 1}`).join('\n') + '\n');
+  const ws = new LocalWorkspace({ id: 'ws-owd', kind: 'local', name: 'owd', root: dir, autoRun: true });
+  await ws.init();
+  const events = [];
+  await runAgent({
+    provider: { baseUrl: l.baseUrl },
+    model: 'fake-burst',
+    history: [{ role: 'user', content: 'go' }],
+    workspace: ws,
+    runSearchTool: async () => ({}),
+    send: (e) => events.push(e),
+    signal: new AbortController().signal,
+    runId: genId('run'),
+  });
+  const end = events.find((e) => e.agent?.type === 'action_end');
+  // the file on disk was our own draft when the tool ran; the numbers must still describe the
+  // real before/after: 30 old lines replaced by 200 new ones.
+  assert.deepEqual([end.agent.result.added, end.agent.result.removed], [200, 30]);
+  assert.equal(end.agent.result.created, false, 'it is reported as an overwrite, not a new file');
+});
+
+test('a run stopped mid-write leaves no half-written file behind', async () => {
+  const l = await getLlm();
+  const dir = tmp('danav-rollback-');
+  const ws = new LocalWorkspace({ id: 'ws-rb', kind: 'local', name: 'rb', root: dir, autoRun: true });
+  await ws.init();
+  const file = path.join(dir, 'big.js');
+
+  /** Stop the run on the first sign of life, which is always before the tool itself runs. */
+  const stopOnFirstProgress = () => {
+    const ac = new AbortController();
+    let stopped = false;
+    return {
+      signal: ac.signal,
+      send: (e) => {
+        if (!stopped && e.agent?.patch?.progress) {
+          stopped = true;
+          ac.abort();
+        }
+      },
+    };
+  };
+
+  const first = stopOnFirstProgress();
+  await runAgent({
+    provider: { baseUrl: l.baseUrl },
+    model: 'fake-burst',
+    history: [{ role: 'user', content: 'go' }],
+    workspace: ws,
+    runSearchTool: async () => ({}),
+    send: first.send,
+    signal: first.signal,
+    runId: genId('run'),
+  });
+  assert.equal(fs.existsSync(file), false, 'a file that was never finished is removed again');
+
+  // and an interrupted overwrite gives back the file that was there
+  fs.writeFileSync(file, 'PRECIOUS\n');
+  const second = stopOnFirstProgress();
+  await runAgent({
+    provider: { baseUrl: l.baseUrl },
+    model: 'fake-burst',
+    history: [{ role: 'user', content: 'go' }],
+    workspace: ws,
+    runSearchTool: async () => ({}),
+    send: second.send,
+    signal: second.signal,
+    runId: genId('run'),
+  });
+  assert.equal(fs.readFileSync(file, 'utf8'), 'PRECIOUS\n', 'an interrupted overwrite is put back');
+});
+
 test('overwriting a file: "−" is live too (what really differs from the file on disk), with the tail of what is being typed', async () => {
   const slow = await startFakeLlm({ chunkDelayMs: 12 });
   try {
