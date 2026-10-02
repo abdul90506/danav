@@ -1,0 +1,490 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* Custom subtle scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(156, 163, 175, 0.4);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(156, 163, 175, 0.6);
+  }
+}
+
+/*
+ * Scrollable panels (the Thinking box, tool output) scroll their own content. The global scrollbar above is 6px
+ * and translucent, which on Windows is effectively invisible inside a small
+ * panel — so long reasoning looked truncated with no way to scroll it. This
+ * gives that one box a track and a solid, always-visible thumb.
+ */
+.panel-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(161, 161, 170, 0.65) rgba(228, 228, 231, 0.6);
+}
+
+.panel-scroll::-webkit-scrollbar {
+  width: 9px;
+}
+
+.panel-scroll::-webkit-scrollbar-track {
+  background: rgba(228, 228, 231, 0.5);
+  border-radius: 999px;
+  margin: 2px 0;
+}
+
+.panel-scroll::-webkit-scrollbar-thumb {
+  background: rgba(161, 161, 170, 0.7);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  min-height: 28px;
+}
+
+.panel-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(113, 113, 122, 0.9);
+  background-clip: content-box;
+}
+
+.dark .panel-scroll {
+  scrollbar-color: rgba(113, 113, 122, 0.9) rgba(39, 39, 42, 0.8);
+}
+
+.dark .panel-scroll::-webkit-scrollbar-track {
+  background: rgba(39, 39, 42, 0.75);
+}
+
+.dark .panel-scroll::-webkit-scrollbar-thumb {
+  background: rgba(113, 113, 122, 0.95);
+  background-clip: content-box;
+}
+
+.dark .panel-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(161, 161, 170, 1);
+  background-clip: content-box;
+}
+
+/* Markdown prose styling for flat 2D chat */
+.markdown-body {
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: inherit;
+  word-break: break-word;
+}
+
+/* Ensure table cells size naturally and never break words in half */
+.markdown-body table td,
+.markdown-body table th {
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+}
+
+.markdown-body p {
+  margin-bottom: 0.75rem;
+}
+
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  font-weight: 600;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  line-height: 1.3;
+}
+
+.markdown-body h1 { font-size: 1.4rem; }
+.markdown-body h2 { font-size: 1.25rem; }
+.markdown-body h3 { font-size: 1.1rem; }
+.markdown-body h4 { font-size: 1rem; }
+
+.markdown-body ul,
+.markdown-body ol {
+  margin-top: 0.4rem;
+  margin-bottom: 0.75rem;
+  padding-left: 1.5rem;
+}
+
+.markdown-body ul {
+  list-style-type: disc;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+}
+
+.markdown-body li {
+  margin-bottom: 0.25rem;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid #cbd5e1;
+  padding-left: 0.85rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.75rem;
+  color: #64748b;
+  font-style: italic;
+}
+
+.dark .markdown-body blockquote {
+  border-left-color: #475569;
+  color: #94a3b8;
+}
+
+.markdown-body a {
+  color: #2563eb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.dark .markdown-body a {
+  color: #60a5fa;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid #e2e8f0;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.dark .markdown-body th,
+.dark .markdown-body td {
+  border-color: #334155;
+}
+
+.markdown-body th {
+  background-color: #f8fafc;
+  font-weight: 600;
+}
+
+.dark .markdown-body th {
+  background-color: #1e293b;
+}
+
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid #e2e8f0;
+  margin: 1.25rem 0;
+}
+
+.dark .markdown-body hr {
+  border-top-color: #334155;
+}
+
+/* ========================================================
+   Prism Syntax Highlighting (Light Theme & Dark Theme)
+   ======================================================== */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: #6a737d;
+  font-style: italic;
+}
+
+.token.punctuation {
+  color: #24292e;
+}
+
+.token.namespace {
+  opacity: 0.7;
+}
+
+.token.property,
+.token.tag,
+.token.boolean,
+.token.number,
+.token.constant,
+.token.symbol,
+.token.deleted {
+  color: #005cc5;
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+  color: #22863a;
+}
+
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+  color: #d73a49;
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+  color: #d73a49;
+  font-weight: 500;
+}
+
+.token.function,
+.token.class-name {
+  color: #6f42c1;
+}
+
+.token.regex,
+.token.important,
+.token.variable {
+  color: #e36209;
+}
+
+/* Dark Mode Syntax Colors */
+.dark .token.comment,
+.dark .token.prolog,
+.dark .token.doctype,
+.dark .token.cdata {
+  color: #8b949e;
+  font-style: italic;
+}
+
+.dark .token.punctuation {
+  color: #c9d1d9;
+}
+
+.dark .token.property,
+.dark .token.tag,
+.dark .token.boolean,
+.dark .token.number,
+.dark .token.constant,
+.dark .token.symbol,
+.dark .token.deleted {
+  color: #79c0ff;
+}
+
+.dark .token.selector,
+.dark .token.attr-name,
+.dark .token.string,
+.dark .token.char,
+.dark .token.builtin,
+.dark .token.inserted {
+  color: #7ee787;
+}
+
+.dark .token.operator,
+.dark .token.entity,
+.dark .token.url,
+.dark .language-css .token.string,
+.dark .style .token.string {
+  color: #ff7b72;
+}
+
+.dark .token.atrule,
+.dark .token.attr-value,
+.dark .token.keyword {
+  color: #ff7b72;
+  font-weight: 500;
+}
+
+.dark .token.function,
+.dark .token.class-name {
+  color: #d2a8ff;
+}
+
+.dark .token.regex,
+.dark .token.important,
+.dark .token.variable {
+  color: #ffa657;
+}
+
+/* Smooth streaming animation */
+@keyframes streamFadeIn {
+  from {
+    opacity: 0.85;
+    transform: translateY(1px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.stream-token {
+  animation: streamFadeIn 0.12s ease-out forwards;
+}
+
+/* Thinking Shimmer Loading Animations */
+@keyframes shimmerText {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.thinking-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(140, 140, 150, 0.45) 0%,
+    rgba(24, 24, 27, 0.95) 50%,
+    rgba(140, 140, 150, 0.45) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmerText 2s infinite linear;
+}
+
+.dark .thinking-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(161, 161, 170, 0.45) 0%,
+    rgba(244, 244, 245, 0.98) 50%,
+    rgba(161, 161, 170, 0.45) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmerText 2s infinite linear;
+}
+
+@keyframes shimmerBrain {
+  0%, 100% {
+    opacity: 0.55;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+    filter: drop-shadow(0 0 4px rgba(161, 161, 170, 0.5));
+  }
+}
+
+.thinking-brain-shimmer {
+  animation: shimmerBrain 2s infinite ease-in-out;
+}
+
+/* Tool execution shimmering loading */
+.tool-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(100, 116, 139, 0.4) 0%,
+    rgba(15, 23, 42, 0.95) 50%,
+    rgba(100, 116, 139, 0.4) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmerText 1.75s infinite linear;
+}
+
+.dark .tool-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(148, 163, 184, 0.4) 0%,
+    rgba(255, 255, 255, 0.98) 50%,
+    rgba(148, 163, 184, 0.4) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmerText 1.75s infinite linear;
+}
+
+/* Static shiny / sleek metallic gradient for completed actions and thoughts (no animation wave, but shiny text) */
+.shiny-text {
+  background: linear-gradient(
+    135deg,
+    #18181b 0%,
+    #52525b 40%,
+    #27272a 70%,
+    #71717a 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 500;
+}
+
+.dark .shiny-text {
+  background: linear-gradient(
+    135deg,
+    #fafafa 0%,
+    #a1a1aa 40%,
+    #f4f4f5 70%,
+    #d4d4d8 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 500;
+}
+
+
+
+/* ---------------------------------------------------------------------------
+   Entrance animation.
+   ---------------------------------------------------------------------------
+   The UI uses `animate-in fade-in` on dropdowns, expanded panels and cards.
+   Those are tailwindcss-animate utility names, and that plugin is NOT installed
+   (tailwind.config.js has `plugins: []`), so every one of those classes was
+   silently doing nothing. Rather than add a dependency, the two classes are
+   defined here — the elements animate again, and nothing else changes.
+--------------------------------------------------------------------------- */
+@keyframes danavEnter {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-in {
+  animation: danavEnter 160ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Kept as a separate class so `animate-in` alone stays a no-op-ish default. */
+.fade-in {
+  animation-name: danavEnter;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-in,
+  .fade-in {
+    animation: none;
+  }
+}

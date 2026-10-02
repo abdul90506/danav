@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-ssr
+*.local
+.env
+.env.*
+.DS_Store
+
+# Persistent user data & keys
+server/data/*.json
+server/data/*.tmp
+!server/data/.gitkeep

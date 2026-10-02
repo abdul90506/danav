@@ -1,0 +1,48 @@
+{
+  "name": "danav-ai-chat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:web": "vite",
+    "dev:all": "node scripts/dev.js",
+    "server": "node server/index.js",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node scripts/test-all.js",
+    "test:api": "node --experimental-strip-types scripts/test-api.js",
+    "test:storage": "node --experimental-strip-types scripts/test-storage.js",
+    "test:markdown": "node --experimental-strip-types scripts/test-markdown.js",
+    "test:splitter": "node scripts/test-splitter.js",
+    "test:tooltrail": "node scripts/test-tooltrail.js",
+    "test:suites": "npm run test:splitter && npm run test:tooltrail && npm run test:markdown && npm run test:storage && npm run test:api",
+    "typecheck": "tsc --noEmit",
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "@types/prismjs": "^1.26.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "lucide-react": "^1.16.0",
+    "prismjs": "^1.30.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.3",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  }
+}
