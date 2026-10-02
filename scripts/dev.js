@@ -21,6 +21,9 @@ const rootDir = path.resolve(__dirname, '..');
 
 const BACKEND_PORT = Number(process.env.PORT) || 3001;
 const FRONTEND_PORT = Number(process.env.VITE_PORT) || 5173;
+// Bind the dev server to all interfaces by default so it is reachable from a
+// browser outside the box (e.g. a sandboxed preview). Override with VITE_HOST.
+const FRONTEND_HOST = process.env.VITE_HOST || '0.0.0.0';
 const MAX_BACKEND_RESTARTS = 5;
 
 let backend = null;
@@ -109,10 +112,18 @@ async function startBackend() {
 }
 
 async function startVite() {
-  log(`starting frontend on http://localhost:${FRONTEND_PORT}`);
+  log(`starting frontend on http://${FRONTEND_HOST}:${FRONTEND_PORT}`);
   vite = spawn(
     process.execPath,
-    [path.join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js'), '--port', String(FRONTEND_PORT)],
+    [
+      path.join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js'),
+      // vite.config.sandbox.ts = base config + host 0.0.0.0 + allowedHosts:true,
+      // so the generated preview hostname (*.e2b.app) is accepted instead of
+      // "Blocked request. This host is not allowed."
+      '--config', 'vite.config.sandbox.ts',
+      '--host', FRONTEND_HOST,
+      '--port', String(FRONTEND_PORT),
+    ],
     { cwd: rootDir, stdio: 'inherit' }
   );
 
