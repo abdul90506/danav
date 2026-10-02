@@ -316,6 +316,31 @@ test('background servers: readiness is probed, a duplicate start is not repeated
   await ws.dispose();
 });
 
+test('recoverArgs: mangled or cut-off tool-call JSON is rescued, garbage is not', async () => {
+  const { tools } = await setup();
+  // the agnes failure mode: a missing comma between fields, but both values complete
+  const mangled = '{"path": "index.html" "content": "<!DOCTYPE html>\n<html>\n<body>\n</body>\n</html>\n"}';
+  const r = tools.recoverArgs('write_file', mangled);
+  assert.ok(r, 'a missing comma is recovered');
+  assert.equal(r.args.path, 'index.html');
+  assert.match(r.args.content, /<!DOCTYPE html>/);
+  assert.equal(r.truncated, false);
+
+  // a genuinely truncated write with a real piece of the file is rescued and flagged
+  const full = JSON.stringify({ path: 'a.js', content: 'l1\nl2\nl3\nl4\nhalf line' });
+  const cut = full.slice(0, full.length - 14);
+  const t = tools.recoverArgs('write_file', cut);
+  assert.ok(t, 'a cut-off write with several lines is recovered');
+  assert.equal(t.truncated, true);
+
+  // one stray line is noise, not work: left alone so it surfaces as an error
+  assert.equal(tools.recoverArgs('write_file', '{"path": "x.txt", "content": "unterminated'), null);
+
+  // garbage stays garbage
+  assert.equal(tools.recoverArgs('write_file', 'not json at all'), null);
+  assert.equal(tools.recoverArgs('run_command', '{"command": "ls'), null);
+});
+
 test('list_processes: the agent can recover the ids of servers it started in an earlier turn', async () => {
   if (isWin) return;
   const { run, ws } = await setup();

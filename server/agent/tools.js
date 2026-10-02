@@ -16,7 +16,7 @@ import { applyAnyEdits, applyEdit, diffSummary, numberLines, splitLines, stripLi
 import { formatOutline, outline } from './outline.js';
 import { checkSyntax, syntaxWarning } from './check.js';
 import { addNote, readNotes, removeNotes } from './memory.js';
-import { peekPartialArgs, salvageWrite } from './partial.js';
+import { peekPartialArgs, salvageWrite, extractStringFields } from './partial.js';
 import { limits } from './config.js';
 import { WorkspaceError } from './workspaces/base.js';
 import { formatBytes, truncateMiddle } from './util.js';
@@ -1401,6 +1401,49 @@ export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, pro
     };
   }
 
+  /**
+   * Recover usable arguments from tool-call JSON that did not parse — a call cut off by the output
+   * limit, or a provider that mangled the quotes. The partial reader decodes each string field from
+   * unfinished text, so the model's work is rescued instead of being thrown away with an error the
+   * user has to read.
+   *
+   * @returns {null | { args: object, truncated: boolean }}
+   */
+  const recoverArgs = (name, text) => {
+    const KEYS = {
+      write_file: ['path', 'content'],
+      append_file: ['path', 'content'],
+      edit_file: ['path', 'old_string', 'new_string'],
+    };
+    const keys = KEYS[name];
+    if (!keys || typeof text !== 'string' || !text.trim()) return null;
+    const fields = extractStringFields(text, keys);
+    const get = (k) => fields.find((f) => f.key === k);
+    const path = get('path');
+    if (!path || !path.complete) return null;
+    const out = { path: path.value };
+    let complete = true;
+    for (const k of keys) {
+      if (k === 'path') continue;
+      const f = get(k);
+      if (!f) { complete = false; continue; }
+      out[k] = f.value;
+      complete = complete && f.complete;
+    }
+    const hasBody =
+      name === 'edit_file'
+        ? out.old_string !== undefined && out.new_string !== undefined
+        : out.content !== undefined;
+    if (!hasBody) return null;
+    // A truncated edit is too risky to guess at, and a "recovered" write of one or two stray lines is
+    // noise, not work. Only rescue a cut-off write when it holds a real piece of the file.
+    if (!complete) {
+      if (name === 'edit_file') return null;
+      if (splitLines(out.content || '').length < 3) return null;
+    }
+    return { args: out, truncated: !complete };
+  };
+
   return {
     definitions: TOOL_DEFINITIONS,
     has: (name) => Object.prototype.hasOwnProperty.call(impl, name),
@@ -1408,6 +1451,7 @@ export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, pro
     peek: peekPartialArgs,
     progressTracker,
     liveWrite,
+    recoverArgs,
     salvageWrite,
 
     /**

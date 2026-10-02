@@ -437,14 +437,24 @@ export async function runAgent({
 
         let args = {};
         let argError = null;
+        let argsTruncated = false;
         try {
           args = slot.args.trim() ? JSON.parse(slot.args) : {};
           if (!args || typeof args !== 'object' || Array.isArray(args)) argError = 'Arguments must be a JSON object.';
         } catch (err) {
-          argError =
-            round.finishReason === 'length'
-              ? 'Your tool call was cut off because the output limit was reached, so its JSON is incomplete. Send a smaller call — for big files, write them in several smaller files.'
-              : `The arguments are not valid JSON (${err.message}). Send a single valid JSON object.`;
+          // A provider can hand us mangled JSON; recover what the model actually wrote before
+          // declaring the call dead. A call cut off by the OUTPUT LIMIT is left to the salvage path
+          // below, which has its own, tested, carry-on-with-append_file flow.
+          const recovered = round.finishReason === 'length' ? null : tools.recoverArgs(name, slot.args);
+          if (recovered) {
+            args = recovered.args;
+            argsTruncated = recovered.truncated;
+          } else {
+            argError =
+              round.finishReason === 'length'
+                ? 'Your tool call was cut off because the output limit was reached, so its JSON is incomplete. Send a smaller call — for big files, write them in several smaller files.'
+                : `The arguments are not valid JSON (${err.message}). Send a single valid JSON object.`;
+          }
         }
 
         const shownArgs = argError ? {} : tools.displayArgs(name, args);
@@ -537,6 +547,24 @@ export async function runAgent({
           }
         } else if (argError) {
           res = { ok: false, output: `Error: ${argError}`, error: argError, ui: { kind: name, ok: false } };
+        } else if (argsTruncated) {
+          // Recovered from cut-off JSON: write what arrived, do not judge the unfinished file yet.
+          const partialArgs = { ...execArgs, _partial: true };
+          const saved = await tools.execute(name, partialArgs, ctx);
+          if (saved.ok && (name === 'write_file' || name === 'append_file')) {
+            const lines = splitLines(args.content || '').length;
+            const tailLines = splitLines(args.content || '').slice(-3).join('\n');
+            res = {
+              ...saved,
+              ui: { ...saved.ui, partial: true },
+              output:
+                `${saved.output}\n⚠ This call arrived cut off, so I recovered ${lines} complete lines and wrote them. ` +
+                `The file currently ends with:\n${tailLines}\n` +
+                'Continue WITHOUT repeating anything: call append_file with the remaining content, starting right after that last line.',
+            };
+          } else {
+            res = saved;
+          }
         } else if (!tools.has(name)) {
           const msg = `Unknown tool "${name}". Available tools: ${tools.definitions.map((d) => d.function.name).join(', ')}.`;
           res = { ok: false, output: `Error: ${msg}`, error: msg, ui: { kind: name, ok: false } };
