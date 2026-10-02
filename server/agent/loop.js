@@ -59,6 +59,83 @@ const isCompleteJson = (text) => {
   }
 };
 
+const editTargetKey = (value) => String(value || '')
+  .replace(/\\/g, '/')
+  .replace(/\/+/g, '/')
+  .replace(/^\.\//, '');
+
+/**
+ * A model sometimes emits several edit_file calls for the same target in one
+ * response despite the multi_edit instructions. Fold adjacent calls together
+ * before execution so the file is changed atomically and the UI shows one edit.
+ * Calls stay adjacent (we never move edits across a read/command or another
+ * file's edit), and the original tool-call transcript is preserved separately.
+ */
+function coalesceAdjacentFileEdits(prepared, tools) {
+  if (!tools.has('multi_edit')) return prepared;
+  const result = [];
+  for (let i = 0; i < prepared.length;) {
+    const first = prepared[i];
+    if (first.slot.name !== 'edit_file' || !first.isNew) {
+      result.push(first);
+      i++;
+      continue;
+    }
+
+    const parse = (item) => {
+      if (item.slot.name !== 'edit_file' || !item.isNew) return null;
+      try {
+        const args = JSON.parse(item.slot.args || '{}');
+        const target = args.path || args.file_path;
+        if (typeof target !== 'string' || !target.trim()) return null;
+        if (typeof args.old_string !== 'string' || typeof args.new_string !== 'string') return null;
+        return { args, target: target.trim(), key: editTargetKey(target) };
+      } catch {
+        return null;
+      }
+    };
+
+    const firstEdit = parse(first);
+    if (!firstEdit) {
+      result.push(first);
+      i++;
+      continue;
+    }
+
+    const group = [{ item: first, edit: firstEdit }];
+    let j = i + 1;
+    while (j < prepared.length) {
+      const edit = parse(prepared[j]);
+      if (!edit || edit.key !== firstEdit.key) break;
+      group.push({ item: prepared[j], edit });
+      j++;
+    }
+    if (group.length < 2) {
+      result.push(first);
+      i++;
+      continue;
+    }
+
+    const edits = group.map(({ edit }) => ({
+      old_string: edit.args.old_string,
+      new_string: edit.args.new_string,
+      ...(edit.args.replace_all === true ? { replace_all: true } : {}),
+    }));
+    const syntheticArgs = JSON.stringify({ path: firstEdit.target, edits });
+    const firstItem = group[0].item;
+    result.push({
+      ...firstItem,
+      slot: { ...firstItem.slot, name: 'multi_edit', args: syntheticArgs },
+      st: { ...firstItem.st, tracker: tools.progressTracker('multi_edit'), replay: null },
+      modelIds: group.map(({ item }) => item.modelId),
+      batchedEditCount: group.length,
+      isNew: true,
+    });
+    i = j;
+  }
+  return result;
+}
+
 /** Offset just past the opening quote/bracket of the body, so the path shows at once. */
 const bodyStartIndex = (text) => {
   const m = /"(?:content|new_string|old_string|edits)"\s*:\s*["[]/.exec(text);
@@ -478,6 +555,10 @@ export async function runAgent({
 
       const onDelta = (slot) => {
         if (!useTools || !slot.name) return;
+        // Keep single-edit tool calls off the live activity stream until the
+        // model has finished this response. If it sent several edits to one
+        // file, they can then be represented by one atomic multi_edit action.
+        if (slot.name && 'edit_file'.startsWith(slot.name)) return;
         const now = Date.now();
         let st = live.get(slot);
         if (!st) {
@@ -596,6 +677,9 @@ export async function runAgent({
         live.set(slot, st);
         return { slot, st, isNew, modelId: slot.id || st.uiId };
       });
+      // Preserve every provider tool_call id in the transcript, but execute a
+      // consecutive same-file edit streak as one atomic multi_edit operation.
+      const executionPrepared = coalesceAdjacentFileEdits(prepared, tools);
 
       messages.push({
         role: 'assistant',
@@ -614,8 +698,16 @@ export async function runAgent({
 
       // Tools run one after another. Those still waiting their turn are 'queued' (muted),
       // so a shimmering row always means "working on this right now".
-      for (const [i, p] of prepared.entries()) {
-        if (p.isNew) continue;
+      for (const [i, p] of executionPrepared.entries()) {
+        if (p.isNew) {
+          if (i === 0) continue;
+          let shownArgs = {};
+          try { shownArgs = tools.displayArgs(p.slot.name, JSON.parse(p.slot.args || '{}')); } catch { /* bad JSON is explained during execution */ }
+          send({ agent: { type: 'action_start', id: p.st.uiId, tool: p.slot.name, args: shownArgs } });
+          send({ agent: { type: 'action_update', id: p.st.uiId, patch: { status: 'queued', args: shownArgs } } });
+          p.isNew = false; // execute() will move this already-visible row from queued to running
+          continue;
+        }
         // The model has finished writing every call: show each one's FINAL numbers right away
         // (the throttle may have swallowed the last few lines), and mark those still waiting as queued.
         // A call queued for replay keeps its numbers back — they will be counted up as it is written.
@@ -631,7 +723,7 @@ export async function runAgent({
        * Run one tool call. The chat is told right away when it ends (action_end); the bookkeeping that must
        * happen in order — failure streaks, what the model reads back — is done afterwards, in `settle`.
        */
-      const execute = async ({ slot, st, isNew, modelId }) => {
+      const execute = async ({ slot, st, isNew, modelId, modelIds }) => {
         const id = st.uiId;
         const name = slot.name;
         stats.toolCalls++;
@@ -801,11 +893,11 @@ export async function runAgent({
             durationMs: Date.now() - t0,
           },
         });
-        return { name, modelId, rawArgs: slot.args, res };
+        return { name, modelId, modelIds, rawArgs: slot.args, res };
       };
 
       /** In order: repeated failures get a nudge, then a stop; the model reads each result back. @returns true to stop the round */
-      const settle = ({ name, modelId, rawArgs, res }) => {
+      const settle = ({ name, modelId, modelIds, rawArgs, res }) => {
         let output = truncateMiddle(String(res.output ?? ''), limits.maxOutputChars, 'output');
         let stop = false;
         if (!res.ok && !res.failedSoft && !res.denied) {
@@ -818,7 +910,23 @@ export async function runAgent({
             stop = true;
           }
         }
-        messages.push({ role: 'tool', tool_call_id: modelId, content: output });
+        const answeredIds = Array.isArray(modelIds) && modelIds.length ? modelIds : [modelId];
+        if (answeredIds.length > 1) {
+          messages.push({
+            role: 'tool',
+            tool_call_id: answeredIds[0],
+            content: `${output}\n[These ${answeredIds.length} same-file edits were executed together in one atomic multi_edit call.]`,
+          });
+          for (const id of answeredIds.slice(1)) {
+            messages.push({
+              role: 'tool',
+              tool_call_id: id,
+              content: `[This edit was included in the combined atomic multi_edit result for the preceding same-file edit calls; no separate write was performed.]`,
+            });
+          }
+        } else {
+          messages.push({ role: 'tool', tool_call_id: answeredIds[0], content: output });
+        }
         if (stop) {
           messages.push({
             role: 'user',
@@ -831,11 +939,11 @@ export async function runAgent({
       // Independent read-only calls (reads, searches, outlines…) run side by side; anything that changes
       // something runs on its own, in order. Results always go back to the model in the order it asked.
       const canOverlap = (p) => READ_ONLY_TOOLS.has(p.slot.name) && tools.has(p.slot.name);
-      for (let i = 0; i < prepared.length; ) {
+      for (let i = 0; i < executionPrepared.length; ) {
         if (signal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-        const group = [prepared[i]];
-        if (canOverlap(prepared[i])) {
-          while (i + group.length < prepared.length && group.length < MAX_PARALLEL && canOverlap(prepared[i + group.length])) group.push(prepared[i + group.length]);
+        const group = [executionPrepared[i]];
+        if (canOverlap(executionPrepared[i])) {
+          while (i + group.length < executionPrepared.length && group.length < MAX_PARALLEL && canOverlap(executionPrepared[i + group.length])) group.push(executionPrepared[i + group.length]);
         }
         const finished = await Promise.all(group.map(execute));
         let stopRound = false;

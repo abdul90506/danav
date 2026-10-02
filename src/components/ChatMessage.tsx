@@ -117,21 +117,22 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
       <button
         type="button"
         onClick={() => setUserToggled(!isExpanded)}
-        className="inline-flex items-center gap-1.5 py-1 text-xs font-medium cursor-pointer select-none group/think transition-opacity"
+        aria-expanded={isExpanded}
+        className="inline-flex items-center gap-1.5 py-1 text-xs font-semibold cursor-pointer select-none group/think transition-colors"
       >
         <Brain
           className={`w-3.5 h-3.5 shrink-0 ${
             isStillThinking
-              ? 'thinking-brain-shimmer text-zinc-600 dark:text-zinc-300'
-              : 'text-zinc-500 dark:text-zinc-400 group-hover/think:text-zinc-700 dark:group-hover/think:text-zinc-200'
+              ? 'text-indigo-600 dark:text-indigo-300 animate-pulse'
+              : 'text-zinc-600 dark:text-zinc-300 group-hover/think:text-indigo-600 dark:group-hover/think:text-indigo-300'
           }`}
         />
         {isStillThinking ? (
-          <span className="thinking-shimmer text-xs tracking-wide">
+          <span className="text-xs tracking-wide text-indigo-700 dark:text-indigo-300">
             Thinking...
           </span>
         ) : (
-          <span className="shiny-text text-xs tracking-wide group-hover/think:opacity-90 transition-opacity">
+          <span className="text-xs tracking-wide text-zinc-700 dark:text-zinc-200 group-hover/think:text-indigo-700 dark:group-hover/think:text-indigo-300 transition-colors">
             Thought for {durationSec}s
           </span>
         )}
@@ -145,19 +146,13 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
       {/* Expanded Thinking Box with smooth scroll & isolated container */}
       {isExpanded && (
         <div className="relative mt-1.5 animate-in fade-in duration-150">
-          {/* Subtle top & bottom fades. They stop short of the right edge so the
-              scrollbar stays visible instead of being washed out by the gradient. */}
-          <div className="pointer-events-none absolute top-0 left-0 right-3 h-4 bg-gradient-to-b from-white dark:from-zinc-950 via-white/80 dark:via-zinc-950/80 to-transparent z-10" />
-
           <div
             ref={thinkBoxRef}
             onScroll={handleThinkBoxScroll}
-            className="panel-scroll max-h-56 overflow-y-auto overscroll-y-contain pr-2.5 pl-3 py-2 border-l-2 border-zinc-200/70 dark:border-zinc-800/70 text-zinc-500 dark:text-zinc-400 text-[13px] leading-relaxed font-sans whitespace-pre-wrap select-text scroll-smooth"
+            className="panel-scroll max-h-64 overflow-y-auto overscroll-y-contain px-3.5 py-3 rounded-r-xl border-l-2 border-indigo-300 dark:border-indigo-800 bg-indigo-50/60 dark:bg-zinc-900/70 text-zinc-800 dark:text-zinc-200 text-sm leading-6 font-normal font-sans whitespace-pre-wrap select-text scroll-smooth"
           >
             {thinkingContent}
           </div>
-
-          <div className="pointer-events-none absolute bottom-0 left-0 right-3 h-5 bg-gradient-to-t from-white dark:from-zinc-950 via-white/80 dark:via-zinc-950/80 to-transparent z-10" />
         </div>
       )}
     </div>

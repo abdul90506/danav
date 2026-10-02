@@ -350,7 +350,7 @@ export const TOOL_DEFINITIONS = [
   ),
   fn(
     'edit_file',
-    'Replace ONE exact piece of text in an existing file. old_string must match the file EXACTLY (indentation and line breaks included) and be unique — add a few surrounding lines if needed — unless replace_all=true. Copy it from read_file WITHOUT the line-number prefix. If you have TWO OR MORE changes to make, use multi_edit instead: one call, many edits.',
+    'For exactly ONE change in one existing file. old_string must match the file EXACTLY (indentation and line breaks included) and be unique — add surrounding lines if needed — unless replace_all=true. Copy it from read_file WITHOUT the line-number prefix. If the file needs 2+ changes, NEVER call edit_file repeatedly: use one multi_edit call for all changes, even when target lines are far apart (for example L26, L147, and L924).',
     {
       path: P.path,
       old_string: { type: 'string', description: 'Exact text to find.' },
@@ -365,7 +365,7 @@ export const TOOL_DEFINITIONS = [
       'Each edit is either by TEXT { old_string, new_string, replace_all? } (applied one after another), or by LINE NUMBERS ' +
       '{ start_line, end_line?, new_string } (replace those lines; new_string "" deletes them) / { insert_after_line, new_string } (0 = at the top). ' +
       'Line numbers always refer to the file as you last read it: the edits are applied bottom-up, so they never shift each other. Do not mix the two styles for one file. ' +
-      'Give every edit its own "path" to change several files at once, or set one top-level "path". Prefer this to repeated edit_file calls.',
+      'Give every edit its own "path" to change several files at once, or set one top-level "path". This is the required ONE-CALL method for two or more changes to the same file; do not send one edit_file call per range.',
     {
       path: { ...P.path, description: 'Default file for edits that have no "path" of their own.' },
       edits: {

@@ -771,6 +771,31 @@ test('provider errors surface as a clear error event (after retrying), and the r
   }
 });
 
+test('same-file edit streaks in one model response become one atomic multi_edit action', async () => {
+  const { events, result, dir, requests } = await agentRun({ model: 'fake-edit-streak' });
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(result.toolCalls, 2, 'the initial write plus one combined edit were executed');
+
+  const starts = agentEvents(events, 'action_start');
+  assert.deepEqual(starts.map((action) => action.tool), ['write_file', 'multi_edit']);
+  const edit = agentEvents(events, 'action_end').find((action) => action.result?.kind === 'edit');
+  assert.ok(edit);
+  assert.equal(edit.result.edits, 3);
+  assert.deepEqual(edit.result.ranges, [[26, 26], [147, 147], [924, 924]]);
+
+  const lines = fs.readFileSync(path.join(dir, 'index.html'), 'utf8').split('\n');
+  assert.equal(lines[25], 'line 26 updated');
+  assert.equal(lines[146], 'line 147 updated');
+  assert.equal(lines[923], 'line 924 updated');
+
+  const transcript = requests.at(-1).messages;
+  assertConsistentTranscript(transcript);
+  const assistantCall = transcript.find((message) => message.role === 'assistant' && message.tool_calls?.length === 4);
+  assert.deepEqual(assistantCall.tool_calls.map((call) => call.function.name), [
+    'write_file', 'edit_file', 'edit_file', 'edit_file',
+  ], 'the provider transcript retains its original call ids and schemas');
+});
+
 test('batching: outline, chunked read and ONE multi_edit across two files, through the real loop', async () => {
   const { events, result, dir } = await agentRun({ model: 'fake-batch' });
   assert.equal(result.stopReason, 'completed');

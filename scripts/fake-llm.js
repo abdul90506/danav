@@ -6,7 +6,7 @@
  *   node scripts/fake-llm.js 4010        # then use baseUrl http://127.0.0.1:4010/v1
  *
  * The `model` name picks the scenario: fake-build, fake-slow, fake-fail,
- * fake-approval, fake-silent, fake-bad-calls, fake-loop, fake-bulky, fake-preview, fake-project, fake-burst, fake-batch.
+ * fake-approval, fake-silent, fake-bad-calls, fake-loop, fake-bulky, fake-preview, fake-project, fake-burst, fake-batch, fake-edit-streak.
  */
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
@@ -183,6 +183,21 @@ export const scenarios = {
     }
   },
 
+  /** Three separate same-file edits in one response; the loop should fold them into one multi_edit. */
+  editStreak: ({ roundIdx }) => {
+    if (roundIdx > 0) return { text: 'I updated all three locations together in one atomic edit.' };
+    const content = Array.from({ length: 1000 }, (_, i) => `line ${i + 1}`).join('\n') + '\n';
+    return {
+      text: 'I found three distant lines to update.',
+      toolCalls: [
+        { name: 'write_file', args: { path: 'index.html', content } },
+        { name: 'edit_file', args: { path: 'index.html', old_string: 'line 26\n', new_string: 'line 26 updated\n' } },
+        { name: 'edit_file', args: { path: 'index.html', old_string: 'line 147\n', new_string: 'line 147 updated\n' } },
+        { name: 'edit_file', args: { path: 'index.html', old_string: 'line 924\n', new_string: 'line 924 updated\n' } },
+      ],
+    };
+  },
+
   /** Analyse a big file in chunks, then change two files with ONE multi_edit. */
   batch: ({ roundIdx }) => {
     const big = Array.from({ length: 60 }, (_, i) => (i % 20 === 0 ? `function part${i / 20 + 1}() {` : `  step(${i});`)).join('\n') + '\n';
@@ -285,6 +300,7 @@ const byModel = {
   'fake-project': scenarios.project,
   'fake-burst': scenarios.burst,
   'fake-batch': scenarios.batch,
+  'fake-edit-streak': scenarios.editStreak,
   'fake-truncate': scenarios.truncate,
   'fake-parallel': scenarios.parallel,
   'fake-check': scenarios.check,
