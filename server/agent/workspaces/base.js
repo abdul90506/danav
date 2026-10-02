@@ -69,6 +69,11 @@ export class BaseWorkspace {
   async readBackground(id, opts) { throw new Error('not implemented'); }
   async stopBackground(id) { throw new Error('not implemented'); }
   listBackground() { return []; }
+  /**
+   * listBackground() plus a live running/exit state. Async because a sandbox has to ask
+   * the remote shell; a local workspace already knows. @returns {Promise<Array>}
+   */
+  async listBackgroundStatus() { return this.listBackground(); }
   async isPortOpen(port) { throw new Error('not implemented'); }
   async previewUrl(port) { throw new Error('not implemented'); }
   /** -> { matches: [{ path, line, text }], truncated } */

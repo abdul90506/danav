@@ -82,6 +82,7 @@ const FAILED: Record<string, string> = {
   grep_search: 'Search failed:',
   file_search: 'Search failed:',
   run_command: "Couldn't run",
+  list_processes: "Couldn't list processes",
   read_process_output: "Couldn't read logs of",
   stop_process: "Couldn't stop",
   get_preview_url: 'Preview not ready on',
@@ -300,6 +301,12 @@ function rawLabel(a: AgentAction): ActionLabel {
         expandable: Boolean(a.output) || toolFailed,
       });
     }
+
+    case 'list_processes':
+      return base('Checking processes', 'Listed processes', {
+        meta: !live && r ? (r.count ? `${plural(r.count, 'process')}${r.running ? `, ${r.running} running` : ', none running'}` : 'none') : undefined,
+        expandable: Boolean(a.output),
+      });
 
     case 'read_process_output':
       return base('Checking logs of', 'Checked logs of', {

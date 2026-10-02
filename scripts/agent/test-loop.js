@@ -175,6 +175,97 @@ test('live progress: the action row appears early and its line count grows while
   }
 });
 
+test('a tool call that arrives ALL AT ONCE is still watched being written (replayed, not dumped)', async () => {
+  // Providers such as Vyce/agnes send a whole tool call in a single frame. The row must not
+  // jump straight to "+200": the body is replayed so the count climbs and the tail scrolls.
+  const { events, dir } = await agentRun({ model: 'fake-burst' });
+
+  const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
+  const running = events.findIndex((e, i) => i > start && e.agent?.patch?.status === 'running');
+  const end = events.findIndex((e, i) => i > running && e.agent?.type === 'action_end');
+  assert.ok(start >= 0 && running > start && end > running, `start < running < end (${start}, ${running}, ${end})`);
+
+  // nothing is claimed before the replay: the start event carries no numbers at all
+  assert.equal(events[start].agent.progress, undefined, 'a one-shot call does not publish final numbers up front');
+
+  const replayed = events
+    .slice(running, end)
+    .filter((e) => e.agent?.patch?.progress)
+    .map((e) => e.agent.patch.progress);
+  const counts = replayed.map((p) => p.added);
+  assert.ok(counts.length >= 5, `expected the body to be replayed over several updates, got ${counts}`);
+  assert.deepEqual([...counts].sort((a, b) => a - b), counts, `the replayed count never goes backwards: ${counts}`);
+  assert.ok(counts[0] < counts.at(-1), `the count climbs: ${counts[0]} -> ${counts.at(-1)}`);
+  assert.ok(replayed.some((p) => p.tail?.length > 0), 'the lines being written scroll by');
+
+  // the replay is display only: the file on disk is the full one, and the row ends with real numbers
+  const written = fs.readFileSync(path.join(dir, 'big.js'), 'utf8');
+  assert.equal(countLines(written), 200);
+  assert.equal(events[end].agent.result.added, 200);
+  assert.equal(counts.at(-1), 200, 'the replay reaches the number the result confirms');
+});
+
+test('a provider that really streams is never replayed twice', async () => {
+  // The live count already grew while the model was writing; after `running` there is nothing left to show.
+  const slow = await startFakeLlm({ chunkDelayMs: 6 });
+  try {
+    const events = [];
+    const ws = new LocalWorkspace({ id: 'ws-nr', kind: 'local', name: 'nr', root: tmp('danav-noreplay-'), autoRun: true });
+    await ws.init();
+    await runAgent({
+      provider: { baseUrl: slow.baseUrl },
+      model: 'fake-slow',
+      history: [{ role: 'user', content: 'go' }],
+      workspace: ws,
+      runSearchTool: async () => ({}),
+      send: (e) => events.push(e),
+      signal: new AbortController().signal,
+      runId: genId('run'),
+    });
+    const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
+    const running = events.findIndex((e, i) => i > start && e.agent?.patch?.status === 'running');
+    const end = events.findIndex((e, i) => i > running && e.agent?.type === 'action_end');
+    const before = events.slice(start, running).filter((e) => e.agent?.patch?.progress?.added).length;
+    const after = events.slice(running, end).filter((e) => e.agent?.patch?.progress?.added).length;
+    assert.ok(before >= 3, `a streaming provider is followed live (${before} updates before running)`);
+    assert.equal(after, 0, `nothing is replayed once the call was already streamed (${after} updates after running)`);
+  } finally {
+    await slow.close();
+  }
+});
+
+test('a stream squeezed inside the throttle window still counts up (replay covers what the throttle swallowed)', async () => {
+  // A provider can deliver every fragment within ~100ms: the 140ms throttle then suppresses every
+  // intermediate update, and without the replay the row would jump straight to its final number.
+  const fast = await startFakeLlm({ chunkDelayMs: 1 });
+  try {
+    const events = [];
+    const ws = new LocalWorkspace({ id: 'ws-fast', kind: 'local', name: 'fast', root: tmp('danav-fast-'), autoRun: true });
+    await ws.init();
+    await runAgent({
+      provider: { baseUrl: fast.baseUrl },
+      model: 'fake-slow',
+      history: [{ role: 'user', content: 'go' }],
+      workspace: ws,
+      runSearchTool: async () => ({}),
+      send: (e) => events.push(e),
+      signal: new AbortController().signal,
+      runId: genId('run'),
+    });
+    const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
+    const end = events.findIndex((e, i) => i > start && e.agent?.type === 'action_end');
+    const counts = events
+      .slice(start, end)
+      .filter((e) => e.agent?.patch?.progress?.added)
+      .map((e) => e.agent.patch.progress.added);
+    assert.ok(counts.length >= 3, `the count must climb in several steps, got ${counts}`);
+    assert.deepEqual([...counts].sort((a, b) => a - b), counts, `never backwards: ${counts}`);
+    assert.equal(counts.at(-1), events[end].agent.result.added, 'the replay lands on the number the result confirms');
+  } finally {
+    await fast.close();
+  }
+});
+
 test('overwriting a file: "−" is live too (what really differs from the file on disk), with the tail of what is being typed', async () => {
   const slow = await startFakeLlm({ chunkDelayMs: 12 });
   try {

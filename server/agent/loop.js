@@ -23,6 +23,83 @@ const OUTPUT_FLUSH_MS = 120;
 const MAX_PARALLEL = 6;
 
 // ---------------------------------------------------------------------------
+// Replaying a file that arrived all at once
+// ---------------------------------------------------------------------------
+// Some providers hand over a whole tool call in ONE chunk (measured on Vyce/agnes:
+// 1829 characters of write_file arguments in a single frame after 33s of reasoning).
+// Nothing was wrong with the model — but the chat then shows a 300-line file popping
+// into existence, and the "+N" counter has nothing to count. So when a call like that
+// is detected, its body is replayed over a moment: the same partial-argument reader
+// that follows a real token stream is fed growing prefixes of the finished JSON, and
+// the row counts up and scrolls its last lines exactly as if it were being typed.
+// The tool itself still runs at full speed — only the display is paced.
+
+/** Calls worth replaying: the ones whose body is worth watching. */
+const REVEAL_TOOLS = new Set(['write_file', 'append_file', 'edit_file', 'multi_edit']);
+/** Below this the file is on screen before anyone could read it anyway. */
+const REVEAL_MIN_CHARS = 420;
+const REVEAL_TICK_MS = 30;
+/**
+ * How long after a call's first frame a fully-formed body still counts as "arrived all at once".
+ * A streamed file takes seconds to arrive; a dumped one is complete in the same millisecond.
+ */
+const ONE_SHOT_WINDOW_MS = 150;
+/** ~220 characters per step, clamped: a small file flashes by, a big one takes ~1.4s. */
+const revealSteps = (len) => Math.max(6, Math.min(45, Math.round(len / 220)));
+
+/** Did the model finish this call in the frame we just saw? */
+const isCompleteJson = (text) => {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Offset just past the opening quote/bracket of the body, so the path shows at once. */
+const bodyStartIndex = (text) => {
+  const m = /"(?:content|new_string|old_string|edits)"\s*:\s*["[]/.exec(text);
+  return m ? m.index + m[0].length : 0;
+};
+
+/**
+ * A fresh progress tracker for a replay. It is handed the path up front: the model may put
+ * "content" before "path", and without the path the tracker cannot know what is on disk — an
+ * overwrite would then replay with no numbers at all.
+ */
+function replayTracker(tools, name, argsText) {
+  let path;
+  try {
+    path = JSON.parse(argsText)?.path;
+  } catch {
+    /* not complete after all — the tracker will pick the path up if it arrives */
+  }
+  return tools.progressTracker(name, typeof path === 'string' && path ? { path } : {});
+}
+
+/**
+ * Walk the finished arguments from "body just opened" to "whole call", publishing the
+ * progress of each prefix. @returns the number of updates sent.
+ */
+async function replayBody({ text, tracker, send, id, signal }) {
+  const from = bodyStartIndex(text);
+  const steps = revealSteps(text.length);
+  let sent = 0;
+  for (let s = 1; s <= steps; s++) {
+    if (signal?.aborted) return sent;
+    const cut = from + Math.round(((text.length - from) * s) / steps);
+    const { progress } = tracker.update(text.slice(0, cut));
+    if (progress) {
+      send({ agent: { type: 'action_update', id, patch: { progress } } });
+      sent++;
+    }
+    if (s < steps) await new Promise((r) => setTimeout(r, REVEAL_TICK_MS));
+  }
+  return sent;
+}
+
+// ---------------------------------------------------------------------------
 // Context management
 // ---------------------------------------------------------------------------
 
@@ -188,18 +265,42 @@ export async function runAgent({
         const now = Date.now();
         let st = live.get(slot);
         if (!st) {
-          st = { uiId: genId('a'), lastSent: now, lastKey: '', tracker: tools.progressTracker(slot.name) };
+          st = {
+            uiId: genId('a'), firstAt: now, lastSent: now, lastKey: '',
+            deltas: 0, published: false, replay: null, tracker: tools.progressTracker(slot.name),
+          };
           live.set(slot, st);
-          const { args, progress } = st.tracker.update(slot.args);
+        }
+        st.deltas++;
+        const { args, progress } = st.tracker.update(slot.args);
+
+        // A body that lands WHOLE within a blink of the call starting (Vyce/agnes send one frame;
+        // Gemini and some proxies send the name and then the entire body) has nothing to stream.
+        // Hold its numbers back and replay it while it is written — but only while nothing has been
+        // shown yet, so a count the user is already watching is never restarted from zero.
+        const wholeAtOnce =
+          REVEAL_TOOLS.has(slot.name) && !st.published && !st.replay &&
+          slot.args.length >= REVEAL_MIN_CHARS && isCompleteJson(slot.args) &&
+          now - st.firstAt < ONE_SHOT_WINDOW_MS;
+        if (wholeAtOnce) {
+          st.replay = { text: slot.args, tracker: replayTracker(tools, slot.name, slot.args) };
+          if (st.deltas === 1) send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args } });
+          return;
+        }
+        st.replay = null; // it turned out to be a real stream after all: follow it as usual
+
+        if (st.deltas === 1) {
           send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args, ...(progress ? { progress } : {}) } });
+          if (progress) st.published = true;
+          st.lastSent = now;
           return;
         }
         if (now - st.lastSent < PROGRESS_THROTTLE_MS) return;
-        const { args, progress } = st.tracker.update(slot.args);
         const key = JSON.stringify([args, progress && [progress.added, progress.removed, progress.tail]]);
         if (key === st.lastKey) return;
         st.lastKey = key;
         st.lastSent = now;
+        if (progress) st.published = true;
         send({ agent: { type: 'action_update', id: st.uiId, patch: { args, ...(progress ? { progress } : {}) } } });
       };
 
@@ -236,7 +337,10 @@ export async function runAgent({
 
       // ---- echo the assistant turn, then run each tool -------------------------
       const prepared = calls.map((slot) => {
-        const st = live.get(slot) || { uiId: genId('a'), lastSent: 0, lastKey: '', tracker: tools.progressTracker(slot.name) };
+        const st = live.get(slot) || {
+          uiId: genId('a'), firstAt: Date.now(), lastSent: 0, lastKey: '',
+          deltas: 0, published: false, replay: null, tracker: tools.progressTracker(slot.name),
+        };
         const isNew = !live.has(slot);
         live.set(slot, st);
         return { slot, st, isNew, modelId: slot.id || st.uiId };
@@ -263,8 +367,12 @@ export async function runAgent({
         if (p.isNew) continue;
         // The model has finished writing every call: show each one's FINAL numbers right away
         // (the throttle may have swallowed the last few lines), and mark those still waiting as queued.
-        const { progress } = p.st.tracker.update(p.slot.args);
-        const patch = { ...(progress ? { progress } : {}), ...(i > 0 ? { status: 'queued' } : {}) };
+        // A call queued for replay keeps its numbers back — they will be counted up as it is written.
+        const patch = { ...(i > 0 ? { status: 'queued' } : {}) };
+        if (!p.st.replay) {
+          const { progress } = p.st.tracker.update(p.slot.args);
+          if (progress) patch.progress = progress;
+        }
         if (Object.keys(patch).length) send({ agent: { type: 'action_update', id: p.st.uiId, patch } });
       }
 
@@ -292,6 +400,22 @@ export async function runAgent({
         const shownArgs = argError ? {} : tools.displayArgs(name, args);
         if (isNew) send({ agent: { type: 'action_start', id, tool: name, args: shownArgs } });
         send({ agent: { type: 'action_update', id, patch: { status: 'running', args: shownArgs } } });
+
+        // A body the user has not watched arrive — dumped in one frame, squeezed inside the
+        // throttle window, or sent by a provider that never streams tool calls at all — is
+        // replayed now. If a count is already on screen (`st.published`) it is left alone:
+        // restarting it from zero would look like the file was being rewritten.
+        if (
+          !argError && !st.replay && !st.published && REVEAL_TOOLS.has(name) &&
+          String(slot.args || '').length >= REVEAL_MIN_CHARS && isCompleteJson(slot.args)
+        ) {
+          st.replay = { text: slot.args, tracker: replayTracker(tools, name, slot.args) };
+        }
+        if (st.replay) {
+          const { text, tracker } = st.replay;
+          st.replay = null;
+          await replayBody({ text, tracker, send, id, signal });
+        }
 
         // coalesce terminal output so a chatty build doesn't flood the stream
         let outBuf = '';

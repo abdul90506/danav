@@ -316,6 +316,36 @@ test('background servers: readiness is probed, a duplicate start is not repeated
   await ws.dispose();
 });
 
+test('list_processes: the agent can recover the ids of servers it started in an earlier turn', async () => {
+  if (isWin) return;
+  const { run, ws } = await setup();
+
+  const empty = await run('list_processes', {});
+  assert.equal(empty.ok, true, empty.output);
+  assert.equal(empty.ui.count, 0);
+  assert.match(empty.output, /No background processes/);
+
+  const started = await run('run_command', { command: 'node -e "setTimeout(()=>{},30000)"', background: true });
+  assert.equal(started.ok, true, started.output);
+  const id = started.ui.id;
+
+  const listed = await run('list_processes', {});
+  assert.equal(listed.ok, true, listed.output);
+  assert.equal(listed.ui.count, 1);
+  assert.equal(listed.ui.running, 1);
+  assert.match(listed.output, new RegExp(`${id}\\s+RUNNING`), listed.output);
+  assert.match(listed.output, /setTimeout/, 'the command line is shown so the right process can be picked out');
+
+  // still useful once it dies: an id whose server crashed must not look alive
+  await run('stop_process', { id });
+  await new Promise((r) => setTimeout(r, 500));
+  const after = await run('list_processes', {});
+  assert.equal(after.ui.count, 1);
+  assert.equal(after.ui.running, 0);
+  assert.match(after.output, /EXITED/);
+  await ws.dispose();
+});
+
 test('background servers: a process that never opens its port is called out', async () => {
   if (isWin) return;
   const prev = process.env.DANAV_BG_PORT_WAIT_MS;
@@ -557,6 +587,31 @@ test('progress tracker: an overwrite waits for the file on disk, and the live nu
 
   // other tools need no disk lookup at all
   assert.equal(tools.progressTracker('edit_file').update('{"path": "a.js", "old_string": "x", "new_string": "y\\nz').progress.added, 2);
+});
+
+test('progress tracker: a call that puts "content" BEFORE "path" still gets live numbers', async () => {
+  // Real models vary the field order. Without the path the tracker cannot know what is on disk,
+  // and an overwrite used to replay with no "+N −M" at all.
+  const { tools, dir } = await setup();
+  fs.writeFileSync(path.join(dir, 'notes.css'), Array.from({ length: 45 }, (_, i) => `.old-${i + 1} { color: red; }`).join('\n') + '\n');
+  // real newlines: JSON.stringify escapes them, exactly as a provider's stream would
+  const body = Array.from({ length: 67 }, (_, i) => `.rule-${i + 1} { display: flex; }`).join('\n') + '\n';
+  const argsText = JSON.stringify({ content: body, path: 'notes.css' });
+  assert.ok(argsText.indexOf('"content"') < argsText.indexOf('"path"'), 'the fixture really does put content first');
+
+  // primed with the path the caller already knows (a call that arrived complete)
+  const t = tools.progressTracker('write_file', { path: 'notes.css' });
+  await new Promise((r) => setTimeout(r, 60));
+  const seen = [0.3, 0.6, 1].map((f) => t.update(argsText.slice(0, Math.round(argsText.length * f))).progress);
+  assert.ok(seen.every((p) => p), `every prefix reports progress: ${JSON.stringify(seen)}`);
+  assert.equal(seen.at(-1).added, 67, 'the final prefix reports the whole file');
+  assert.ok(seen.at(-1).removed > 0, 'an overwrite shows what it replaces');
+
+  // and without the hint it still works once the path itself arrives
+  const u = tools.progressTracker('write_file');
+  u.update(argsText);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.ok(u.update(argsText).progress, 'the path in the text primes it too');
 });
 
 test('peekPartialArgs is re-exported from tools with the progress shape the loop relies on', () => {

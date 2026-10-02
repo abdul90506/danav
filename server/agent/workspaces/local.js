@@ -436,7 +436,7 @@ export class LocalWorkspace extends BaseWorkspace {
 
   listBackground() {
     return [...this.procs.values()].map((p) => ({
-      id: p.id, pid: p.pid, command: p.command, running: !p.exited, exitCode: p.exitCode,
+      id: p.id, pid: p.pid, command: p.command, running: !p.exited, exitCode: p.exitCode, startedAt: p.startedAt,
     }));
   }
 

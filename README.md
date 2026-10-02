@@ -83,6 +83,8 @@ Started   $ vite --host 0.0.0.0  bg-1 :5173
 Preview ready on port 5173  abc-5173.sandbox.novita.ai ↗
 ```
 
+A file is always *watched* being written, never dumped. Providers that stream tool calls (OpenAI, Gemini, …) drive `+N` directly from the token stream. Providers that hand over a whole call in one frame — Vyce/Agnes and several proxies do — get the body replayed instead: the same partial-argument reader is fed growing prefixes of the finished JSON, so the count climbs and the last lines scroll exactly as if it were being typed. Only the display is paced; the write itself happens at full speed, and the row finishes on the numbers the real diff reports.
+
 ### Two kinds of workspace
 
 | | ☁ Cloud sandbox | 💻 This machine |
@@ -102,9 +104,9 @@ Preview ready on port 5173  abc-5173.sandbox.novita.ai ↗
 
 ### Tools
 
-`list_dir` · `read_file` (line ranges) · `write_file` · `edit_file` · `multi_edit` (several edits, atomically) · `delete_file` · `move_file` · `create_dir` · `grep_search` · `file_search` · `run_command` (foreground, or `background` for servers) · `read_process_output` · `stop_process` · `get_preview_url` · `web_search` · `fetch_url` · `image_search` · `update_plan`
+`list_dir` · `file_outline` · `read_file` (line ranges, several in one call) · `write_file` · `append_file` · `edit_file` · `multi_edit` (several edits, in one file or across many, atomically) · `delete_file` · `move_file` · `create_dir` · `grep_search` · `file_search` · `replace_in_files` · `run_command` (foreground, or `background` for servers) · `list_processes` · `read_process_output` · `stop_process` · `get_preview_url` · `web_search` · `fetch_url` · `image_search` · `remember` / `forget` · `update_plan`
 
-Edits are exact-match with guidance when they miss (closest lines are shown), tolerate indentation drift, keep CRLF files CRLF, and report real `+added −removed` and line ranges computed from a Myers diff.
+Edits are exact-match with guidance when they miss (closest lines are shown), tolerate indentation drift, keep CRLF files CRLF, and report real `+added −removed` and line ranges computed from a Myers diff. `list_processes` recovers the ids of background servers from earlier turns, so a dev server started last message can still be checked, previewed or stopped.
 
 ### Safety model
 

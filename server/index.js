@@ -908,7 +908,7 @@ app.post('/api/providers/models', async (req, res) => {
 // Helper for Mock responses
 async function streamMockResponse(res, messages, model, thinkingLevel) {
   const lastMsg = messages[messages.length - 1]?.content || 'Hello';
-  const isReasoning = model.includes('reasoning') || thinkingLevel !== 'Auto';
+  const isReasoning = String(model || '').includes('reasoning') || thinkingLevel !== 'Auto';
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -1131,14 +1131,27 @@ const CHAT_TOOL_SYSTEM_PROMPT =
   '- If a tool fails, say so plainly rather than inventing the information.';
 
 app.post('/api/chat', async (req, res) => {
-  const { provider, model, messages, thinkingLevel, toolsEnabled } = req.body;
+  const { provider, model: modelInput, messages, thinkingLevel, toolsEnabled } = req.body;
 
   if (!provider) {
     return res.status(400).json({ error: 'Provider configuration is missing' });
   }
 
-  if (!model) {
+  if (!modelInput) {
     return res.status(400).json({ error: 'Model selection is missing' });
+  }
+
+  /**
+   * Everything below treats the model as a plain id string (`model.includes(...)`,
+   * `model.toLowerCase()`). A caller that hands over the whole model object — or a number —
+   * used to take the route down with "model.includes is not a function"; accept it instead.
+   */
+  const model =
+    typeof modelInput === 'string'
+      ? modelInput.trim()
+      : String(modelInput?.id ?? modelInput?.name ?? '').trim();
+  if (!model) {
+    return res.status(400).json({ error: 'Model selection is missing (expected a model id).' });
   }
 
   if (!messages || !Array.isArray(messages) || messages.length === 0) {

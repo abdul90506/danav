@@ -464,7 +464,35 @@ export class SandboxWorkspace extends BaseWorkspace {
   }
 
   listBackground() {
-    return this.procs().map((p) => ({ id: p.id, pid: p.pid, command: p.command }));
+    return this.procs().map((p) => ({ id: p.id, pid: p.pid, command: p.command, startedAt: p.startedAt }));
+  }
+
+  /**
+   * Whether each process is alive, in ONE round trip: without this the agent could list the
+   * servers it started but not tell a running one from one that died on its first request.
+   */
+  async listBackgroundStatus() {
+    const procs = this.listBackground();
+    if (!procs.length) return [];
+    const probe = procs
+      .map((p) => {
+        const base = `${BG_DIR}/${p.id}`;
+        return `if [ -f ${base}.exit ]; then echo "${p.id} EXITED $(cat ${base}.exit 2>/dev/null)"; ` +
+          `elif kill -0 $(cat ${base}.pid 2>/dev/null) 2>/dev/null; then echo "${p.id} RUNNING"; ` +
+          `else echo "${p.id} GONE"; fi`;
+      })
+      .join('; ');
+    const state = new Map();
+    try {
+      const r = await this.execRaw(probe);
+      for (const line of String(r.stdout || '').split('\n')) {
+        const m = /^(\S+)\s+(RUNNING|EXITED|GONE)(?:\s+(\d+))?/.exec(line.trim());
+        if (m) state.set(m[1], { running: m[2] === 'RUNNING', exitCode: m[2] === 'EXITED' ? Number(m[3]) : null });
+      }
+    } catch {
+      /* the ids and commands are still worth showing */
+    }
+    return procs.map((p) => ({ ...p, ...(state.get(p.id) || {}) }));
   }
 
   async isPortOpen(port) {

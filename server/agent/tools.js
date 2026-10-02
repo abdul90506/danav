@@ -423,6 +423,11 @@ export const TOOL_DEFINITIONS = [
     ['command']
   ),
   fn(
+    'list_processes',
+    'List this workspace\'s background processes: id, command, and whether each is still running or has exited. Use it to recover the id of a server you started in an earlier turn (for read_process_output, stop_process or get_preview_url), or to check that a dev server survived.',
+    {}
+  ),
+  fn(
     'read_process_output',
     'Show the latest output of a background process started with run_command(background=true), and whether it is still running.',
     { id: { type: 'string', description: 'Process id such as "bg-1".' }, tail_lines: { type: 'integer', description: 'Default 60.' } },
@@ -480,7 +485,8 @@ export const TOOL_DEFINITIONS = [
 ];
 
 export const READ_ONLY_TOOLS = new Set([
-  'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'read_process_output', 'web_search', 'fetch_url', 'image_search',
+  'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'list_processes', 'read_process_output', 'web_search', 'fetch_url',
+  'image_search',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -593,22 +599,29 @@ export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, pro
    * as lines are written (for an overwrite, "−" is what really differs from the file on disk), and the
    * last few lines of what is being typed.
    */
-  const progressTracker = (name) => {
+  const progressTracker = (name, { path: knownPath } = {}) => {
     let oldLines = null;
     let oldKnown = name !== 'write_file'; // only an overwrite needs to know what is on disk
     let started = false;
     let maxAdded = 0;
     let maxRemoved = 0;
+    /** Start reading the file on disk, so the live "−" can be computed. Idempotent. */
+    const prime = (p) => {
+      if (started || name !== 'write_file' || !p) return;
+      started = true;
+      existingLines(p)
+        .then((l) => { oldLines = l; })
+        .catch(() => {})
+        .finally(() => { oldKnown = true; });
+    };
+    // The caller may already know the path (a call that arrived complete). Prime with it: a model
+    // that writes "content" BEFORE "path" would otherwise keep the gate shut for the whole write,
+    // and an overwrite would show no live numbers at all.
+    prime(knownPath);
     return {
       update(argsText) {
         const { body, ...peek } = peekPartialArgs(name, argsText, { oldLines: oldLines && oldLines.length <= 4000 ? oldLines : undefined });
-        if (name === 'write_file' && !started && peek.args.path) {
-          started = true;
-          existingLines(peek.args.path)
-            .then((l) => { oldLines = l; })
-            .catch(() => {})
-            .finally(() => { oldKnown = true; });
-        }
+        prime(peek.args.path);
         // Until we know whether this overwrites something, "+N" would mean "lines written" now and
         // "lines that differ" a moment later, and the counter would jump backwards. Wait for it.
         if (!oldKnown) return { args: peek.args };
@@ -968,6 +981,29 @@ export function buildToolset({ workspace: ws, runSearchTool, redact, lookup, pro
         ui: { kind: 'command', command: clip(command, 600), exitCode: r.exitCode, durationMs: r.durationMs, timedOut: r.timedOut, aborted: r.aborted },
         uiOutput: truncateMiddle(output.trimEnd(), 6000, 'output'),
         failedSoft: r.exitCode !== 0, // a failing command is information, not a tool failure
+      };
+    },
+
+    async list_processes() {
+      const procs = await ws.listBackgroundStatus();
+      if (!procs.length) {
+        return { output: 'No background processes in this workspace.', ui: { kind: 'procs', count: 0, running: 0 } };
+      }
+      const running = procs.filter((p) => p.running).length;
+      const lines = procs.map((p) => {
+        const state =
+          p.running === undefined
+            ? 'UNKNOWN'
+            : p.running
+              ? 'RUNNING'
+              : `EXITED${p.exitCode !== null && p.exitCode !== undefined ? ` (code ${p.exitCode})` : ''}`;
+        const age = p.startedAt ? ` · up ${Math.max(1, Math.round((Date.now() - p.startedAt) / 1000))}s` : '';
+        return `${p.id}  ${state}  ${clip(p.command, 120)}${age}`;
+      });
+      return {
+        output: `${procs.length} background process${procs.length === 1 ? '' : 'es'} (${running} running):\n${lines.join('\n')}`,
+        ui: { kind: 'procs', count: procs.length, running },
+        uiOutput: lines.join('\n'),
       };
     },
 
