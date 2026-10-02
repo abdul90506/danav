@@ -564,6 +564,17 @@ test('bad tool calls: unknown tool, truncated JSON and a failing read all come b
   for (const a of echoed) JSON.parse(a);
 });
 
+test('malformed tool-call JSON is recovered end to end: the file is written, no invalid-JSON error', async () => {
+  const dir = tmp('danav-mangled-');
+  const ws = new LocalWorkspace({ id: 'ws-m', kind: 'local', name: 'm', root: dir, autoRun: true });
+  const { requests, result } = await agentRun({ model: 'fake-mangled', workspace: ws });
+  const html = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
+  assert.match(html, /<!DOCTYPE html>/, 'the recovered content reached disk');
+  const toolMsgs = requests.at(-1).messages.filter((m) => m.role === 'tool').map((m) => m.content);
+  assert.ok(!toolMsgs.some((c) => /not valid JSON/.test(c)), 'the malformed call is recovered, not surfaced as an error');
+  assert.equal(result.stopReason, 'completed');
+});
+
 test('context pruning: old tool output and file bodies are elided first; whole rounds only as a last resort', async () => {
   const build = () => {
     const msgs = [

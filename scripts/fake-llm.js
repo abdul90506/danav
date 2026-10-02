@@ -106,6 +106,18 @@ export const scenarios = {
     return nudged ? { text: 'I created a.txt.' } : { text: '' };
   },
 
+  mangled: ({ roundIdx }) => {
+    if (roundIdx === 0) {
+      // the Vyce/agnes failure mode: a missing comma between fields, but every value complete
+      return {
+        toolCalls: [
+          { name: 'write_file', rawArgs: '{"path": "index.html" "content": "<!DOCTYPE html>\\n<html>\\n<body>\\n<h1>Hi</h1>\\n</body>\\n</html>\\n"}' },
+        ],
+      };
+    }
+    return { text: 'Wrote index.html.' };
+  },
+
   badCalls: ({ roundIdx }) => {
     if (roundIdx === 0) {
       return {
@@ -251,6 +263,7 @@ const byModel = {
   'fake-approval': scenarios.approval,
   'fake-silent': scenarios.silent,
   'fake-bad-calls': scenarios.badCalls,
+  'fake-mangled': scenarios.mangled,
   'fake-loop': scenarios.loop,
   'fake-bulky': scenarios.bulky,
   'fake-preview': scenarios.preview,
