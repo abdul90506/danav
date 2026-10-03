@@ -438,8 +438,26 @@ app.post('/api/settings', (req, res) => {
   if (!req.is('application/json') || !req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
     return res.status(400).json({ success: false, error: 'Settings must be sent as a JSON object.' });
   }
-  if (Object.hasOwn(req.body, 'providers') && !Array.isArray(req.body.providers)) {
-    return res.status(400).json({ success: false, error: 'Providers must be an array.' });
+  if (Object.hasOwn(req.body, 'providers')) {
+    if (!Array.isArray(req.body.providers)) {
+      return res.status(400).json({ success: false, error: 'Providers must be an array.' });
+    }
+    // Refuse rather than silently storing something the UI can never open. This
+    // is also what protects a stored API key: a provider list that is replaced by
+    // junk entries takes its credentials with it.
+    const bad = req.body.providers.findIndex(
+      (provider) =>
+        !provider ||
+        typeof provider !== 'object' ||
+        Array.isArray(provider) ||
+        !String(provider.id ?? '').trim()
+    );
+    if (bad !== -1) {
+      return res.status(400).json({
+        success: false,
+        error: `Provider ${bad + 1} is not valid (each provider needs an "id"). Nothing was saved.`,
+      });
+    }
   }
 
   const current = readSettingsFromDisk();
@@ -509,6 +527,10 @@ const isDroppableArtifact = (text) => {
  */
 function cleanConversationsForDisk(conversations) {
   if (!Array.isArray(conversations)) return [];
+  // Anything that is not an object cannot be a conversation; dropping it here
+  // keeps one malformed entry from failing the whole save (destructuring `null`
+  // threw, and the user's write was reported as a 500).
+  const list = conversations.filter((conv) => conv && typeof conv === 'object' && !Array.isArray(conv));
   const cleanText = (str) => {
     if (!str || typeof str !== 'string') return str;
     return str
@@ -518,7 +540,7 @@ function cleanConversationsForDisk(conversations) {
       .trim();
   };
 
-  return conversations.map((conv) => {
+  return list.map((conv) => {
     // Chats created before agent mode was removed still carry `mode`,
     // `workspace` and `summary`. Nothing reads them any more, so drop them
     // instead of carrying dead keys in the store forever.
@@ -526,7 +548,7 @@ function cleanConversationsForDisk(conversations) {
 
     return {
       ...restConv,
-      messages: (conv.messages || []).map((msg) => {
+      messages: (Array.isArray(conv.messages) ? conv.messages : []).filter((msg) => msg && typeof msg === 'object').map((msg) => {
         let cleanedContent = cleanText(msg.content);
         if (isDroppableArtifact(cleanedContent)) {
           cleanedContent = '';
@@ -783,9 +805,32 @@ app.post('/api/chat/title', async (req, res) => {
 
 // Helper: Normalize URL
 function normalizeBaseUrl(url) {
-  if (!url) return '';
-  let cleaned = url.trim().replace(/\/+$/, '');
+  if (url === undefined || url === null) return '';
+  // Coerce instead of throwing: `url.trim is not a function` was a 500 when a
+  // number reached here from a settings payload.
+  const cleaned = String(url).trim().replace(/\/+$/, '');
   return cleaned;
+}
+
+/**
+ * Is this a Base URL the server can actually call?
+ *
+ * A provider endpoint is fetched as `${baseUrl}/chat/completions`, so anything
+ * that is not http(s) became "Failed to parse URL from not a url/chat/
+ * completions" — a 500 that says nothing about the real mistake.
+ */
+function baseUrlProblem(rawUrl) {
+  const value = normalizeBaseUrl(rawUrl);
+  if (!value) return 'The provider has no Base URL. Add one in Settings.';
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return `The provider Base URL must start with http:// or https:// (got "${value.slice(0, 60)}").`;
+    }
+  } catch {
+    return `"${value.slice(0, 60)}" is not a valid provider Base URL. Use the full address, e.g. https://api.openai.com/v1.`;
+  }
+  return null;
 }
 
 /**
@@ -821,8 +866,9 @@ app.post('/api/providers/test', async (req, res) => {
     return res.json({ success: true, message: 'Built-in Demo provider is ready.' });
   }
 
-  if (!baseUrl) {
-    return res.status(400).json({ success: false, error: 'Base URL is required' });
+  const urlProblem = baseUrlProblem(baseUrl);
+  if (urlProblem) {
+    return res.status(400).json({ success: false, error: urlProblem });
   }
 
   const cleanUrl = normalizeBaseUrl(baseUrl);
@@ -944,6 +990,11 @@ app.post('/api/providers/models', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Base URL is required' });
   }
 
+  const urlProblem = baseUrlProblem(baseUrl);
+  if (urlProblem) {
+    return res.status(400).json({ success: false, error: urlProblem });
+  }
+
   const cleanUrl = normalizeBaseUrl(baseUrl);
 
   try {
@@ -1049,9 +1100,11 @@ app.post('/api/providers/models', async (req, res) => {
     if (err.name === 'AbortError') {
       return res.status(408).json({ success: false, error: 'Fetch models timed out after 12 seconds' });
     }
-    return res.status(500).json({
+    // A provider the server cannot reach is a bad-gateway problem, not a bug in
+    // this app — and the message should name the address that failed.
+    return res.status(502).json({
       success: false,
-      error: `Failed to fetch models: ${err.message || 'Network error'}`,
+      error: `Could not reach ${cleanUrl}/models: ${err.message || 'network error'}. Check the Base URL and that the provider is online.`,
     });
   }
 });
@@ -1342,6 +1395,11 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: refusal });
   }
 
+  const urlProblem = baseUrlProblem(provider.baseUrl);
+  if (urlProblem) {
+    return res.status(400).json({ error: urlProblem });
+  }
+
   if (!modelInput) {
     return res.status(400).json({ error: 'Model selection is missing' });
   }
@@ -1361,6 +1419,16 @@ app.post('/api/chat', async (req, res) => {
 
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Messages array is required' });
+  }
+  // Every entry is about to be read as `m.role`, `m.content`. A null or a number
+  // in the list used to take the whole route down with a TypeError.
+  const malformedIndex = messages.findIndex(
+    (m) => !m || typeof m !== 'object' || typeof m.role !== 'string' || !m.role
+  );
+  if (malformedIndex !== -1) {
+    return res.status(400).json({
+      error: `Message ${malformedIndex + 1} of ${messages.length} is not a valid chat message (expected an object with a role).`,
+    });
   }
 
   // Handle Mock provider
@@ -1908,7 +1976,12 @@ app.post('/api/chat', async (req, res) => {
  * read-only part the chat's Search toggle actually uses.
  */
 async function handleSearchTool(req, res) {
-  const { tool, args = {} } = req.body || {};
+  const { tool } = req.body || {};
+  // `args = {}` only covers `undefined`: an explicit `"args": null` used to reach
+  // the handlers and be read as `args.query`, taking the route down.
+  const args = req.body?.args && typeof req.body.args === 'object' && !Array.isArray(req.body.args)
+    ? req.body.args
+    : {};
 
   try {
     if (tool === 'web_search') {

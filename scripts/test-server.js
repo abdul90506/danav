@@ -185,6 +185,100 @@ await test('POST /api/settings rejects a malformed body with 400, not a crash', 
   assert.match(json.error, /providers/i);
 });
 
+await test('a provider list of junk is refused instead of wiping the stored providers', async () => {
+  // This one used to answer 200 and write `[{ id: 5 }]` over a real provider —
+  // silently destroying the configuration (and the stored key) behind it.
+  for (const providers of [[null, { id: 5 }], [{}], ['x'], [null]]) {
+    const { status, json } = await api('POST', '/api/settings', { providers });
+    assert.strictEqual(status, 400, `expected 400 for ${JSON.stringify(providers)}`);
+    assert.match(json.error, /not valid|id/i);
+  }
+
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'settings.json'), 'utf-8'));
+  assert.ok(
+    onDisk.providers.some((p) => p.id === 'provider-test'),
+    'the previously stored provider must still be there'
+  );
+});
+
+await test('a provider with a junk Base URL is coerced on save, not stored as a number', async () => {
+  const { status } = await api('POST', '/api/settings', {
+    providers: [
+      {
+        id: 'provider-coerce',
+        name: 'Coerced',
+        baseUrl: 123,
+        models: [null, 'nope', { id: 42, name: 42 }],
+      },
+    ],
+  });
+  assert.strictEqual(status, 200);
+  const stored = JSON.parse(fs.readFileSync(path.join(dataDir, 'settings.json'), 'utf-8'))
+    .providers.find((p) => p.id === 'provider-coerce');
+  assert.strictEqual(stored.baseUrl, '123', 'a scalar base URL becomes a string');
+  assert.strictEqual(stored.models.length, 1, 'only the usable model survives');
+  assert.strictEqual(stored.models[0].id, '42');
+});
+
+await test('malformed chat requests are answered 400, never 500', async () => {
+  const base = { model: 'test-model', messages: [{ role: 'user', content: 'hi' }] };
+
+  const numberUrl = await api('POST', '/api/chat', { ...base, provider: { baseUrl: 123 } });
+  assert.strictEqual(numberUrl.status, 400);
+  assert.match(numberUrl.json.error, /Base URL/i);
+
+  const notAUrl = await api('POST', '/api/chat', { ...base, provider: { baseUrl: 'not a url' } });
+  assert.strictEqual(notAUrl.status, 400);
+  assert.match(notAUrl.json.error, /not a valid provider Base URL/i);
+
+  const junkMessages = await api('POST', '/api/chat', {
+    ...base,
+    provider: { baseUrl: 'https://example.invalid/v1' },
+    messages: [null, 5, { role: 'user' }],
+  });
+  assert.strictEqual(junkMessages.status, 400);
+  assert.match(junkMessages.json.error, /Message 1 of 3/);
+
+  const badScheme = await api('POST', '/api/chat', { ...base, provider: { baseUrl: 'file:///etc/passwd' } });
+  assert.strictEqual(badScheme.status, 400);
+  assert.match(badScheme.json.error, /http/i);
+});
+
+await test('provider test/models routes answer cleanly for a bad or unreachable Base URL', async () => {
+  const badTest = await api('POST', '/api/providers/test', { baseUrl: 123, apiType: 'openai' });
+  assert.strictEqual(badTest.status, 400);
+  assert.match(badTest.json.error, /Base URL/i);
+
+  const badModels = await api('POST', '/api/providers/models', { baseUrl: 'nonsense' });
+  assert.strictEqual(badModels.status, 400);
+
+  // Loopback is allowed by design (local providers), so this reaches a real
+  // connection attempt — it must fail as a gateway error with the address in it.
+  const unreachable = await api('POST', '/api/providers/models', { baseUrl: 'http://127.0.0.1:9/v1' });
+  assert.strictEqual(unreachable.status, 502);
+  assert.match(unreachable.json.error, /127\.0\.0\.1:9/);
+});
+
+await test('search args of the wrong type are treated as empty, not destructured', async () => {
+  const nullArgs = await api('POST', '/api/search', { tool: 'web_search', args: null });
+  assert.strictEqual(nullArgs.status, 400);
+  assert.match(nullArgs.json.error, /query/i);
+
+  const arrayArgs = await api('POST', '/api/search', { tool: 'web_search', args: ['q'] });
+  assert.strictEqual(arrayArgs.status, 400);
+});
+
+await test('junk entries in a conversations save are dropped, not fatal', async () => {
+  const { status, json } = await api('POST', '/api/conversations', {
+    conversations: [null, 1, 'x', chat('keep', 3), { id: 'no-messages' }],
+    activeChatId: 'keep',
+  });
+  assert.strictEqual(status, 200);
+  assert.strictEqual(json.success, true);
+  const stored = readStore();
+  assert.deepStrictEqual(stored.conversations.map((c) => c.id), ['keep', 'no-messages']);
+});
+
 await test('conversations round-trip through the server store', async () => {
   const save = await api('POST', '/api/conversations', {
     conversations: [chat('a', 4), chat('b', 2)],

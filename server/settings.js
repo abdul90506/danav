@@ -20,7 +20,10 @@ export function mergeSettingsPatch(current, patch) {
         .filter(isObject)
         .map((provider) => [String(provider.id || ''), provider])
     );
-    updated.providers = delta.providers.filter(isObject).map((provider) => {
+    // An entry that is not an object, or has no id, cannot be stored or matched
+    // against a stored key — keeping it would write a provider the UI can never
+    // open (`{ id: 5 }` used to replace a real one this way).
+    updated.providers = delta.providers.filter((provider) => isObject(provider) && String(provider.id || '').trim()).map((provider) => {
       const previous = previousById.get(String(provider.id || ''));
       const next = { ...provider };
       const replacement = typeof provider.apiKey === 'string' ? provider.apiKey.trim() : '';
@@ -29,6 +32,20 @@ export function mergeSettingsPatch(current, patch) {
       else next.apiKey = typeof previous?.apiKey === 'string' ? previous.apiKey : '';
       delete next.clearApiKey;
       delete next.apiKeyConfigured;
+
+      // These are read as strings all over the app (`url.trim()`, `model.id`).
+      // Coerce primitives, and drop anything that cannot be one.
+      for (const key of ['id', 'name', 'baseUrl', 'apiType']) {
+        next[key] = typeof next[key] === 'string' ? next[key] : String(next[key] ?? '');
+      }
+      next.models = (Array.isArray(next.models) ? next.models : [])
+        .filter((model) => isObject(model) && String(model.id || '').trim())
+        .map((model) => ({
+          ...model,
+          id: String(model.id),
+          name: typeof model.name === 'string' ? model.name : String(model.name ?? model.id),
+          providerId: String(model.providerId || next.id),
+        }));
       return next;
     });
   }
