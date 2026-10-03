@@ -1,6 +1,7 @@
 import React from 'react';
 import { Play, Star, Calendar, Film, Tv, Sparkles } from 'lucide-react';
 import { MovieItem } from '../types';
+import { STREAM_SERVERS } from './MoviePlayerModal';
 
 interface MovieCardProps {
   movie: MovieItem;
@@ -106,7 +107,7 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onWatch }) => {
 
           <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400 font-mono">
             <Sparkles className="w-3 h-3 text-amber-400" />
-            8 Mirrors Ready
+            {STREAM_SERVERS.length} mirrors ready
           </span>
         </div>
       </div>

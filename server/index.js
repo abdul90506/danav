@@ -38,6 +38,10 @@ const openCors = cors();
 const credentialRoutes = new Set([
   '/api/settings', '/api/chat', '/api/chat/title', '/api/providers/test',
   '/api/providers/models', '/api/preview-auth/check',
+  // Same-origin only: the UI never calls this (the chat's tools do, in-process),
+  // and with CORS open any web page could use this server as a free fetch/search
+  // proxy — making requests from the user's network on someone else's behalf.
+  '/api/search',
 ]);
 app.use((req, res, next) => {
   const normalizedPath = req.path.replace(/\/+$/, '').toLowerCase() || '/';
@@ -1269,6 +1273,44 @@ const CHAT_TOOL_SYSTEM_PROMPT =
   '- Once you have enough information, STOP calling tools and write the final answer.\n' +
   '- If a tool fails, say so plainly rather than inventing the information.';
 
+/**
+ * Does this provider error mean "the prompt is too big"?
+ *
+ * The same detection the agent loop uses. A chat that has been running for hours
+ * eventually exceeds the model's context window, and the provider answers 400
+ * with a message about token limits — previously the turn just died there with
+ * "Provider error (HTTP 400)".
+ */
+const isContextLimitError = (text) =>
+  /(?:context.{0,40}(?:length|window|limit|exceed)|(?:maximum|max).{0,24}context|too many tokens|token limit|max(?:imum)?(?: number of)? tokens|tokens.{0,30}(?:maximum|max|limit)|exceeds? (?:the )?(?:token|input)|requested.{0,20}tokens|prompt.{0,24}(?:too (?:large|long)|exceed)|input.{0,24}too (?:large|long)|reduce (?:the )?(?:prompt|input|token))/i.test(
+    String(text || '')
+  );
+
+/**
+ * Drop the oldest exchanges, keeping whole user turns.
+ *
+ * Trimming must land on a user-message boundary: keeping an assistant tool-call
+ * without the `tool` results that answer it (or a tool result without its call)
+ * is rejected by every OpenAI-compatible provider as a malformed conversation.
+ * System messages are always kept — that is where the tool instructions live.
+ *
+ * @returns {Array|null} the trimmed list, or null when there is nothing to drop
+ */
+/** How many user turns a message list holds. */
+const countUserTurns = (messages) => (messages || []).filter((m) => m.role === 'user').length;
+
+function trimOldestTurns(messages, keepTurns = 6) {
+  if (!Array.isArray(messages)) return null;
+  const system = messages.filter((m) => m.role === 'system');
+  const rest = messages.filter((m) => m.role !== 'system');
+  const userIndexes = rest.reduce((acc, m, i) => (m.role === 'user' ? [...acc, i] : acc), []);
+  if (userIndexes.length <= keepTurns) return null;
+
+  const start = userIndexes[userIndexes.length - keepTurns];
+  if (start <= 0) return null;
+  return [...system, ...rest.slice(start)];
+}
+
 app.post('/api/chat', async (req, res) => {
   const { provider: suppliedProvider, model: modelInput, messages, thinkingLevel, toolsEnabled } = req.body || {};
   const provider = providerWithStoredCredentials(suppliedProvider);
@@ -1337,7 +1379,8 @@ app.post('/api/chat', async (req, res) => {
   // tool calls and their results are appended, so the next round sees what has
   // already been learned.
   const useTools = Boolean(toolsEnabled);
-  const conversation = payloadMessages.slice();
+  // Reassignable: an over-long history is trimmed and the request retried.
+  let conversation = payloadMessages.slice();
   if (useTools) {
     conversation.unshift({ role: 'system', content: CHAT_TOOL_SYSTEM_PROMPT });
   }
@@ -1618,23 +1661,54 @@ app.post('/api/chat', async (req, res) => {
     let thinkingActive = false;
     let failedStep = ladder[0];
     let lastErrorBody = '';
-    for (let i = 0; i < ladder.length; i++) {
-      const step = ladder[i];
-      failedStep = step;
-      upstreamResponse = await callProvider(step.tools, step.thinking);
-      if (upstreamResponse.ok) {
-        toolsActive = step.tools;
-        thinkingActive = step.thinking;
-        break;
+    let contextTrimmed = false;
+
+    const attemptUpstream = async () => {
+      for (let i = 0; i < ladder.length; i++) {
+        const step = ladder[i];
+        failedStep = step;
+        upstreamResponse = await callProvider(step.tools, step.thinking);
+        if (upstreamResponse.ok) {
+          toolsActive = step.tools;
+          thinkingActive = step.thinking;
+          return;
+        }
+        // 401 / 404 / 429 are real errors — no point retrying a different shape.
+        if (upstreamResponse.status !== 400) return;
+        lastErrorBody = await upstreamResponse.text().catch(() => '');
+        if (i < ladder.length - 1) {
+          console.log(
+            `Provider rejected request (HTTP 400) on ${model}; retrying while preserving selected reasoning effort`
+          );
+        }
       }
-      // 401 / 404 / 429 are real errors — no point retrying a different shape.
-      if (upstreamResponse.status !== 400) break;
-      lastErrorBody = await upstreamResponse.text().catch(() => '');
-      if (i < ladder.length - 1) {
-        console.log(
-          `Provider rejected request (HTTP 400) on ${model}; retrying while preserving selected reasoning effort`
-        );
-      }
+    };
+
+    await attemptUpstream();
+
+    // A conversation that outgrew the model's context window is recoverable: drop
+    // the oldest exchanges (on a user-turn boundary) and try again. Without this
+    // the only answer was "Provider error (HTTP 400)" with no way forward except
+    // deleting messages by hand, which is not something a user can be asked to do.
+    //
+    // Each retry keeps half of what the last one had, so a history that is far too
+    // long (or a model with a small window) converges instead of failing on a
+    // second 400. Three retries is enough to take any history down to two turns.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const stillTooLong =
+        !upstreamResponse.ok && upstreamResponse.status === 400 && isContextLimitError(lastErrorBody);
+      if (!stillTooLong) break;
+
+      const keepTurns = Math.max(2, Math.ceil(countUserTurns(conversation) / 2));
+      const trimmed = trimOldestTurns(conversation, keepTurns);
+      if (!trimmed) break;
+
+      conversation = trimmed;
+      contextTrimmed = true;
+      console.log(
+        `Chat history exceeded the model context on ${model}; retrying with the last ${keepTurns} turns.`
+      );
+      await attemptUpstream();
     }
 
     if (!upstreamResponse.ok) {
@@ -1680,6 +1754,11 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const startupNotices = [];
+    if (contextTrimmed) {
+      startupNotices.push(
+        "This conversation is longer than the model's context window, so the oldest messages were left out of this request — they are still in the chat."
+      );
+    }
     if (useTools && !toolsActive) startupNotices.push('Provider rejected web tools; continuing without web search.');
     if (hasThinkingConfig && !thinkingActive) startupNotices.push('Provider rejected Gemini thought summaries; using its default effort without a thought box.');
     writeEvent({ status: startupNotices.length ? startupNotices.join(' ') : toolsActive ? 'Researching...' : 'Generating...' });

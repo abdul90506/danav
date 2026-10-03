@@ -1026,3 +1026,52 @@ test('data path: an attached image reaches the provider as an image part', async
     _resetStoreCache();
   }
 });
+
+// ---------------------------------------------------------------------------
+console.log('\nChat data: the backup path and the settings tab');
+// ---------------------------------------------------------------------------
+
+test('Settings offers a Chat Data tab (the backup it explains is only reachable from there)', async () => {
+  const ui = await loadComponent('src/components/SettingsModal.tsx');
+  const html = renderToStaticMarkup(
+    React.createElement(ui.SettingsModal, {
+      isOpen: true,
+      onClose: () => {},
+      theme: 'light',
+      onThemeChange: () => {},
+      providers: [],
+      onSaveProviders: () => true,
+      conversations: [],
+      onConversationsRestored: () => {},
+    })
+  );
+  assert.match(html, /Chat Data/, 'the tab is reachable');
+  assert.match(html, /Appearance/, 'and the other tabs are still there');
+});
+
+test('a missing backup reads as "nothing to restore yet", not as an error', async () => {
+  const api = await load('src/services/api.ts');
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({ success: false, error: 'No backup available' }),
+    });
+    const missing = await api.fetchConversationsBackup();
+    assert.equal(missing.success, false);
+    assert.match(missing.error, /No backup yet/);
+
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, conversations: [{ id: 'c1', messages: [] }], activeChatId: 'c1' }),
+    });
+    const found = await api.fetchConversationsBackup();
+    assert.equal(found.success, true);
+    assert.equal(found.conversations.length, 1);
+    assert.equal(found.activeChatId, 'c1');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

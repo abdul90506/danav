@@ -17,6 +17,7 @@
  *   - bad input is answered with a clear 4xx instead of a hang or a 500.
  */
 import assert from 'assert';
+import http from 'node:http';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -259,6 +260,79 @@ await test('the store never rehydrates a conversation as still generating', asyn
   assert.strictEqual(message.blocks[0].isStillThinking, false);
 });
 
+await test('a conversation that outgrew the context window is trimmed and retried, not failed', async () => {
+  // A provider that refuses anything longer than 4 messages with the error a real
+  // one sends, and answers the retry. Before this, the turn simply died with
+  // "Provider error (HTTP 400)" and the user had no way forward.
+  const asked = [];
+  const fake = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+    });
+    req.on('end', () => {
+      const payload = JSON.parse(body || '{}');
+      asked.push(payload.messages || []);
+      if ((payload.messages || []).length > 4) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: {
+              message:
+                "This model's maximum context length is 8192 tokens. However, your messages resulted in 20000 tokens. Please reduce the length of the messages.",
+              type: 'invalid_request_error',
+            },
+          })
+        );
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'Recovered.' } }] }) + '\n\n');
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  const fakePort = fake.address().port;
+
+  try {
+    const longHistory = [];
+    for (let i = 0; i < 10; i++) {
+      longHistory.push({ role: 'user', content: `question ${i}` });
+      longHistory.push({ role: 'assistant', content: `answer ${i}` });
+    }
+
+    const res = await fetch(`${BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: { id: 'provider-fake', baseUrl: `http://127.0.0.1:${fakePort}`, apiType: 'openai' },
+        model: 'fake-model',
+        thinkingLevel: 'Auto',
+        messages: longHistory,
+      }),
+    });
+
+    assert.strictEqual(res.status, 200, 'the retry must reach the stream, not a 400');
+    const stream = await res.text();
+    assert.match(stream, /Recovered\./, 'the retried request must produce the answer');
+    assert.match(stream, /longer than the model's context window/, 'and say what was left out');
+
+    assert(asked.length >= 2, 'the request must be retried, not failed');
+    assert(asked[0].length > 4, 'the first attempt carried the whole history');
+    const last = asked[asked.length - 1];
+    assert(last.length <= 4, `every retry must be trimmed (last sent ${last.length} messages)`);
+    assert.strictEqual(last[0].role, 'user', 'the trim must land on a user turn');
+    for (const attempt of asked) {
+      for (const message of attempt) {
+        assert(message.role === 'user' || message.role === 'assistant', 'no orphaned tool message may survive');
+      }
+    }
+  } finally {
+    fake.close();
+  }
+});
+
 await test('unknown search tool and empty chat payloads get clear 4xx answers', async () => {
   const unknownTool = await api('POST', '/api/search', { tool: 'nope', args: {} });
   assert.strictEqual(unknownTool.status, 400);
@@ -276,6 +350,21 @@ await test('unknown search tool and empty chat payloads get clear 4xx answers', 
 
   const emptyBody = await api('POST', '/api/conversations', {});
   assert.strictEqual(emptyBody.status, 400);
+});
+
+await test('cross-origin callers cannot use this server as a search/fetch proxy', async () => {
+  // The UI never calls /api/search (the chat's tools do, in-process). With open
+  // CORS, any web page could have made requests from the user's network.
+  const res = await fetch(`${BASE}/api/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' },
+    body: JSON.stringify({ tool: 'web_search', args: { query: 'x' } }),
+  });
+  assert.strictEqual(
+    res.headers.get('access-control-allow-origin'),
+    null,
+    'no permissive CORS header may be sent for the search tool'
+  );
 });
 
 await test('fetch_url refuses a local address through the live server', async () => {
