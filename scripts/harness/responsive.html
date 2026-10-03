@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>responsive probe</title>
+    <style>
+      html, body { margin: 0; font: 14px system-ui, sans-serif; }
+      body { display: grid; place-items: center; height: 100vh; background: #eef2ff; color: #1e1b4b; }
+      #w { font-size: 40px; font-weight: 700; }
+      #band { margin-top: 8px; font-size: 16px; }
+    </style>
+  </head>
+  <body>
+    <div style="text-align:center">
+      <div id="w">0</div>
+      <div id="band"></div>
+    </div>
+    <script>
+      function draw() {
+        var w = window.innerWidth;
+        document.getElementById('w').textContent = w + 'px';
+        document.getElementById('band').textContent =
+          w < 480 ? 'narrow' : w < 768 ? 'sm' : w < 1024 ? 'md' : 'lg';
+      }
+      addEventListener('resize', draw);
+      draw();
+    </script>
+  </body>
+</html>

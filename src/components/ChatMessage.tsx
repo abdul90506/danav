@@ -1,13 +1,15 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useSyncExternalStore } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Check, Copy, Brain, ChevronDown, Pencil, RotateCcw, Play, File, Folder } from 'lucide-react';
+import { Check, Copy, Brain, ChevronDown, Pencil, RotateCcw, Play, File, Folder, ExternalLink, PanelRight } from 'lucide-react';
 import { AgentAction, Message, MessageBlock, MovieItem } from '../types';
 import { CodeBlock } from './CodeBlock';
 import { ToolExecutionCard } from './ToolExecutionCard';
 import { MovieCard } from './MovieCard';
 import { normalizeMessageContent } from '../utils/markdownNormalize';
+import { isPreviewUrl, previewHost } from '../utils/previewUrl';
 import { AgentActionRow } from './AgentActionRow';
+import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from './thinkingAccordion';
 import { changedSummary, isLive, stopNotice } from '../agent/format';
 
 interface ChatMessageProps {
@@ -18,6 +20,8 @@ interface ChatMessageProps {
   onWatchMedia?: (mediaId: string, mediaType: 'movie' | 'tv' | string, title?: string) => void;
   /** Agent mode: the user answered an "Allow this command?" prompt. */
   onAgentApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
+  /** Show the running app the agent built in the docked preview panel. */
+  onOpenPreview?: (url: string, title?: string) => void;
 }
 
 /**
@@ -40,31 +44,50 @@ const looksLikeProse = (value: string): boolean => {
 };
 
 interface ThinkingSectionProps {
+  /** Stable id for the accordion: only one thinking block is open in the whole chat. */
+  id: string;
   thinkingContent: string;
   isStillThinking: boolean;
   thinkingDuration?: number;
 }
 
 const ThinkingSection: React.FC<ThinkingSectionProps> = ({
+  id,
   thinkingContent,
   isStillThinking,
   thinkingDuration,
 }) => {
-  // Auto-hide when thinking completes; open by default while still thinking
-  const [userToggled, setUserToggled] = useState<boolean | null>(null);
-  const isExpanded = userToggled !== null ? userToggled : isStillThinking;
-
-  // Whenever the reasoning state flips (streaming -> done, or a new thought
-  // starts), drop any manual toggle so the box auto-collapses the moment the
-  // model stops thinking. Without this the box stayed open forever once the
-  // user had peeked inside — the bug where "thinking ho gayi" but the panel
-  // kept showing the reasoning.
-  React.useEffect(() => {
-    setUserToggled(null);
-  }, [isStillThinking]);
+  // One thought open at a time, chat-wide: opening this one closes the others.
+  const openId = useSyncExternalStore(subscribeThinkingAccordion, getOpenThinkingId);
+  const isExpanded = openId === id;
 
   const thinkBoxRef = useRef<HTMLDivElement>(null);
-  const isThinkAutoScrollPausedRef = useRef<boolean>(false);
+  /** The user scrolled this box themselves: stop following until they come back down. */
+  const pausedRef = useRef(false);
+  /** Scroll events before this moment are ours, not the user's. */
+  const ignoreScrollUntilRef = useRef(0);
+  /** We opened this box because it was streaming, so we may close it again when it stops. */
+  const autoOpenedRef = useRef(false);
+  /** The user opened this box on purpose: leave it alone when the reasoning ends. */
+  const userPinnedRef = useRef(false);
+
+  // While the model is reasoning, its box is the one on screen. When the reasoning
+  // stops the box closes itself, so the answer gets the room — unless the user
+  // opened it deliberately to read it.
+  React.useEffect(() => {
+    if (isStillThinking) {
+      if (!autoOpenedRef.current) {
+        autoOpenedRef.current = true;
+        pausedRef.current = false;
+        setOpenThinkingId(id);
+      }
+      return;
+    }
+    if (autoOpenedRef.current) {
+      autoOpenedRef.current = false;
+      if (!userPinnedRef.current && getOpenThinkingId() === id) setOpenThinkingId(null);
+    }
+  }, [id, isStillThinking]);
 
   // Live timer while thinking is actively running
   const [liveSeconds, setLiveSeconds] = useState<number>(() => thinkingDuration || 1);
@@ -84,55 +107,67 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
     return () => clearInterval(timer);
   }, [isStillThinking, thinkingDuration]);
 
-  // Auto-scroll ONLY inside think box without triggering outer chat scrolling
+  // Follow the newest reasoning — inside this box only, so the chat around it never moves.
+  // The scroll is INSTANT on purpose: a smooth one fires a stream of scroll events that
+  // look exactly like a user scrolling away, and the follow switched itself off.
   React.useEffect(() => {
-    if (!isExpanded || !isStillThinking) return;
-    if (isThinkAutoScrollPausedRef.current) return;
-
+    if (!isExpanded || !isStillThinking || pausedRef.current) return;
     const el = thinkBoxRef.current;
-    if (el) {
-      // Direct scrollTop assignment only scrolls this container, zero glitch on parent chat
-      el.scrollTop = el.scrollHeight;
-    }
+    if (!el) return;
+    ignoreScrollUntilRef.current = performance.now() + 150;
+    el.scrollTop = el.scrollHeight;
   }, [thinkingContent, isExpanded, isStillThinking]);
 
-  // Pause think box auto-scroll if user scrolls up or grabs the scrollbar
+  // Pause the follow when the user scrolls up or grabs the scrollbar; resume at the bottom.
   const handleThinkBoxScroll = () => {
     const el = thinkBoxRef.current;
     if (!el) return;
-
+    if (performance.now() < ignoreScrollUntilRef.current) return; // that one was ours
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (distanceFromBottom > 25) {
-      isThinkAutoScrollPausedRef.current = true;
+    pausedRef.current = distanceFromBottom > 24;
+  };
+
+  const toggle = () => {
+    if (isExpanded) {
+      userPinnedRef.current = false;
+      setOpenThinkingId(null);
     } else {
-      isThinkAutoScrollPausedRef.current = false;
+      userPinnedRef.current = true;
+      setOpenThinkingId(id);
     }
   };
+
+  // While reasoning streams, render it line by line so each new line can fade
+  // in (see `.stream-lines` in index.css). Long blocks fall back to one text
+  // node — the fade is a nicety, not worth a thousand spans per frame.
+  const streamLines = React.useMemo(() => {
+    if (!isStillThinking) return null;
+    const lines = thinkingContent.split('\n');
+    return lines.length <= 400 ? lines : null;
+  }, [thinkingContent, isStillThinking]);
 
   const durationSec = thinkingDuration || liveSeconds || 1;
 
   return (
     <div className="mb-3.5 select-none">
-      {/* Clean inline header: Brain icon on left, Text in middle, Chevron on right. No stat box! */}
+      {/* Clean inline header: Brain icon on left, text in the middle, chevron on the right. No stat box! */}
       <button
         type="button"
-        onClick={() => setUserToggled(!isExpanded)}
+        onClick={toggle}
         aria-expanded={isExpanded}
         className="inline-flex items-center gap-1.5 py-1 text-xs font-semibold cursor-pointer select-none group/think transition-colors"
       >
         <Brain
-          className={`w-3.5 h-3.5 shrink-0 ${
+          className={`w-3.5 h-3.5 shrink-0 text-zinc-500 dark:text-zinc-400 ${
             isStillThinking
-              ? 'text-indigo-600 dark:text-indigo-300 animate-pulse'
-              : 'text-zinc-600 dark:text-zinc-300 group-hover/think:text-indigo-600 dark:group-hover/think:text-indigo-300'
+              ? 'thinking-brain-shimmer'
+              : 'group-hover/think:text-zinc-700 dark:group-hover/think:text-zinc-200'
           }`}
         />
         {isStillThinking ? (
-          <span className="text-xs tracking-wide text-indigo-700 dark:text-indigo-300">
-            Thinking...
-          </span>
+          <span className="thinking-shimmer text-xs tracking-wide">Thinking...</span>
         ) : (
-          <span className="text-xs tracking-wide text-zinc-700 dark:text-zinc-200 group-hover/think:text-indigo-700 dark:group-hover/think:text-indigo-300 transition-colors">
+          <span className="text-xs tracking-wide text-zinc-700 dark:text-zinc-200 group-hover/think:text-zinc-900 dark:group-hover/think:text-zinc-50 transition-colors">
             Thought for {durationSec}s
           </span>
         )}
@@ -143,15 +178,25 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
         />
       </button>
 
-      {/* Expanded Thinking Box with smooth scroll & isolated container */}
+      {/* Expanded Thinking Box with its own scroll container */}
       {isExpanded && (
         <div className="relative mt-1.5 animate-in fade-in duration-150">
           <div
             ref={thinkBoxRef}
             onScroll={handleThinkBoxScroll}
-            className="panel-scroll max-h-64 overflow-y-auto overscroll-y-contain px-3.5 py-3 rounded-r-xl border-l-2 border-indigo-300 dark:border-indigo-800 bg-indigo-50/60 dark:bg-zinc-900/70 text-zinc-800 dark:text-zinc-200 text-sm leading-6 font-normal font-sans whitespace-pre-wrap select-text scroll-smooth"
+            className="panel-scroll max-h-64 overflow-y-auto overscroll-y-contain px-3.5 py-3 rounded-r-xl border-l-2 border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900/60 text-zinc-800 dark:text-zinc-200 text-sm leading-6 font-normal font-sans whitespace-pre-wrap select-text"
           >
-            {thinkingContent}
+            {streamLines ? (
+              <span className="stream-lines">
+                {streamLines.map((line, i) => (
+                  <span key={i} className="stream-line block">
+                    {line || '\u00A0'}
+                  </span>
+                ))}
+              </span>
+            ) : (
+              thinkingContent
+            )}
           </div>
         </div>
       )}
@@ -191,6 +236,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
   onContinueResponse,
   onWatchMedia,
   onAgentApproval,
+  onOpenPreview,
 }) => {
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -206,6 +252,18 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
   const blocks = getMessageBlocks(message);
   // An agent turn is a chronological list of narration + actions; it renders as one timeline.
   const isAgentTimeline = Boolean(message.agent) || blocks.some((b) => b.type === 'text' || b.type === 'action');
+
+  // The trailing text block of a live turn is the one still being written, so
+  // only it gets the fade-in + caret; everything before it stays perfectly still.
+  const trailingBlock = blocks[blocks.length - 1];
+  const liveTextId =
+    message.isGenerating &&
+    !message.error &&
+    trailingBlock &&
+    trailingBlock.type === 'text' &&
+    !trailingBlock.notice
+      ? trailingBlock.id
+      : null;
 
   const handleCopyMessage = async () => {
     try {
@@ -281,9 +339,9 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                 key={att.id}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-zinc-100 dark:bg-zinc-800/90 border border-zinc-200/70 dark:border-zinc-700/60 text-xs text-zinc-700 dark:text-zinc-200"
               >
-                {att.previewUrl ? (
+                {att.previewUrl || (att.type === 'image' && att.content) ? (
                   <img
-                    src={att.previewUrl}
+                    src={att.previewUrl || att.content}
                     alt=""
                     className="w-4 h-4 rounded object-cover"
                   />
@@ -303,8 +361,10 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
           </div>
         )}
 
-        {/* User message bubble: strictly hugs text size */}
-        <div className="inline-block max-w-[85%] sm:max-w-[75%] rounded-2xl sm:rounded-3xl px-4 py-2.5 bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 text-[15px] leading-relaxed break-words whitespace-pre-wrap select-text font-sans">
+        {/* User message bubble: strictly hugs text size. `chat-prose` tracks the
+            same `--chat-font` as the answers, so both sides of the chat shrink
+            together when the preview docks and takes the width. */}
+        <div className="chat-prose inline-block max-w-[85%] sm:max-w-[75%] rounded-2xl sm:rounded-3xl px-4 py-2.5 bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 break-words whitespace-pre-wrap select-text font-sans">
           {message.content}
         </div>
 
@@ -469,6 +529,42 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
       const faviconUrl = domain
         ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32`
         : '';
+
+      /**
+       * A link to the app the agent just built.
+       *
+       * The model often prints the preview URL as plain text instead of calling
+       * `get_preview_url`, and a bare `<a target="_blank">` is a dead end: the
+       * whole point of the docked panel is to keep the chat beside the running
+       * app. So the link itself opens the panel, and the new tab stays one small
+       * click away for when the page refuses to be framed.
+       */
+      if (onOpenPreview && isPreviewUrl(href, { allowLoopback: Boolean(message.agent) })) {
+        const label = textContent && !/^https?:\/\//i.test(textContent) ? textContent : previewHost(href);
+        return (
+          <span className="inline-flex items-center gap-0.5 my-0.5 align-baseline" data-testid="preview-link">
+            <button
+              type="button"
+              onClick={() => onOpenPreview(href, label)}
+              title="Open it in the panel next to the chat"
+              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md rounded-r-none bg-emerald-50 dark:bg-emerald-500/10 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 font-medium text-[13px] border border-emerald-200/80 dark:border-emerald-500/30 border-r-0 transition-colors cursor-pointer"
+              data-testid="open-preview-from-link"
+            >
+              <PanelRight className="w-3.5 h-3.5 shrink-0" />
+              <span className="max-w-[280px] truncate">{label}</span>
+            </button>
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open in a new tab"
+              className="inline-flex items-center px-1.5 py-0.5 rounded-md rounded-l-none bg-emerald-50 dark:bg-emerald-500/10 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/80 dark:border-emerald-500/30 border-l-0 transition-colors no-underline hover:no-underline"
+            >
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          </span>
+        );
+      }
 
       return (
         <a
@@ -637,7 +733,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
       out.push(
         <div key={`g-${first}`} className="my-1.5 space-y-px">
           {group.map((a) => (
-            <AgentActionRow key={a.id} action={a} onApproval={onAgentApproval} />
+            <AgentActionRow key={a.id} action={a} onApproval={onAgentApproval} onOpenPreview={onOpenPreview} />
           ))}
         </div>
       );
@@ -653,6 +749,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
         out.push(
           <div key={block.id} className="my-1">
             <ThinkingSection
+              id={block.id}
               thinkingContent={block.content}
               isStillThinking={Boolean(block.isStillThinking && !message.error)}
               thinkingDuration={block.duration}
@@ -666,7 +763,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
               {block.content}
             </div>
           ) : (
-            <div key={block.id} className="markdown-body my-2">
+            <div key={block.id} className={`markdown-body my-2${block.id === liveTextId ? ' is-streaming' : ''}`}>
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} urlTransform={(uri) => uri}>
                 {normalizeMessageContent(block.content)}
               </ReactMarkdown>
@@ -731,6 +828,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                 return (
                   <ThinkingSection
                     key={block.id}
+                    id={block.id}
                     thinkingContent={block.content}
                     isStillThinking={stillThinking}
                     thinkingDuration={block.duration}
@@ -766,7 +864,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
             <span className="w-2 h-2 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
           </div>
         ) : safeMessageContent.trim() && !isAgentTimeline ? (
-          <div className="markdown-body">
+          <div className={`markdown-body${message.isGenerating && !message.error ? ' is-streaming' : ''}`}>
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={markdownComponents}

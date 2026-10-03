@@ -11,3 +11,6 @@ dist-ssr
 # file private and out of source control, including nested agent-memory files.
 server/data/**
 !server/data/.gitkeep
+
+# Throwaway screenshots written by the dev harnesses (scripts/harness, scripts/preview-harness.js)
+/*.png

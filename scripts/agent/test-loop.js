@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { startFakeLlm, HTML, CSS } from '../fake-llm.js';
-import { runAgent, pruneMessages } from '../../server/agent/loop.js';
+import { runAgent, pruneMessages, revealPlan } from '../../server/agent/loop.js';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
 import { registerAgentRoutes, _activeRuns } from '../../server/agent/routes.js';
 import { resolveApproval } from '../../server/agent/approvals.js';
@@ -24,6 +24,56 @@ console.log('\n[loop + routes]');
 let llm;
 const getLlm = async () => (llm ||= await startFakeLlm({ chunkDelayMs: 0 }));
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
+
+test('the reveal of a dumped tool call is paced for a person to watch', () => {
+  // Every provider measured on this app hands over the whole write_file call in
+  // ONE SSE frame (see scripts/probe-raw.js), so this reveal is the only thing
+  // that can show a file being written. It used to be a fixed 6–45 steps at 30ms,
+  // which finished a 40-line file in 240ms — a blur that read as a jump.
+  const perSec = Number(process.env.DANAV_REVEAL_CHARS_PER_SEC) || 1100;
+  const minMs = Number(process.env.DANAV_REVEAL_MIN_MS) || 800;
+  const maxMs = Number(process.env.DANAV_REVEAL_MAX_MS) || 2800;
+
+  // A small file is still on screen long enough to read.
+  assert.equal(revealPlan(0).durationMs, minMs);
+  assert.equal(revealPlan(120).durationMs, minMs, 'a tiny body gets the floor, not a flash');
+
+  // A typical file lands in the middle of the range...
+  const typical = revealPlan(1800);
+  assert.ok(typical.durationMs > minMs && typical.durationMs < maxMs, `1800 chars -> ${typical.durationMs}ms`);
+
+  // ...and a huge one is capped so it cannot hold the run up.
+  assert.equal(revealPlan(200_000).durationMs, maxMs, 'a huge body is capped');
+
+  // Bigger bodies are revealed for longer, up to the cap.
+  assert.ok(revealPlan(4000).durationMs >= typical.durationMs);
+
+  // The steps are small: several per 100ms, so the count climbs instead of jumping.
+  const stepsPerSecond = typical.steps / (typical.durationMs / 1000);
+  assert.ok(stepsPerSecond >= 20, `expected a smooth ~30 updates a second, got ${stepsPerSecond.toFixed(1)}`);
+  assert.ok(typical.steps >= 20, `a typical file is revealed over many steps, got ${typical.steps}`);
+  assert.ok(revealPlan(200_000).steps <= 120, 'and the step count stays bounded');
+
+  // Never fewer than two, so even the floor produces a visible climb.
+  assert.ok(revealPlan(1).steps >= 2);
+  assert.ok(Number.isFinite(revealPlan(NaN).durationMs), 'a nonsense size does not produce a nonsense plan');
+});
+
+test('a live update always carries a number for BOTH counters', async () => {
+  // A brand-new file removes nothing, and the payload used to omit `removed`
+  // entirely — every live update then carried `removed: undefined`.
+  const { events } = await agentRun({ model: 'fake-burst' });
+  const progress = events
+    .map((e) => e.agent?.patch?.progress)
+    .filter(Boolean);
+  assert.ok(progress.length > 0, 'the write was reported');
+  for (const p of progress) {
+    assert.equal(typeof p.added, 'number', `added must be a number: ${JSON.stringify(p)}`);
+    assert.equal(typeof p.removed, 'number', `removed must be a number: ${JSON.stringify(p)}`);
+    assert.ok(Number.isFinite(p.added) && Number.isFinite(p.removed));
+    assert.ok(Array.isArray(p.tail));
+  }
+});
 
 async function agentRun({ model = 'fake-build', autoRun = true, history, signal, onEvent, workspace } = {}) {
   const l = await getLlm();
@@ -276,8 +326,10 @@ test('a tool call that arrives ALL AT ONCE is still watched being written (repla
   const end = events.findIndex((e, i) => i > running && e.agent?.type === 'action_end');
   assert.ok(start >= 0 && running > start && end > running, `start < running < end (${start}, ${running}, ${end})`);
 
-  // nothing is claimed before the replay: the start event carries no numbers at all
-  assert.equal(events[start].agent.progress, undefined, 'a one-shot call does not publish final numbers up front');
+  // the row opens at "+0" — a real reading of a file that has no lines yet — and the final
+  // count is never claimed up front
+  assert.equal(events[start].agent.progress?.added, 0, 'a one-shot call opens at +0, not at its final count');
+  assert.notEqual(events[start].agent.progress?.added, 200, 'the final count is never claimed up front');
 
   const replayed = events
     .slice(running, end)
@@ -287,6 +339,7 @@ test('a tool call that arrives ALL AT ONCE is still watched being written (repla
   assert.ok(counts.length >= 5, `expected the body to be replayed over several updates, got ${counts}`);
   assert.deepEqual([...counts].sort((a, b) => a - b), counts, `the replayed count never goes backwards: ${counts}`);
   assert.ok(counts[0] < counts.at(-1), `the count climbs: ${counts[0]} -> ${counts.at(-1)}`);
+  assert.equal(counts[0], 0, 'the count starts at zero, before the first line is on disk');
   assert.ok(replayed.some((p) => p.tail?.length > 0), 'the lines being written scroll by');
 
   // the replay is display only: the file on disk is the full one, and the row ends with real numbers
@@ -727,6 +780,30 @@ test('context pruning: old tool output and file bodies are elided first; whole r
   assert.equal(c.length, 26);
 });
 
+test('pruning never clips a multimodal message into a broken string', () => {
+  const imageUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==';
+  const content = [
+    { type: 'text', text: 'What is wrong with this screenshot? '.repeat(60) },
+    { type: 'image_url', image_url: { url: imageUrl } },
+  ];
+  const filler = (n) => ({ role: 'user', content: 'x'.repeat(n) });
+  const messages = [
+    { role: 'system', content: 'rules' },
+    ...Array.from({ length: 12 }, () => filler(4000)),
+    // The current request is the one carrying the image.
+    { role: 'user', content },
+  ];
+
+  // A budget tight enough to force real compaction.
+  pruneMessages(messages, 8000);
+
+  const withImage = messages.find((m) => Array.isArray(m.content));
+  assert.ok(withImage, 'the current message kept its image');
+  assert.ok(Array.isArray(withImage.content), 'its content is still the multimodal array');
+  assert.equal(withImage.content[1].type, 'image_url');
+  assert.equal(withImage.content[1].image_url.url, imageUrl, 'the image bytes are untouched');
+});
+
 test('provider context-limit errors trigger bounded history compaction and a safe retry', async () => {
   const history = [
     { role: 'user', content: 'ARCHIVE_MARKER '.repeat(7000) },
@@ -800,14 +877,21 @@ test('batching: outline, chunked read and ONE multi_edit across two files, throu
   const { events, result, dir } = await agentRun({ model: 'fake-batch' });
   assert.equal(result.stopReason, 'completed');
   const ends = agentEvents(events, 'action_end');
-  assert.deepEqual(ends.map((a) => a.result.kind), ['write', 'write', 'outline', 'read', 'edit']);
+  const kinds = ends.map((a) => a.result.kind);
+  assert.equal(ends.length, 5, JSON.stringify(kinds));
+  assert.deepEqual(kinds.slice(0, 2), ['write', 'write'], JSON.stringify(kinds));
+  // file_outline and read_file are read-only, so the loop runs them in PARALLEL:
+  // their action_end order is whichever finishes first, not the request order.
+  // Both must be present, in either order.
+  assert.deepEqual([...kinds.slice(2, 4)].sort(), ['outline', 'read'], JSON.stringify(kinds));
+  assert.equal(kinds[4], 'edit', JSON.stringify(kinds));
   assert.ok(ends.every((a) => a.status === 'done'), JSON.stringify(ends.filter((a) => a.status !== 'done')));
-  const outline = ends[2].result;
+  const outline = ends.find((a) => a.result.kind === 'outline').result;
   assert.equal(outline.path, 'big.js');
   assert.equal(outline.count, 3);
-  const read = ends[3].result;
+  const read = ends.find((a) => a.result.kind === 'read').result;
   assert.deepEqual(read.ranges, [[1, 5], [40, 45]]);
-  const edit = ends[4].result;
+  const edit = ends.find((a) => a.result.kind === 'edit').result;
   assert.equal(edit.edits, 4, 'four edits in a single call');
   assert.deepEqual(edit.changes.map((c) => [c.path, c.edits]), [['big.js', 3], ['style.css', 1]]);
   const js = fs.readFileSync(path.join(dir, 'big.js'), 'utf8').split('\n');
@@ -870,6 +954,68 @@ test('read-only tools of one round run IN PARALLEL; the model still sees the res
   const toolMsgs = l.requests.at(-1).messages.filter((m) => m.role === 'tool').map((m) => m.content);
   assert.deepEqual(toolMsgs.map((c) => /result for (q\d)/.exec(c)[1]), ['q1', 'q2', 'q3', 'q4'], 'results are handed back in the order they were asked');
   assertConsistentTranscript(l.requests.at(-1).messages);
+});
+
+test('the run refuses to delete what it has never looked at, and says what to look at', async () => {
+  // The whole point of the gate: a model that goes straight for the delete does
+  // not get to make it. Nothing is asked of the system prompt — the call simply
+  // does not run, and the tool result tells the model what evidence is missing.
+  const root = tmp('danav-gate-');
+  fs.mkdirSync(path.join(root, 'legacy', 'nested'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'legacy', 'old.js'), 'old\n');
+  fs.writeFileSync(path.join(root, 'legacy', 'nested', 'deep.js'), 'deep\n');
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'src', 'app.js'), 'app\n');
+  const ws = new LocalWorkspace({ id: 'ws-gate', kind: 'local', name: 'gate', root, autoRun: true });
+
+  // The run is synchronous, so "was anything touched?" has to be sampled the
+  // moment the refusal lands — by the end of the run the agent has done it right.
+  const atRefusal = [];
+  const { events, requests } = await agentRun({
+    model: 'fake-gate',
+    workspace: ws,
+    onEvent: (e) => {
+      if (e.agent?.type === 'action_end' && e.agent.status === 'blocked') {
+        atRefusal.push({
+          legacy: fs.existsSync(path.join(root, 'legacy', 'old.js')),
+          src: fs.existsSync(path.join(root, 'src', 'app.js')),
+        });
+      }
+    },
+  });
+  const ends = agentEvents(events, 'action_end');
+  const starts = agentEvents(events, 'action_start');
+
+  // 1. the un-inspected delete never ran
+  assert.equal(ends[0].status, 'blocked', `expected a refusal, got ${ends[0].status}: ${ends[0].error}`);
+  assert.equal(ends[0].ok, false);
+  assert.equal(ends[0].result.blocked, true);
+  assert.match(ends[0].error, /not looked inside/);
+  assert.match(ends[0].error, /list_dir/, 'and it names the call that would fix it');
+  assert.equal(atRefusal[0].legacy, true, 'the folder was still there when it was refused');
+  const refusal = requests.flatMap((r) => r.messages).find((m) => m.role === 'tool' && /Refused/.test(m.content));
+  assert.ok(refusal, 'the model reads the refusal back as the tool result');
+  assert.match(refusal.content, /list_dir/);
+
+  // 2. after listing it, the same delete goes through
+  assert.equal(starts[1].tool, 'list_dir');
+  assert.equal(ends[1].status, 'done');
+  assert.equal(starts[2].tool, 'delete_file');
+  assert.equal(ends[2].status, 'done');
+  assert.equal(fs.existsSync(path.join(root, 'legacy')), false, 'and now it is really gone');
+
+  // 3. the same rule covers a destructive shell command
+  assert.equal(starts[3].tool, 'run_command');
+  assert.equal(ends[3].status, 'blocked', `expected a refusal, got ${ends[3].status}: ${ends[3].error}`);
+  assert.match(ends[3].error, /src\//);
+  assert.equal(atRefusal[1].src, true, 'the command did not run');
+  assert.equal(starts[4].tool, 'list_dir');
+  assert.equal(ends[5].status, 'done');
+  assert.equal(fs.existsSync(path.join(root, 'src')), false);
+
+  // A refusal is guidance, not a failure streak: the run finishes normally.
+  assert.equal(agentEvents(events, 'run_end')[0].stopReason, 'completed');
+  assertConsistentTranscript(requests.at(-1).messages);
 });
 
 test('persist: unfinished actions are settled as interrupted; everything is bounded', () => {

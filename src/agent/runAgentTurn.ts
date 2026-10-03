@@ -1,4 +1,4 @@
-import type { Provider, ThinkingLevel } from '../types';
+import type { ChatMessageContent, Provider, ThinkingLevel } from '../types';
 import { streamAgentRun } from '../services/agentApi';
 import { SmoothStreamer } from '../utils/smoothStream';
 import { AgentTurnState, type TurnSnapshot } from './turnState';
@@ -7,7 +7,7 @@ export interface RunAgentTurnOptions {
   provider: Provider;
   model: string;
   thinkingLevel: ThinkingLevel;
-  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: ChatMessageContent }>;
   workspaceId: string;
   /** What the agent did earlier in this conversation, one line each. */
   activity: string[];

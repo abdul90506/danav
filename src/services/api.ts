@@ -1,4 +1,5 @@
 import type {
+  ChatMessageContent,
   ChatRequestPayload,
   Conversation,
   Model,
@@ -7,7 +8,7 @@ import type {
   ToolExecution,
 } from '../types';
 import { sanitizeConversations } from './storage.ts';
-import { previewAuthHeaders } from './previewAuth';
+import { previewAuthHeaders } from './previewAuth.ts';
 
 export interface TestProviderResponse {
   success: boolean;
@@ -92,7 +93,7 @@ export interface StreamChatOptions {
   provider: Provider;
   model: string;
   thinkingLevel: ThinkingLevel;
-  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: ChatMessageContent }>;
   /** Offer the web tools to the model so it can research on its own. */
   toolsEnabled?: boolean;
   signal?: AbortSignal;

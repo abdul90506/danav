@@ -5,29 +5,23 @@ interface AnimatedCountProps {
   /** "+" or "−" shown in front. */
   sign: string;
   className?: string;
-  /**
-   * Start from 0 instead of from `value`. Used when the number first appears on a row that was already
-   * on screen (the model delivered the whole file at once): it rolls up instead of popping in.
-   */
-  fromZero?: boolean;
-  /** Tells the row whether the number is still rolling (the label keeps shimmering until it stops). */
-  onAnimating?: (animating: boolean) => void;
 }
 
 const prefersReducedMotion = () =>
   typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
 /**
- * A number that glides to its new value instead of jumping.
- * While a file is being written the target moves every ~150ms; this turns those steps into a smooth
- * count, and when a finished file's count arrives in one go it rolls up in under a second.
+ * A number that glides to its new value instead of stepping to it.
+ *
+ * It never invents a value. Every target it rolls towards is one the server
+ * actually sent — a real reading of the file's length on disk — and it STARTS on
+ * the first value it is given, so a row opens on "+0" and climbs from there. It
+ * is the shape of the count that is smoothed, never the count itself.
  */
-export const AnimatedCount: React.FC<AnimatedCountProps> = ({ value, sign, className, fromZero, onAnimating }) => {
-  const [shown, setShown] = useState(fromZero ? 0 : value);
-  const shownRef = useRef(shown);
+export const AnimatedCount: React.FC<AnimatedCountProps> = ({ value, sign, className }) => {
+  const [shown, setShown] = useState(value);
+  const shownRef = useRef(value);
   const rafRef = useRef<number>(0);
-  const cbRef = useRef(onAnimating);
-  cbRef.current = onAnimating;
 
   useEffect(() => {
     const from = shownRef.current;
@@ -38,10 +32,10 @@ export const AnimatedCount: React.FC<AnimatedCountProps> = ({ value, sign, class
       return;
     }
     const delta = Math.abs(value - from);
-    // growing counts take as long as they need to look smooth (but never feel slow); corrections are quick
-    const duration = value > from ? Math.min(900, Math.max(220, delta * 18)) : 240;
+    // A growing count takes as long as it needs to look smooth (but never feels slow);
+    // a correction is quick.
+    const duration = value > from ? Math.min(700, Math.max(160, delta * 14)) : 200;
     const t0 = performance.now();
-    cbRef.current?.(true);
     const tick = (now: number) => {
       const p = Math.min(1, (now - t0) / duration);
       const eased = 1 - Math.pow(1 - p, 3);
@@ -49,14 +43,10 @@ export const AnimatedCount: React.FC<AnimatedCountProps> = ({ value, sign, class
       shownRef.current = v;
       setShown(v);
       if (p < 1) rafRef.current = requestAnimationFrame(tick);
-      else cbRef.current?.(false);
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafRef.current);
   }, [value]);
-
-  // never leave the row "animating" if this unmounts mid-roll
-  useEffect(() => () => cbRef.current?.(false), []);
 
   return (
     <span className={className} data-count={value}>

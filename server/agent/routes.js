@@ -5,10 +5,15 @@
  *   POST   /novita/key  | DELETE        save / forget the Novita key
  *   GET    /workspaces                  list
  *   POST   /workspaces                  create (sandbox or local)
- *   PATCH  /workspaces/:id              rename, toggle auto-run
+ *   PATCH  /workspaces/:id              rename, toggle auto-run / auto-pause
  *   DELETE /workspaces/:id              remove (kills the sandbox)
  *   GET    /workspaces/:id/tree?path=   one folder level, for the Files panel
  *   GET    /workspaces/:id/file?path=   one file's text, for the Files panel
+ *   POST   /workspaces/:id/wake         resume the sandbox and reset the idle clock
+ *   GET    /sandboxes                   EVERY sandbox in the Novita account
+ *   POST   /sandboxes/:id/pause         pause one
+ *   POST   /sandboxes/:id/resume        wake one
+ *   DELETE /sandboxes/:id               terminate one for good
  *   POST   /approvals/:key              allow / deny a pending command
  *   POST   /chat                        run the agent (Server-Sent Events)
  */
@@ -21,6 +26,10 @@ import { resolveApproval } from './approvals.js';
 import { runAgent } from './loop.js';
 import { clearNotes, readNotes, removeNotes } from './memory.js';
 import { readRunJournal } from './journal.js';
+import { noteRunFinished, touch } from './sandboxActivity.js';
+import {
+  killSandboxById, listAccountSandboxes, pauseSandboxById, resumeSandboxById, workspaceSandboxStatus,
+} from './sandboxAdmin.js';
 import { TOOL_DEFINITIONS } from './tools.js';
 import { createRedactor, genId } from './util.js';
 import { WorkspaceError } from './workspaces/base.js';
@@ -63,6 +72,12 @@ export function registerAgentRoutes(app, { runSearchTool, resolveProvider = (pro
       novita: { configured: Boolean(getNovitaKey()), source: novitaKeySource() },
       local: { workspacesDir: workspacesDir(), allowAnyPath: allowAnyLocalPath(), platform: process.platform },
       limits: { maxSteps: limits.maxSteps(), commandTimeoutSeconds: Math.round(limits.commandTimeoutMs() / 1000) },
+      // The UI shows these so "it paused on its own" is never a mystery.
+      sandbox: {
+        idlePauseSeconds: Math.round(limits.sandboxIdlePauseMs() / 1000),
+        runGraceSeconds: Math.round(limits.sandboxRunGraceMs() / 1000),
+        timeoutMinutes: Math.round(limits.sandboxTimeoutMs() / 60_000),
+      },
       tools: TOOL_DEFINITIONS.map((d) => d.function.name),
     });
   });
@@ -167,6 +182,54 @@ export function registerAgentRoutes(app, { runSearchTool, resolveProvider = (pro
     res.json({ success: true, notes: [] });
   }));
 
+  // ----------------------------------------------------------------- sandboxes
+  // The account-wide view. A Novita account collects sandboxes from earlier
+  // sessions and deleted workspaces, and every running one costs money — so the
+  // user has to be able to see and manage ALL of them, not just the ones this
+  // app still remembers.
+
+  router.get('/sandboxes', wrap(async (req, res) => {
+    if (!getNovitaKey()) return res.json({ success: true, configured: false, sandboxes: [], totals: { all: 0, running: 0, paused: 0, orphans: 0 } });
+    const state = req.query.state === 'running' || req.query.state === 'paused' ? req.query.state : undefined;
+    res.json({ success: true, configured: true, ...(await listAccountSandboxes({ state })) });
+  }));
+
+  /** The active workspace's own sandbox: drives the status chip in the UI. */
+  router.get('/sandboxes/status', wrap(async (req, res) => {
+    const workspaceId = String(req.query.workspaceId || '');
+    if (!workspaceId) throw new WorkspaceError('workspaceId is required.', 'bad_request');
+    // A local workspace, or one with no key yet, still gets an honest answer.
+    res.json({
+      success: true,
+      configured: Boolean(getNovitaKey()),
+      status: await workspaceSandboxStatus(workspaceId),
+    });
+  }));
+
+  router.post('/sandboxes/:id/pause', wrap(async (req, res) => {
+    res.json({ success: true, ...(await pauseSandboxById(req.params.id)) });
+  }));
+
+  router.post('/sandboxes/:id/resume', wrap(async (req, res) => {
+    res.json({ success: true, ...(await resumeSandboxById(req.params.id)) });
+  }));
+
+  /** Terminates the sandbox and destroys its disk. The UI confirms first. */
+  router.delete('/sandboxes/:id', wrap(async (req, res) => {
+    res.json({ success: true, ...(await killSandboxById(req.params.id)) });
+  }));
+
+  /**
+   * "I am about to use this workspace" — resume the sandbox if it is asleep and
+   * reset the idle clock, so the preview the user just clicked actually answers.
+   */
+  router.post('/workspaces/:id/wake', wrap(async (req, res) => {
+    const ws = await openWorkspace(req.params.id);
+    touch(ws.id);
+    if (ws.kind === 'sandbox' && ws.record.sandboxId) await ws.resume();
+    res.json({ success: true, sandboxId: ws.record.sandboxId || null });
+  }));
+
   // --------------------------------------------------------------- approvals
   router.post('/approvals/:key', wrap(async (req, res) => {
     const allow = req.body?.allow === true;
@@ -245,6 +308,9 @@ export function registerAgentRoutes(app, { runSearchTool, resolveProvider = (pro
     } finally {
       clearInterval(heartbeat);
       activeRuns.delete(workspaceId);
+      // The run is over. Start the short "finished" clock: if nothing else happens
+      // in the workspace, the idle sweeper pauses the sandbox and the meter stops.
+      noteRunFinished(workspaceId);
       ws.notify = () => {};
       send({ done: true });
       if (!res.writableEnded) {

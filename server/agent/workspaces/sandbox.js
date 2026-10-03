@@ -7,10 +7,17 @@
  * and its timeout is pushed forward on every use. When you stop using it, it
  * PAUSES (files and processes preserved, compute billing stops) instead of
  * dying, and the next message wakes it in about a second.
+ *
+ * Three layers make sure it actually does stop:
+ *   1. the idle sweeper (server/agent/idlePause.js) pauses it within a couple of
+ *      minutes of the last activity — this is the one that normally fires;
+ *   2. the run grace clock pauses it shortly after a run finishes;
+ *   3. Novita's own `timeoutMs` is the backstop if this server dies.
  */
 import path from 'node:path';
 import { BaseWorkspace, WorkspaceError, sortEntries } from './base.js';
 import { getNovitaKey, limits } from '../config.js';
+import { forget, markPaused, markRunning, touch } from '../sandboxActivity.js';
 import { updateWorkspaceRecord } from '../store.js';
 import {
   IGNORED_DIRS, NON_INTERACTIVE_ENV, cleanTerminalText, formatBytes, genId, hasGlobChars,
@@ -41,6 +48,33 @@ export function loadNovitaSdk() {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errName = (err) => err?.constructor?.name || err?.name || '';
 const isNotFound = (err) => /NotFound/i.test(errName(err)) || /does not exist|not found/i.test(String(err?.message));
+
+/**
+ * Turn any Novita SDK error into a WorkspaceError the UI can show. Exported so
+ * the account-level admin routes (pause / resume / delete a sandbox) report
+ * failures in exactly the same words as the agent's own workspace code.
+ */
+export function wrapNovitaError(err) {
+  if (err instanceof WorkspaceError) return err;
+  const name = errName(err);
+  const msg = String(err?.message || err);
+  if (name === 'AuthenticationError') return new WorkspaceError('Novita rejected the API key (401). Check NOVITA_API_KEY.', 'auth');
+  if (name === 'RateLimitError') return new WorkspaceError('Novita is rate-limiting this key. Wait a moment and retry.', 'rate_limit');
+  if (name === 'NotEnoughSpaceError') return new WorkspaceError('The sandbox disk is full.', 'no_space');
+  if (name === 'FileNotFoundError') return new WorkspaceError(msg, 'not_found');
+  if (name === 'TimeoutError') return new WorkspaceError('The sandbox did not answer in time.', 'timeout');
+  // A 400 means WE sent something Novita would not accept (usually a malformed
+  // sandbox id). Reporting that as a 502 "sandbox error" would blame the wrong
+  // side, so it keeps its real meaning.
+  if (name === 'InvalidArgumentError' || /^\s*400\b/.test(msg)) {
+    return new WorkspaceError(`Novita rejected that request: ${msg}`, 'bad_request');
+  }
+  return new WorkspaceError(`Sandbox error: ${msg}`, 'sandbox_error');
+}
+
+/** A sandbox id that no longer exists is the common, expected case — not a crash. */
+export const isSandboxGone = (err) =>
+  /NotFound/i.test(errName(err)) || /not found|does not exist/i.test(String(err?.message || err));
 
 const SANDBOX_ENV_NOTE =
   'Cloud sandbox: Debian 12 Linux, running as root, ~2 vCPU, ~0.5 GB RAM, ~20 GB disk, internet access. ' +
@@ -76,11 +110,77 @@ export class SandboxWorkspace extends BaseWorkspace {
   /** The live sandbox: connects, resumes, or recreates as needed, and extends its timeout. */
   sandbox() {
     if (!this._ensuring) {
-      this._ensuring = this._ensure().finally(() => {
-        this._ensuring = null;
-      });
+      this._ensuring = this._ensure()
+        .then((sbx) => {
+          // Every sandbox operation funnels through here, so this is the one place
+          // that has to know "the workspace is in use". The idle sweeper relies on
+          // it: without this it would happily pause a sandbox mid-tool-call.
+          touch(this.id);
+          markRunning(this.id);
+          return sbx;
+        })
+        .finally(() => {
+          this._ensuring = null;
+        });
     }
     return this._ensuring;
+  }
+
+  /**
+   * Forget the cached connection. The next use reconnects — which also RESUMES a
+   * paused sandbox — so this is how we react to the sandbox being paused or
+   * killed behind our back (by the idle sweeper, or from the Sandboxes panel).
+   */
+  invalidate() {
+    this.sbx = null;
+    this._lastKeepAlive = 0;
+  }
+
+  /** Pause it now. `false` means it was already paused (or gone). */
+  async pauseNow() {
+    const id = this.record.sandboxId;
+    if (!id) return false;
+    const { Sandbox } = await loadNovitaSdk();
+    try {
+      const did = await Sandbox.pause(id, { apiKey: getNovitaKey() });
+      this.invalidate();
+      markPaused(this.id);
+      return did;
+    } catch (err) {
+      if (isSandboxGone(err)) {
+        this.invalidate();
+        markPaused(this.id);
+        return false;
+      }
+      throw this.wrap(err);
+    }
+  }
+
+  /** Wake it up. Connecting to a paused sandbox resumes it. */
+  async resume() {
+    this.invalidate(); // force a real connect: setTimeout on a paused sandbox does nothing
+    await this.sandbox();
+    return true;
+  }
+
+  /** What Novita says this sandbox is doing right now. */
+  async remoteState() {
+    const id = this.record.sandboxId;
+    if (!id) return null;
+    const { Sandbox } = await loadNovitaSdk();
+    try {
+      const info = await Sandbox.getInfo(id, { apiKey: getNovitaKey() });
+      const state = info.state === 'paused' ? 'paused' : 'running';
+      if (state === 'paused') markPaused(this.id);
+      else markRunning(this.id);
+      return { state, endAt: info.endAt ? new Date(info.endAt).getTime() : null };
+    } catch (err) {
+      if (isSandboxGone(err)) {
+        markPaused(this.id);
+        return { state: 'gone', endAt: null };
+      }
+      throw this.wrap(err);
+    }
   }
 
   async _ensure() {
@@ -146,15 +246,7 @@ export class SandboxWorkspace extends BaseWorkspace {
   }
 
   wrap(err) {
-    if (err instanceof WorkspaceError) return err;
-    const name = errName(err);
-    const msg = String(err?.message || err);
-    if (name === 'AuthenticationError') return new WorkspaceError('Novita rejected the API key (401). Check NOVITA_API_KEY.', 'auth');
-    if (name === 'RateLimitError') return new WorkspaceError('Novita is rate-limiting this key. Wait a moment and retry.', 'rate_limit');
-    if (name === 'NotEnoughSpaceError') return new WorkspaceError('The sandbox disk is full.', 'no_space');
-    if (name === 'FileNotFoundError') return new WorkspaceError(msg, 'not_found');
-    if (name === 'TimeoutError') return new WorkspaceError('The sandbox did not answer in time.', 'timeout');
-    return new WorkspaceError(`Sandbox error: ${msg}`, 'sandbox_error');
+    return wrapNovitaError(err);
   }
 
   // ---- paths --------------------------------------------------------------
@@ -512,6 +604,7 @@ export class SandboxWorkspace extends BaseWorkspace {
 
   async dispose() {
     const id = this.record.sandboxId;
+    forget(this.id); // stop the idle sweeper before the sandbox stops existing
     if (!id) return;
     try {
       const sbx = this.sbx || (await (await loadNovitaSdk()).Sandbox.connect(id, { apiKey: getNovitaKey() }));

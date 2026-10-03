@@ -8,7 +8,8 @@ import { fileURLToPath } from 'url';
 import { createStreamSplitter } from './streamSplitter.js';
 import { normalizeToolExecutionsForDisk } from './toolTrail.js';
 import { fetchViaCurl } from './curlFetch.js';
-import { registerAgentRoutes } from './agent/routes.js';
+import { registerAgentRoutes, _activeRuns } from './agent/routes.js';
+import { startIdlePauseSweeper } from './agent/idlePause.js';
 import { normalizeAgentBlockForDisk } from './agent/persist.js';
 import { modelForProvider, normalizeThinkingLevel, thinkingParams } from './agent/thinking.js';
 import { mergeSettingsPatch, publicSettings, resolveConfiguredProvider } from './settings.js';
@@ -962,8 +963,18 @@ app.post('/api/providers/models', async (req, res) => {
 });
 
 // Helper for Mock responses
+/** Content may be a plain string or a multimodal array — read either. */
+function messageText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((p) => (p && p.type === 'text' ? p.text : '')).filter(Boolean).join(' ');
+  }
+  return '';
+}
+
+// Helper for Mock responses
 async function streamMockResponse(res, messages, model, thinkingLevel) {
-  const lastMsg = messages[messages.length - 1]?.content || 'Hello';
+  const lastMsg = messageText(messages[messages.length - 1]?.content) || 'Hello';
   const isReasoning = String(model || '').includes('reasoning') || thinkingLevel !== 'Auto';
 
   res.writeHead(200, {
@@ -2494,6 +2505,11 @@ app.post('/api/search', handleSearchTool);
 
 // Agent mode: workspaces, files, commands, and the agent run itself.
 registerAgentRoutes(app, { runSearchTool, resolveProvider: providerWithStoredCredentials });
+
+// A cloud sandbox bills while it is RUNNING, so one left behind after a run is
+// pure cost. This sweeper pauses app-managed sandboxes once they go quiet, and
+// is what makes "the agent finished, so the sandbox went to sleep" true.
+startIdlePauseSweeper({ isBusy: (workspaceId) => _activeRuns.has(workspaceId) });
 
 /**
  * Run one of the read-only web tools and hand back its plain result object.

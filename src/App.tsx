@@ -8,14 +8,18 @@ import { MoviePlayerModal } from './components/MoviePlayerModal';
 import { AgentControls } from './components/AgentControls';
 import { WorkspaceDialog } from './components/WorkspaceDialog';
 import { WorkspacePanel } from './components/WorkspacePanel';
+import { PreviewPanel, clampPreviewWidth, defaultPreviewWidth } from './components/PreviewPanel';
+import { SandboxManagerDialog } from './components/SandboxManagerDialog';
 import {
   AgentAction,
   AgentConfig,
   AgentWorkspace,
+  ChatMessageContent,
   Conversation,
   Message,
   MessageBlock,
   Provider,
+  SandboxStatus,
   Theme,
   ThinkingLevel,
   Attachment,
@@ -26,10 +30,12 @@ import {
   generateTitleFromPrompt,
   getStoredActiveChatId,
   getStoredConversations,
+  getStoredPreviewWidth,
   getStoredProviders,
   getStoredTheme,
   saveStoredActiveChatId,
   saveStoredConversations,
+  saveStoredPreviewWidth,
   saveStoredProviders,
   saveStoredTheme,
   sanitizeProvidersForClient,
@@ -47,12 +53,15 @@ import {
   answerApproval,
   deleteWorkspace as deleteAgentWorkspace,
   getAgentConfig,
+  getSandboxStatus,
   listWorkspaces,
   updateWorkspace as updateAgentWorkspace,
+  wakeWorkspace,
 } from './services/agentApi';
 import { runAgentTurn } from './agent/runAgentTurn';
 import { collectActivity } from './agent/format';
 import { SmoothStreamer } from './utils/smoothStream';
+import { buildMessageContent } from './utils/messageContent';
 import { savePreviewAccessCode } from './services/previewAuth';
 
 export const App: React.FC = () => {
@@ -69,6 +78,31 @@ export const App: React.FC = () => {
   // Sidebar collapse & mobile drawer state
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+
+  // The running app the agent built, shown docked on the right (null = closed).
+  // `reloadKey` is the load token: the panel keys its frame on it, so raising it
+  // is what makes the frame navigate again.
+  const [previewTarget, setPreviewTarget] = useState<{ url: string; title?: string; reloadKey?: number } | null>(null);
+  /** Every open, refresh and sandbox wake gets its own token. Never reused. */
+  const previewTokenRef = useRef(0);
+  /**
+   * The chat's way of telling the docked preview that the app it shows has moved
+   * on. A ref, not a direct call: the send path is declared before the preview
+   * state, and a closure over a stale `previewTarget` would refresh the wrong
+   * panel — or none at all.
+   */
+  const previewRefreshRef = useRef<((url?: string, title?: string) => void) | null>(null);
+  // How the chat / preview split is divided. Remembered across reloads.
+  const [previewWidth, setPreviewWidth] = useState(() => {
+    const stored = getStoredPreviewWidth();
+    if (typeof window === 'undefined') return stored ?? 620;
+    return stored === null ? defaultPreviewWidth(window.innerWidth) : clampPreviewWidth(stored, window.innerWidth);
+  });
+  /**
+   * True while WE hid the sidebar to make room for the preview. Closing the
+   * preview then puts it back — but a sidebar the user hid themselves stays hid.
+   */
+  const sidebarHiddenForPreviewRef = useRef(false);
 
   // Settings Modal state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -89,6 +123,10 @@ export const App: React.FC = () => {
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [filesRefresh, setFilesRefresh] = useState(0);
+  // Account-wide sandbox manager (sees sandboxes Danav no longer tracks).
+  const [sandboxesOpen, setSandboxesOpen] = useState(false);
+  // What the active workspace's own sandbox is doing right now.
+  const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
 
   // FlixRaid Movie Player Modal state
   const [activeMoviePlayer, setActiveMoviePlayer] = useState<{
@@ -731,14 +769,15 @@ export const App: React.FC = () => {
     // search for, which pages to open and when it has enough — the server
     // streams each tool it runs back as a `tool` event, and `upsertTool` records
     // it on the assistant message so the chat shows the research trail live.
+    // Text files ride along inside the prompt. Images do NOT — they are sent
+    // as real image parts (see buildMessageContent) so a vision model actually
+    // sees them instead of a "[Attached Image: name]" placeholder.
     let attachmentsContext = '';
-    if (currentAttachments.length > 0) {
-      const parts = currentAttachments.map((att) => {
-        if (att.type === 'image') {
-          return `[Attached Image: ${att.name}]`;
-        }
-        return `[Attached File: ${att.path || att.name}]\n\`\`\`\n${att.content || ''}\n\`\`\``;
-      });
+    const fileAttachments = currentAttachments.filter((att) => att.type !== 'image');
+    if (fileAttachments.length > 0) {
+      const parts = fileAttachments.map(
+        (att) => `[Attached File: ${att.path || att.name}]\n\`\`\`\n${att.content || ''}\n\`\`\``
+      );
       attachmentsContext = `[Attached Context from User]:\n${parts.join('\n\n')}\n[End of Attached Context]\n\n`;
     }
 
@@ -747,13 +786,14 @@ export const App: React.FC = () => {
 
     const augmentedPrompt = `${attachmentsContext}${messageContent}`.trim();
 
-    // Messages history to send
-    const historyPayload: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [
+    // Messages history to send. Each turn is rebuilt from what was stored, so
+    // an image attached three turns ago is still sent with its own message.
+    const historyPayload: Array<{ role: 'user' | 'assistant' | 'system'; content: ChatMessageContent }> = [
       ...existingMessages.map((m) => ({
         role: m.role === 'tool' ? ('user' as const) : (m.role as 'user' | 'assistant' | 'system'),
-        content: m.content,
+        content: buildMessageContent(m.content, m.attachments),
       })),
-      { role: 'user' as const, content: augmentedPrompt },
+      { role: 'user' as const, content: buildMessageContent(augmentedPrompt, currentAttachments) },
     ];
 
     // ---- Agent mode: the model works in the workspace with real tools --------
@@ -773,6 +813,18 @@ export const App: React.FC = () => {
         );
       const MUTATING = new Set(['write_file', 'edit_file', 'multi_edit', 'delete_file', 'move_file', 'create_dir', 'run_command']);
       let settledMutations = 0;
+      /**
+       * The docked preview follows the agent. Two things move it on: the agent
+       * announcing a preview (`get_preview_url` finished — that IS the app, as of
+       * now) and the agent changing files while a preview is on screen. Both go
+       * through one ref, and both are no-ops when the panel is closed.
+       */
+      let announcedPreview = '';
+      let previewStale = false;
+      const followPreview = (url?: string, title?: string) => {
+        previewStale = false;
+        previewRefreshRef.current?.(url, title);
+      };
 
       await runAgentTurn({
         provider: activeProvider,
@@ -802,6 +854,22 @@ export const App: React.FC = () => {
           if (settled !== settledMutations) {
             settledMutations = settled;
             setFilesRefresh((n) => n + 1);
+            previewStale = true;
+          }
+          // A finished `get_preview_url` is the agent saying "the app is up" —
+          // the panel should be showing that build, not the one before it. The
+          // last one in the turn wins.
+          let announcedUrl: string | undefined;
+          let announcedTitle: string | undefined;
+          for (const b of snap.blocks) {
+            if (b.type !== 'action' || b.action.tool !== 'get_preview_url' || b.action.status !== 'done') continue;
+            if (!b.action.result?.url) continue;
+            announcedUrl = b.action.result.url;
+            announcedTitle = b.action.result.title;
+          }
+          if (announcedUrl && announcedUrl !== announcedPreview) {
+            announcedPreview = announcedUrl;
+            followPreview(announcedUrl, announcedTitle);
           }
         },
         onFinish: (snap, error) => {
@@ -818,6 +886,8 @@ export const App: React.FC = () => {
           setIsLoading(false);
           abortControllerRef.current = null;
           setFilesRefresh((n) => n + 1);
+          // The turn changed files the open preview serves: show the result.
+          if (previewStale) followPreview();
         },
       });
       return;
@@ -1104,6 +1174,124 @@ export const App: React.FC = () => {
   };
 
   const agentOn = Boolean(activeConversation?.agentMode);
+
+  // ---- Sandbox status --------------------------------------------------------
+  // The workspace chip has to tell the truth about the cloud sandbox, because the
+  // SERVER pauses it on its own once it goes idle. Polling is cheap (one getInfo)
+  // and is skipped entirely while the Sandboxes dialog is open, since that polls
+  // the whole account by itself.
+  const [sandboxStatusNonce, setSandboxStatusNonce] = useState(0);
+  const activeWorkspaceId = activeWorkspace?.id ?? null;
+  const activeWorkspaceKind = activeWorkspace?.kind ?? null;
+
+  useEffect(() => {
+    if (!agentOn || activeWorkspaceKind !== 'sandbox' || !activeWorkspaceId || sandboxesOpen) {
+      setSandboxStatus(null);
+      return;
+    }
+    let cancelled = false;
+    const read = async () => {
+      try {
+        const res = await getSandboxStatus(activeWorkspaceId);
+        if (!cancelled) setSandboxStatus(res.status);
+      } catch {
+        /* the chip just stays blank; the run itself reports real errors */
+      }
+    };
+    void read();
+    const t = setInterval(read, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [agentOn, activeWorkspaceId, activeWorkspaceKind, sandboxesOpen, sandboxStatusNonce, filesRefresh]);
+
+  /** Closing the preview gives back the sidebar we took away for it. */
+  const closePreview = useCallback(() => {
+    setPreviewTarget(null);
+    if (sidebarHiddenForPreviewRef.current) {
+      sidebarHiddenForPreviewRef.current = false;
+      setIsSidebarCollapsed(false);
+    }
+  }, []);
+
+  // The right-hand column shows one thing at a time: the workspace files or the
+  // running preview. Opening either closes the other.
+  const toggleFiles = () => {
+    setFilesOpen((open) => {
+      if (!open) closePreview();
+      return !open;
+    });
+  };
+
+  /**
+   * Open the preview. A paused sandbox answers nothing, so the panel goes up
+   * straight away (with its loading state) and we wake the sandbox behind it;
+   * once it is up the panel is told to load again.
+   *
+   * The sidebar is put away while the preview is open: on a laptop, 256px of
+   * chat list is exactly the space the running app needs.
+   *
+   * Every open gets a NEW load token, including a re-open of the same URL. That
+   * is the whole point: a preview URL stays the same while the app behind it is
+   * rebuilt, and without a new token the frame had nothing to react to, so the
+   * panel sat on the previous build forever while a new tab showed the new one.
+   */
+  const openPreview = useCallback(
+    (url: string, title?: string) => {
+      setFilesOpen(false);
+      setPreviewTarget({ url, title, reloadKey: (previewTokenRef.current += 1) });
+      setIsSidebarCollapsed((collapsed) => {
+        if (!collapsed) sidebarHiddenForPreviewRef.current = true;
+        return true;
+      });
+      if (activeWorkspaceKind !== 'sandbox' || !activeWorkspaceId) return;
+      void (async () => {
+        try {
+          await wakeWorkspace(activeWorkspaceId);
+          setSandboxStatusNonce((n) => n + 1);
+          const token = (previewTokenRef.current += 1);
+          setPreviewTarget((t) => (t && t.url === url ? { ...t, reloadKey: token } : t));
+        } catch {
+          /* the panel's own "still loading" hint covers this */
+        }
+      })();
+    },
+    [activeWorkspaceId, activeWorkspaceKind]
+  );
+
+  /**
+   * The app the panel is showing has changed underneath it — a new preview URL,
+   * or the same one after the agent rebuilt it. Point the panel at the new URL if
+   * there is one, and make it load again either way.
+   *
+   * A closed panel stays closed: refreshing is not a reason to take over the
+   * screen, and the token is only spent when there is a frame to spend it on.
+   */
+  const refreshPreview = useCallback((url?: string, title?: string) => {
+    setPreviewTarget((t) => {
+      if (!t) return t;
+      const token = (previewTokenRef.current += 1);
+      if (url && url !== t.url) return { url, title, reloadKey: token };
+      return { ...t, reloadKey: token };
+    });
+  }, []);
+  useEffect(() => {
+    previewRefreshRef.current = refreshPreview;
+  }, [refreshPreview]);
+
+  const handlePreviewWidth = useCallback((width: number) => {
+    setPreviewWidth(width);
+    saveStoredPreviewWidth(width);
+  }, []);
+
+  // A narrower window must not leave the panel wider than the screen.
+  useEffect(() => {
+    const onResize = () => setPreviewWidth((w) => clampPreviewWidth(w, window.innerWidth));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   const agentControlsNode = (
     <AgentControls
       enabled={agentOn}
@@ -1115,7 +1303,9 @@ export const App: React.FC = () => {
       onDelete={handleDeleteWorkspace}
       onToggleAutoRun={handleToggleAutoRun}
       filesOpen={filesOpen}
-      onToggleFiles={() => setFilesOpen((v) => !v)}
+      onToggleFiles={toggleFiles}
+      onOpenSandboxes={() => setSandboxesOpen(true)}
+      sandboxState={sandboxStatus?.state ?? null}
       busy={isLoading}
     />
   );
@@ -1150,6 +1340,22 @@ export const App: React.FC = () => {
             <PanelLeft className="w-5 h-5 stroke-[1.75]" />
           </button>
         </div>
+
+        {/* Desktop: a collapsed sidebar is hidden completely, so this small
+            icon is the only way back to it. */}
+        {isSidebarCollapsed && (
+          <div className="hidden lg:block absolute top-3 left-3 z-30">
+            <button
+              onClick={() => setIsSidebarCollapsed(false)}
+              aria-label="Show sidebar"
+              title="Show sidebar"
+              data-testid="show-sidebar"
+              className="p-2 rounded-xl text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+            >
+              <PanelLeft className="w-5 h-5 stroke-[1.75]" />
+            </button>
+          </div>
+        )}
 
         {/* Empty Chat State vs Active Chat State */}
         {(!activeConversation || activeConversation.messages.length === 0) ? (
@@ -1193,7 +1399,9 @@ export const App: React.FC = () => {
               onRegenerateResponse={handleRegenerateResponse}
               onContinueResponse={handleContinueResponse}
               onAgentApproval={handleAgentApproval}
+              onOpenPreview={openPreview}
               agentMode={agentOn}
+              sidebarCollapsed={isSidebarCollapsed}
               onWatchMedia={(id, type, title) => {
                 setActiveMoviePlayer({
                   isOpen: true,
@@ -1234,6 +1442,18 @@ export const App: React.FC = () => {
         <WorkspacePanel workspace={activeWorkspace} refreshToken={filesRefresh} onClose={() => setFilesOpen(false)} />
       )}
 
+      {/* The running app the agent built, docked on the right of the chat */}
+      {previewTarget && (
+        <PreviewPanel
+          url={previewTarget.url}
+          title={previewTarget.title}
+          reloadKey={previewTarget.reloadKey}
+          width={previewWidth}
+          onWidthChange={handlePreviewWidth}
+          onClose={closePreview}
+        />
+      )}
+
       {/* Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
@@ -1251,6 +1471,15 @@ export const App: React.FC = () => {
         config={agentConfig}
         onCreated={handleWorkspaceCreated}
         onConfigChanged={refreshAgent}
+      />
+
+      {/* Every sandbox in the Novita account — including ones no workspace owns */}
+      <SandboxManagerDialog
+        isOpen={sandboxesOpen}
+        onClose={() => setSandboxesOpen(false)}
+        config={agentConfig}
+        onChanged={refreshAgent}
+        busyWorkspaceId={isLoading ? activeConversation?.agentWorkspaceId ?? null : null}
       />
 
       {/* FlixRaid Movie & Series Streaming Player Modal */}

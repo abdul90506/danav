@@ -15,6 +15,7 @@ import { buildSystemPrompt, formatSnapshot } from './prompt.js';
 import { collectProjectGuidance } from './context.js';
 import { recentRunsForPrompt, recordRun } from './journal.js';
 import { buildToolset, READ_ONLY_TOOLS } from './tools.js';
+import { checkAction, createLedger } from './policy.js';
 import { splitLines } from './textops.js';
 import { memoryForPrompt } from './memory.js';
 import { createRedactor, genId, truncateMiddle } from './util.js';
@@ -38,16 +39,51 @@ const MAX_PARALLEL = 6;
 
 /** Calls worth replaying: the ones whose body is worth watching. */
 const REVEAL_TOOLS = new Set(['write_file', 'append_file', 'edit_file', 'multi_edit']);
+/**
+ * The numbers a file-writing row shows the moment it starts: zero lines so far.
+ * The row has to exist before the first line lands, so the chat reads
+ * "Creating index.html +0" and then climbs — the 0 is a real reading of a file
+ * that is really empty, not a number invented to fill the gap.
+ */
+const ZERO_PROGRESS = () => ({ added: 0, removed: 0, tail: [] });
 /** Below this the file is on screen before anyone could read it anyway. */
 const REVEAL_MIN_CHARS = 420;
-const REVEAL_TICK_MS = 30;
+/** One reveal frame, ~30fps. Small, even steps are what make it read as typing. */
+const REVEAL_TICK_MS = 33;
+/**
+ * A beat before the first line lands, so "Creating index.html +0" is on screen
+ * long enough to be read. Without it the row opens and is already half-written
+ * by the time the eye gets to it, which is what made the whole thing look like
+ * a jump rather than a file being written.
+ */
+const REVEAL_LEAD_IN_MS = 180;
 /**
  * How long after a call's first frame a fully-formed body still counts as "arrived all at once".
  * A streamed file takes seconds to arrive; a dumped one is complete in the same millisecond.
  */
 const ONE_SHOT_WINDOW_MS = 150;
-/** ~220 characters per step, clamped: a small file flashes by, a big one takes ~1.4s. */
-const revealSteps = (len) => Math.max(6, Math.min(45, Math.round(len / 220)));
+
+/**
+ * The reveal plan for a body of `charCount` characters: how long it runs, and how
+ * many frames that is meant to be (`steps` is the target cadence, not a loop count —
+ * the reveal itself is clock-driven, see replayBody).
+ *
+ * Every provider measured on this app (agnes, gemini, claude, deepseek via the
+ * OpenAI-compatible endpoints) hands over the WHOLE write_file call in a single
+ * SSE frame — verified with `node scripts/probe-raw.js <model>`. There is no
+ * token stream to follow, so the reveal is the only thing that can show a file
+ * being written. It used to be a fixed 6–45 steps at 30ms, which made a 40-line
+ * file flash past in 240ms: the count went 0 → 40 in a blur and read as a jump.
+ *
+ * This paces by content instead, at a speed a person can follow, floored so a
+ * small file is still visible and capped so a huge one does not hold the run up.
+ */
+export function revealPlan(charCount) {
+  const chars = Math.max(0, Number(charCount) || 0);
+  const raw = Math.round((chars / limits.revealCharsPerSec()) * 1000);
+  const durationMs = Math.max(limits.revealMinMs(), Math.min(limits.revealMaxMs(), raw));
+  return { durationMs, steps: Math.max(2, Math.round(durationMs / REVEAL_TICK_MS)) };
+}
 
 /** Did the model finish this call in the frame we just saw? */
 const isCompleteJson = (text) => {
@@ -160,25 +196,49 @@ function replayTracker(tools, name, argsText) {
 /**
  * Walk the finished arguments from "body just opened" to "whole call", publishing the
  * progress of each prefix. @returns the number of updates sent.
+ *
+ * The lines go on disk FIRST, and the number published is the one the file really has:
+ * the count in the chat is a reading of the file, never a promise about it. That is
+ * also what paces the reveal on a slow workspace — a sandbox write is a network round
+ * trip, so its file moves every ~400ms and the count follows it rather than racing
+ * ahead of it. On a local workspace the file keeps up to within a line or two.
+ *
+ * The reveal is driven by the CLOCK, not by counting iterations: `setTimeout(33)` on
+ * Windows lands on the next ~15.6ms timer tick and really takes ~47ms, so a
+ * fixed step count would quietly stretch every reveal by half again. Reading the
+ * elapsed time instead keeps the promised duration on every platform — the steps just
+ * get slightly bigger where the clock is coarser.
  */
 async function replayBody({ text, tracker, send, id, signal, writer }) {
   const from = bodyStartIndex(text);
-  const steps = revealSteps(text.length);
+  const bodyLength = text.length - from;
+  const { durationMs } = revealPlan(bodyLength);
   let sent = 0;
-  for (let s = 1; s <= steps; s++) {
+  let lastKey = '';
+  if (signal?.aborted) return sent;
+  // Let "Creating index.html +0" register before the first line lands.
+  await new Promise((r) => setTimeout(r, REVEAL_LEAD_IN_MS));
+  const startedAt = Date.now();
+  for (;;) {
     if (signal?.aborted) return sent;
-    const cut = from + Math.round(((text.length - from) * s) / steps);
+    const elapsed = Date.now() - startedAt;
+    const frac = durationMs <= 0 ? 1 : Math.min(1, elapsed / durationMs);
+    const cut = from + Math.round(bodyLength * frac);
     const { progress, body } = tracker.update(text.slice(0, cut));
-    // The lines go on disk FIRST, and the number published is the one the file really has: the
-    // count in the chat is a reading of the file, never a promise about it.
-    let real = null;
-    if (writer) real = await writer.push(body, { force: s === steps }); // the last line always lands
+    const real = writer ? await writer.push(body, { force: frac >= 1 }) : null; // the last line always lands
     if (progress) {
       if (real !== null && progress.added > real) progress.added = real;
-      send({ agent: { type: 'action_update', id, patch: { progress } } });
-      sent++;
+      // The file's throttle makes several frames repeat themselves; sending the same
+      // numbers twice only costs the browser a re-render.
+      const key = `${progress.added}/${progress.removed}/${progress.tail.join('\u0000')}`;
+      if (key !== lastKey) {
+        lastKey = key;
+        send({ agent: { type: 'action_update', id, patch: { progress } } });
+        sent++;
+      }
     }
-    if (s < steps) await new Promise((r) => setTimeout(r, REVEAL_TICK_MS));
+    if (frac >= 1) break;
+    await new Promise((r) => setTimeout(r, REVEAL_TICK_MS));
   }
   if (writer) writer.push(text ? JSON.parse(text).content ?? '' : '', { force: true });
   return sent;
@@ -188,8 +248,31 @@ async function replayBody({ text, tracker, send, id, signal, writer }) {
 // Context management
 // ---------------------------------------------------------------------------
 
+/**
+ * Rough character weight of a message's content.
+ *
+ * Content is usually a string, but a message carrying an image is the
+ * multimodal array. Providers bill an image by its resolution rather than by
+ * the length of its base64, so counting the raw data URL would overstate it by
+ * orders of magnitude and prune the history for no reason — a fixed nominal
+ * weight is a much closer estimate.
+ */
+const IMAGE_WEIGHT = 2000;
+const contentSize = (content) => {
+  if (typeof content === 'string') return content.length;
+  if (Array.isArray(content)) {
+    return content.reduce((n, part) => {
+      if (!part) return n;
+      if (part.type === 'text') return n + String(part.text || '').length;
+      if (part.type === 'image_url') return n + IMAGE_WEIGHT;
+      return n + JSON.stringify(part).length;
+    }, 0);
+  }
+  return content ? String(content).length : 0;
+};
+
 const sizeOf = (m) =>
-  (m.content ? String(m.content).length : 0) + (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0);
+  contentSize(m.content) + (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0);
 const totalSize = (messages) => messages.reduce((n, m) => n + sizeOf(m), 0);
 
 /** Keep a strict character bound while preserving both ends when useful. */
@@ -315,7 +398,9 @@ export function pruneMessages(messages, budgetChars) {
 
   for (const m of plain()) {
     if (totalSize(messages) <= budget) break;
-    if (protectedPlain.has(m) || String(m.content || '').length <= 1200) continue;
+    // Only plain strings can be clipped; a multimodal array is left alone.
+    if (typeof m.content !== 'string') continue;
+    if (protectedPlain.has(m) || m.content.length <= 1200) continue;
     m.content = clipWithin(m.content, 1000, 'older conversation');
   }
   while (totalSize(messages) > budget) {
@@ -339,6 +424,7 @@ export function pruneMessages(messages, budgetChars) {
   if (totalSize(messages) > budget) shrinkToolOutputs(messages, 350);
   if (totalSize(messages) > budget) {
     for (const m of plain()) {
+      if (typeof m.content !== 'string') continue;
       if (protectedPlain.has(m) && m !== currentUser) m.content = clipWithin(m.content, 800, 'older conversation');
     }
   }
@@ -368,10 +454,25 @@ export function pruneMessages(messages, budgetChars) {
   return { pruned: true, droppedRounds, chars, budget, overBudget: chars > budget };
 }
 
+/** The text of a message, whichever shape its content takes. */
+const contentText = (content) => {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((p) => p && p.type === 'text')
+      .map((p) => p.text || '')
+      .join(' ');
+  }
+  return '';
+};
+
 const cleanHistory = (history) =>
   (Array.isArray(history) ? history : [])
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-    .filter((m) => m.role === 'user' || m.content.trim())
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+    // Drop empty assistant turns — but keep a message whole, image parts and
+    // all. Filtering on `typeof content === 'string'` used to silently delete
+    // every message with an attached image.
+    .filter((m) => m.role === 'user' || contentText(m.content).trim())
     .map((m) => ({ role: m.role, content: m.content }));
 
 const isContextLimitError = (err) =>
@@ -418,6 +519,12 @@ export async function runAgent({
     subagentCalls: 0,
     /** Files being written straight to disk while the model writes them (see tools.liveWrite). */
     liveWriters: [], committedWrites: new Set(),
+    /**
+     * What the agent has actually looked at this run. Filled in by the tools,
+     * read by the policy gate before a mutating call is allowed to run — see
+     * policy.js. "Look before you leap" as an invariant, not as advice.
+     */
+    ledger: createLedger(),
   };
 
   // Child runs are deliberately read-only: their only context is a small set of
@@ -583,7 +690,10 @@ export async function runAgent({
           now - st.firstAt < ONE_SHOT_WINDOW_MS;
         if (wholeAtOnce) {
           st.replay = { text: slot.args, tracker: replayTracker(tools, slot.name, slot.args) };
-          if (st.deltas === 1) send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args } });
+          // The row opens at "+0"; the replay below counts it up from there.
+          if (st.deltas === 1) {
+            send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args, progress: ZERO_PROGRESS() } });
+          }
           return;
         }
         st.replay = null; // it turned out to be a real stream after all: follow it as usual
@@ -604,7 +714,11 @@ export async function runAgent({
         }
 
         if (st.deltas === 1) {
-          send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args, ...(progress ? { progress } : {}) } });
+          // A real reading when the tracker already has one, otherwise the honest "+0" of a
+          // file that has not received its first line yet. `published` stays tied to a REAL
+          // reading, so a body the throttle swallowed is still replayed later.
+          const first = progress ?? (REVEAL_TOOLS.has(slot.name) ? ZERO_PROGRESS() : undefined);
+          send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args, ...(first ? { progress: first } : {}) } });
           if (progress) st.published = true;
           st.lastSent = now;
           return;
@@ -751,8 +865,13 @@ export async function runAgent({
         }
 
         const shownArgs = argError ? {} : tools.displayArgs(name, args);
-        if (isNew) send({ agent: { type: 'action_start', id, tool: name, args: shownArgs } });
-        send({ agent: { type: 'action_update', id, patch: { status: 'running', args: shownArgs } } });
+        // A write that has not been given a number yet opens at "+0" here too. This is the path a
+        // provider that never streams tool calls takes, and the replay below counts it up from there.
+        const opening = !argError && !st.published && REVEAL_TOOLS.has(name) ? ZERO_PROGRESS() : null;
+        if (isNew) {
+          send({ agent: { type: 'action_start', id, tool: name, args: shownArgs, ...(opening ? { progress: opening } : {}) } });
+        }
+        send({ agent: { type: 'action_update', id, patch: { status: 'running', args: shownArgs, ...(opening ? { progress: opening } : {}) } } });
 
         // A body the user has not watched arrive — dumped in one frame, squeezed inside the
         // throttle window, or sent by a provider that never streams tool calls at all — is
@@ -862,9 +981,23 @@ export async function runAgent({
           const msg = `Unknown tool "${name}". Available tools: ${tools.definitions.map((d) => d.function.name).join(', ')}.`;
           res = { ok: false, output: `Error: ${msg}`, error: msg, ui: { kind: name, ok: false } };
         } else {
-          res = await tools.execute(name, execArgs, ctx);
+          // The invariant, checked before anything is touched: a call that would
+          // remove or move something the agent has never looked at does not run.
+          // The model reads the refusal as the tool's result and can go and get
+          // the evidence — which is the whole point of refusing.
+          const blocked = await checkAction({ workspace, state, name, args: execArgs });
+          res = blocked
+            ? {
+                ok: false,
+                blocked: true,
+                failedSoft: true, // a refusal is guidance, not a failure streak
+                output: `Error: ${blocked.message}`,
+                error: blocked.message,
+                ui: { ok: false, ...blocked.ui },
+              }
+            : await tools.execute(name, execArgs, ctx);
         }
-        if (!res.ok && !res.denied) state.toolFailures++;
+        if (!res.ok && !res.denied && !res.blocked) state.toolFailures++;
         if (name === 'run_command' && !res.denied && res.ui?.kind === 'command') {
           const check = verificationLabel(args.command);
           if (check) {
@@ -885,7 +1018,7 @@ export async function runAgent({
           agent: {
             type: 'action_end',
             id,
-            status: res.denied ? 'denied' : res.ok ? 'done' : 'error',
+            status: res.denied ? 'denied' : res.blocked ? 'blocked' : res.ok ? 'done' : 'error',
             ok: Boolean(res.ok),
             result: res.ui,
             output: res.uiOutput,

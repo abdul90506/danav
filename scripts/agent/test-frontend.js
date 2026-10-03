@@ -7,8 +7,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import express from 'express';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { build } from 'esbuild';
 import { startFakeLlm } from '../fake-llm.js';
 import { registerAgentRoutes } from '../../server/agent/routes.js';
@@ -31,9 +33,529 @@ async function load(entry) {
   return import(`data:text/javascript;base64,${Buffer.from(out.outputFiles[0].text).toString('base64')}`);
 }
 
+/**
+ * Same as `load`, but keeps React external and writes the bundle to a real file
+ * so bare `react` imports resolve to the SAME copy this test file imported.
+ * Two React copies would break hooks, which is exactly what we are testing.
+ *
+ * `lucide-react` is aliased to its ESM build on purpose: its CJS bundle calls
+ * `require('react')` dynamically, which esbuild cannot express in an ESM output
+ * ("Dynamic require of \"react\" is not supported"). The ESM build imports React
+ * normally, so it stays external and shares the single copy.
+ */
+const LUCIDE_ESM = path.join(root, 'node_modules/lucide-react/dist/esm/lucide-react.mjs');
+
+async function loadComponent(entry) {
+  const outFile = path.join(root, `.tmp-test-${Math.random().toString(36).slice(2)}.mjs`);
+  await build({
+    entryPoints: [path.join(root, entry)],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    outfile: outFile,
+    logLevel: 'silent',
+    external: ['react', 'react/*', 'react-dom', 'react-dom/*'],
+    alias: { 'lucide-react': LUCIDE_ESM },
+  });
+  try {
+    return await import(pathToFileURL(outFile).href);
+  } finally {
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
 const { AgentTurnState } = await load('src/agent/turnState.ts');
 const fmt = await load('src/agent/format.ts');
 const icons = await load('src/agent/fileIcons.ts');
+const accordion = await load('src/components/thinkingAccordion.ts');
+const content = await load('src/utils/messageContent.ts');
+
+// ---------------------------------------------------------------------------
+console.log('\nMessage content (text vs images)');
+// ---------------------------------------------------------------------------
+
+const IMG = 'data:image/png;base64,iVBORw0KGgo=';
+
+test('a message with no images stays a plain string', () => {
+  assert.equal(content.buildMessageContent('hello'), 'hello');
+  assert.equal(content.buildMessageContent('hello', []), 'hello');
+  // A text file is not an image: it must not turn the content into parts.
+  const fileOnly = content.buildMessageContent('hello', [
+    { id: 'f1', name: 'a.txt', type: 'file', size: 3, content: 'abc' },
+  ]);
+  assert.equal(fileOnly, 'hello');
+});
+
+test('an attached image becomes a real image part the model can see', () => {
+  const parts = content.buildMessageContent('what is this?', [
+    { id: 'i1', name: 'shot.png', type: 'image', size: 12, content: IMG },
+  ]);
+  assert.ok(Array.isArray(parts));
+  assert.deepEqual(parts[0], { type: 'text', text: 'what is this?' });
+  assert.deepEqual(parts[1], { type: 'image_url', image_url: { url: IMG } });
+});
+
+test('an image with no words still carries a text part', () => {
+  // Providers reject an empty content array, so a bare image gets a prompt.
+  const parts = content.buildMessageContent('   ', [
+    { id: 'i1', name: 'shot.png', type: 'image', size: 12, content: IMG },
+  ]);
+  assert.ok(Array.isArray(parts));
+  assert.equal(parts[0].type, 'text');
+  assert.equal(parts[1].type, 'image_url');
+});
+
+test('a broken or missing image payload never becomes an image part', () => {
+  const cases = [
+    { id: 'i1', name: 'x.png', type: 'image', size: 1, content: '' },
+    { id: 'i2', name: 'y.png', type: 'image', size: 1, content: 'https://example.com/y.png' },
+    { id: 'i3', name: 'z.png', type: 'image', size: 1 },
+  ];
+  assert.equal(content.buildMessageContent('hi', cases), 'hi');
+  assert.deepEqual(content.imageDataUrls(cases), []);
+});
+
+test('several images keep their order after the text part', () => {
+  const a = `${IMG}a`;
+  const b = `${IMG}b`;
+  const parts = content.buildMessageContent('compare', [
+    { id: '1', name: 'a.png', type: 'image', size: 1, content: a },
+    { id: '2', name: 'b.png', type: 'image', size: 1, content: b },
+  ]);
+  assert.deepEqual(
+    parts.map((p) => (p.type === 'image_url' ? p.image_url.url : p.text)),
+    ['compare', a, b]
+  );
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nPreview action wiring');
+// ---------------------------------------------------------------------------
+
+/** A finished agent turn whose only step produced a preview URL. */
+const previewTurnMessage = () => ({
+  id: 'm1',
+  role: 'assistant',
+  content: '',
+  createdAt: 1,
+  agent: true,
+  blocks: [
+    {
+      id: 'a1',
+      type: 'action',
+      action: {
+        id: 'a1',
+        tool: 'get_preview_url',
+        status: 'done',
+        args: { port: 5174 },
+        result: {
+          kind: 'preview',
+          port: 5174,
+          url: 'https://5174-demo.sandbox.novita.ai',
+          title: 'Todo',
+        },
+      },
+    },
+  ],
+});
+
+test('a preview row grows a "Preview" button that opens the docked panel', async () => {
+  const ui = await loadComponent('src/components/ChatArea.tsx');
+
+  const html = renderToStaticMarkup(
+    React.createElement(ui.ChatArea, {
+      messages: [previewTurnMessage()],
+      isLoading: false,
+      onOpenPreview: () => {},
+    })
+  );
+  assert.match(html, /data-testid="open-preview-panel"/, 'the Preview button rendered');
+  assert.match(html, /Preview/, 'it is labelled Preview');
+  // The plain link stays available for opening in a real tab.
+  assert.match(html, /https:\/\/5174-demo\.sandbox\.novita\.ai/);
+});
+
+test('the preview button is absent when no handler is wired through', async () => {
+  // This is the regression: ChatArea received onOpenPreview but never passed it
+  // to ChatMessage, so the button silently never rendered.
+  const ui = await loadComponent('src/components/ChatArea.tsx');
+  const html = renderToStaticMarkup(
+    React.createElement(ui.ChatArea, { messages: [previewTurnMessage()], isLoading: false })
+  );
+  assert.doesNotMatch(html, /data-testid="open-preview-panel"/);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nPreview links and the resizable dock');
+// ---------------------------------------------------------------------------
+
+test('a preview link is recognised by its host, not by its wording', async () => {
+  const { isPreviewUrl, previewHost } = await load('src/utils/previewUrl.ts');
+  // The model prints the URL as text far more often than it calls the tool, so
+  // these hosts are the whole reason the link works at all.
+  assert.equal(isPreviewUrl('https://5174-abc123.us-phx-1.sandbox.novita.ai'), true);
+  assert.equal(isPreviewUrl('https://random-words.trycloudflare.com'), true);
+  assert.equal(isPreviewUrl('https://abc.ngrok-free.app'), true);
+  assert.equal(isPreviewUrl('http://localhost:3000'), false, 'loopback needs the opt-in');
+  assert.equal(isPreviewUrl('http://localhost:3000', { allowLoopback: true }), true);
+  // Ordinary links must stay ordinary links.
+  assert.equal(isPreviewUrl('https://example.com/article'), false);
+  assert.equal(isPreviewUrl('https://github.com/foo/bar'), false);
+  assert.equal(isPreviewUrl('mailto:someone@example.com'), false);
+  assert.equal(isPreviewUrl(''), false);
+  assert.equal(isPreviewUrl(undefined), false);
+  assert.equal(previewHost('https://5174-abc.sandbox.novita.ai/app?x=1'), '5174-abc.sandbox.novita.ai');
+});
+
+test('the docked panel can be dragged, but never past a usable split', async () => {
+  const { clampPreviewWidth, defaultPreviewWidth, MIN_PREVIEW_WIDTH, MIN_CHAT_WIDTH } = await loadComponent('src/components/PreviewPanel.tsx');
+  // A wide screen: the panel may take most of it, but the chat keeps its minimum.
+  assert.equal(clampPreviewWidth(900, 1600), 900);
+  assert.equal(clampPreviewWidth(1600 - MIN_CHAT_WIDTH + 200, 1600), 1600 - MIN_CHAT_WIDTH, 'the chat cannot be squeezed away');
+  assert.equal(clampPreviewWidth(50, 1600), MIN_PREVIEW_WIDTH, 'and the panel cannot be collapsed to nothing');
+  // A narrow screen: the minimum wins over a negative maximum, so nothing breaks.
+  assert.equal(clampPreviewWidth(400, 500), MIN_PREVIEW_WIDTH);
+  assert.ok(defaultPreviewWidth(1600) > 0 && defaultPreviewWidth(1600) <= 1600 - MIN_CHAT_WIDTH);
+});
+
+test('the divider follows the pointer: left is wider, right is narrower', async () => {
+  const { dragWidth, clampPreviewWidth, MIN_PREVIEW_WIDTH } = await loadComponent('src/components/PreviewPanel.tsx');
+  // The edge is grabbed at x=1000 with the panel 640 wide.
+  assert.equal(dragWidth(640, 1000, 1000, 1600), 640, 'no movement, no change');
+  assert.equal(dragWidth(640, 1000, 800, 1600), 840, 'moving left by 200 widens by 200');
+  assert.equal(dragWidth(640, 1000, 1200, 1600), 440, 'moving right by 200 narrows by 200');
+  // It tracks one-for-one, with no acceleration and no dead zone.
+  for (const dx of [-300, -140, -37, -1, 0, 1, 37, 140, 300]) {
+    assert.equal(dragWidth(640, 1000, 1000 + dx, 1600), 640 - dx, `dx=${dx} is 1:1`);
+  }
+  // And it still respects the same limits as every other route to a width.
+  assert.equal(dragWidth(640, 1000, 1000 - 5000, 1600), clampPreviewWidth(5640, 1600));
+  assert.equal(dragWidth(640, 1000, 1000 + 5000, 1600), MIN_PREVIEW_WIDTH);
+});
+
+test('every preview load asks for a URL the browser has never cached', async () => {
+  const { withCacheBust } = await loadComponent('src/components/PreviewPanel.tsx');
+  // A bare preview URL: the query goes on the end.
+  assert.equal(withCacheBust('http://localhost:3000', '1.2'), 'http://localhost:3000?__danav=1.2');
+  // An existing query is kept, and the token is appended, not substituted.
+  assert.equal(withCacheBust('http://localhost:3000/?a=1', '3'), 'http://localhost:3000/?a=1&__danav=3');
+  // A fragment has to stay last, or the browser would never see the query.
+  assert.equal(withCacheBust('http://localhost:3000/#/todo', '9'), 'http://localhost:3000/?__danav=9#/todo');
+  assert.equal(withCacheBust('http://localhost:3000/?a=1#x', '9'), 'http://localhost:3000/?a=1&__danav=9#x');
+  // Two different loads are two different URLs — that is the whole point.
+  const a = withCacheBust('https://x.sandbox.novita.ai', '0.1');
+  const b = withCacheBust('https://x.sandbox.novita.ai', '0.2');
+  assert.notEqual(a, b);
+  // The host is untouched, so the panel still shows the right thing in its bar.
+  assert.equal(a.replace(/\?.*$/, ''), 'https://x.sandbox.novita.ai');
+});
+
+test('a markdown link to the running app opens the panel instead of a new tab', async () => {
+  const ui = await loadComponent('src/components/ChatMessage.tsx');
+  const OPEN = { onOpenPreview: () => {} };
+  /** A plain chat reply (no agent timeline). */
+  const reply = (content, props = OPEN) =>
+    renderToStaticMarkup(
+      React.createElement(ui.ChatMessage, {
+        message: { id: 'm1', role: 'assistant', content, createdAt: 1 },
+        ...props,
+      })
+    );
+  /** An agent turn: its prose lives in a text block on the timeline. */
+  const agentTurn = (content, props = OPEN) =>
+    renderToStaticMarkup(
+      React.createElement(ui.ChatMessage, {
+        message: {
+          id: 'm1', role: 'assistant', content: '', createdAt: 1, agent: true,
+          blocks: [{ id: 'b1', type: 'text', content }],
+        },
+        ...props,
+      })
+    );
+
+  // The model prints the URL as text far more often than it calls the tool.
+  const link = reply('Your app is live at https://3000-abc.us-phx-1.sandbox.novita.ai');
+  assert.match(link, /data-testid="open-preview-from-link"/, 'the link grows a panel button');
+  assert.match(link, /Open in a new tab/, 'and keeps the new-tab escape hatch');
+
+  const mdLink = reply('See [the demo](https://5174-xyz.sandbox.novita.ai)');
+  assert.match(mdLink, /data-testid="open-preview-from-link"/);
+
+  // The agent timeline path renders its own markdown — it must behave the same.
+  assert.match(agentTurn('Built it: https://5174-xyz.sandbox.novita.ai'), /data-testid="open-preview-from-link"/);
+
+  // No handler wired through: fall back to a plain link rather than a dead button.
+  const noHandler = reply('https://3000-abc.us-phx-1.sandbox.novita.ai', {});
+  assert.doesNotMatch(noHandler, /data-testid="open-preview-from-link"/);
+
+  // An ordinary link is left completely alone.
+  const normal = reply('Read https://example.com/docs for more');
+  assert.doesNotMatch(normal, /data-testid="open-preview-from-link"/);
+  assert.match(normal, /example\.com/);
+
+  // A localhost link is a dev server only inside an agent conversation.
+  assert.doesNotMatch(reply('running on http://localhost:3000'), /data-testid="open-preview-from-link"/);
+  assert.match(agentTurn('running on http://localhost:3000'), /data-testid="open-preview-from-link"/);
+});
+
+test('the preview panel renders a divider you can drag', async () => {
+  const ui = await loadComponent('src/components/PreviewPanel.tsx');
+  // `useIsDesktop` reads window.matchMedia on the first render; there is no DOM
+  // in this test, so it is stubbed to say "yes, a laptop".
+  const previous = globalThis.window;
+  globalThis.window = {
+    innerWidth: 1400,
+    matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
+  };
+  try {
+    const html = renderToStaticMarkup(
+      React.createElement(ui.PreviewPanel, {
+        url: 'https://3000-abc.sandbox.novita.ai',
+        title: 'Todo',
+        width: 640,
+        onWidthChange: () => {},
+        onClose: () => {},
+      })
+    );
+    assert.match(html, /data-testid="preview-resize-handle"/, 'the divider is there');
+    assert.match(html, /role="separator"/);
+    assert.match(html, /aria-label="Resize the preview"/);
+    assert.match(html, /style="width:640px"/, 'the width is applied');
+    assert.match(html, /cursor-col-resize/);
+    // The divider is absolutely positioned inside the panel, so the panel has to
+    // stay its containing block. `lg:static` would silently send it elsewhere.
+    assert.match(html, /lg:relative/);
+    assert.doesNotMatch(html, /lg:static/);
+    assert.match(html, /data-testid="preview-open-tab"/, 'the new-tab escape hatch survives');
+    // The bar is a hairline: one 24px row, small text, tight padding. The old
+    // two-line header ate a real slice of a 640px-wide preview.
+    assert.match(html, /h-6 px-2 border-b/, 'the header is the thin single-row bar');
+    assert.doesNotMatch(html, /py-2\.5/, 'no roomy padding left in the header');
+    assert.match(html, /text-\[11\.5px\]/, 'the title is small');
+    assert.doesNotMatch(html, /text-\[13px\] font-medium text-zinc-900/, 'the old large title is gone');
+    // The frame fills the panel, so the embedded page re-flows to whatever
+    // width the divider lands on.
+    assert.match(html, /<iframe[^>]*class="block w-full h-full/);
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});
+
+test('the chat column is a container and the prose is sized from it', () => {
+  // Read the stylesheet as text: there is no DOM here, and the contract is
+  // simply "these rules exist". The real ramp is measured end-to-end by
+  // scripts/preview-harness.js.
+  const css = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
+
+  // The message column has to be a container, or `cqi` below has nothing to
+  // resolve against and every message silently falls back to the plain value.
+  assert.match(css, /\.chat-column\s*\{[^}]*container-type:\s*inline-size/, 'the column is a query container');
+
+  for (const sel of ['.markdown-body', '.chat-prose']) {
+    const rule = new RegExp(`\\${sel}\\s*\\{([^}]*)\\}`);
+    const m = css.match(rule);
+    assert.ok(m, `${sel} has a rule`);
+    assert.match(m[1], /font-size:\s*clamp\([^)]*cqi/, `${sel} ramps with the container width`);
+    assert.match(m[1], /font-size:\s*[\d.]+px;/, `${sel} keeps a plain fallback first`);
+  }
+
+  // The ramp must be a clamp, not a fixed size: a narrow column has to shrink.
+  const clamp = css.match(/clamp\(([\d.]+)px,\s*calc\(([\d.]+)cqi \+ ([\d.]+)px\),\s*([\d.]+)px\)/);
+  assert.ok(clamp, 'the clamp is well formed');
+  const [, min, perCqi, base, max] = clamp.map(Number);
+  const at = (px) => Math.min(max, Math.max(min, (perCqi / 100) * px + base));
+  // The cqi coefficient is rounded in the stylesheet, so compare with a
+  // tolerance rather than to the last decimal.
+  const near = (a, b) => Math.abs(a - b) < 0.01;
+  assert.ok(near(at(768), 14.4), `a roomy column gets the ceiling (got ${at(768)})`);
+  assert.ok(near(at(336), 12.6), `a squeezed column gets the floor (got ${at(336)})`);
+  assert.equal(at(2000), max, 'and never grows past the ceiling');
+  assert.equal(at(80), min, 'and never collapses below the floor');
+  assert.ok(at(768) < 15.2, 'the ceiling is smaller than the old fixed 0.95rem');
+  assert.ok(at(336) < at(560) && at(560) < at(768), 'it is a ramp, not a step');
+
+  // Headings in `em`, not `rem`: a heading must shrink with its body text
+  // instead of staying huge in a narrow column.
+  for (const h of ['h1', 'h2', 'h3', 'h4']) {
+    const rule = new RegExp(`\\.markdown-body ${h} \\{ font-size: ([^;]+); \\}`);
+    const m = css.match(rule);
+    assert.ok(m, `${h} has an explicit size`);
+    assert.match(m[1], /em$/, `${h} is sized in em (got ${m[1]})`);
+  }
+});
+
+test('on a phone the panel covers the screen and there is no divider to drag', async () => {
+  const ui = await loadComponent('src/components/PreviewPanel.tsx');
+  const previous = globalThis.window;
+  globalThis.window = {
+    innerWidth: 420,
+    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+  };
+  try {
+    const html = renderToStaticMarkup(
+      React.createElement(ui.PreviewPanel, {
+        url: 'https://3000-abc.sandbox.novita.ai',
+        width: 640,
+        onWidthChange: () => {},
+        onClose: () => {},
+      })
+    );
+    assert.doesNotMatch(html, /data-testid="preview-resize-handle"/);
+    assert.doesNotMatch(html, /style="width:640px"/, 'the fixed full-width class wins instead');
+    assert.match(html, /w-\[min\(96vw,720px\)\]/);
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nSandbox management UI');
+// ---------------------------------------------------------------------------
+
+const SANDBOX_CONFIG = {
+  novita: { configured: true, source: 'env' },
+  local: { workspacesDir: '/tmp/ws', allowAnyPath: false, platform: 'linux' },
+  limits: { maxSteps: 80, commandTimeoutSeconds: 120 },
+  sandbox: { idlePauseSeconds: 180, runGraceSeconds: 90, timeoutMinutes: 15 },
+  tools: [],
+};
+
+test('the sandbox dialog explains the auto-pause policy instead of hiding it', async () => {
+  const ui = await loadComponent('src/components/SandboxManagerDialog.tsx');
+  const html = renderToStaticMarkup(
+    React.createElement(ui.SandboxManagerDialog, {
+      isOpen: true,
+      onClose: () => {},
+      config: SANDBOX_CONFIG,
+      onChanged: () => {},
+    })
+  );
+  // A sandbox that goes to sleep on its own looks like a bug unless it is said out loud.
+  assert.match(html, /3 min/, 'the idle window is shown in minutes');
+  assert.match(html, /90s/, 'the post-run grace is shown');
+  assert.match(html, /15 min/, 'so is the backstop Novita applies itself');
+  assert.match(html, /Paused sandboxes keep their files/);
+  assert.match(html, /data-testid="sandbox-filter-all"/);
+  assert.match(html, /data-testid="sandbox-filter-running"/);
+  assert.match(html, /data-testid="sandbox-refresh"/);
+});
+
+test('the sandbox dialog is not rendered when it is closed', async () => {
+  const ui = await loadComponent('src/components/SandboxManagerDialog.tsx');
+  const html = renderToStaticMarkup(
+    React.createElement(ui.SandboxManagerDialog, { isOpen: false, onClose: () => {}, config: SANDBOX_CONFIG, onChanged: () => {} })
+  );
+  assert.equal(html, '');
+});
+
+test('the workspace chip shows the sandbox state, and only for cloud workspaces', async () => {
+  const ui = await loadComponent('src/components/AgentControls.tsx');
+  const base = {
+    enabled: true,
+    onToggle: () => {},
+    activeWorkspaceId: 'ws-1',
+    onSelectWorkspace: () => {},
+    onCreate: () => {},
+    onDelete: () => {},
+    onToggleAutoRun: () => {},
+    filesOpen: false,
+    onToggleFiles: () => {},
+    onOpenSandboxes: () => {},
+  };
+  const sandbox = { id: 'ws-1', name: 'cloudy', kind: 'sandbox', root: '/home/user/cloudy', autoRun: true };
+
+  // "Why is my preview dead?" must be answerable at a glance, not from a dropdown.
+  const paused = renderToStaticMarkup(
+    React.createElement(ui.AgentControls, { ...base, workspaces: [sandbox], sandboxState: 'paused' })
+  );
+  assert.match(paused, /data-testid="sandbox-status-pill"/);
+  assert.match(paused, />Paused</);
+  assert.match(paused, /files kept, nothing billed/, 'the tooltip says what paused means');
+
+  const running = renderToStaticMarkup(
+    React.createElement(ui.AgentControls, { ...base, workspaces: [sandbox], sandboxState: 'running' })
+  );
+  assert.match(running, /data-testid="sandbox-status-pill"/);
+  assert.match(running, />Running</);
+
+  // A local workspace has no sandbox, so there is nothing to report.
+  const local = renderToStaticMarkup(
+    React.createElement(ui.AgentControls, {
+      ...base,
+      workspaces: [{ ...sandbox, kind: 'local', root: '/tmp/local' }],
+      sandboxState: 'paused',
+    })
+  );
+  assert.doesNotMatch(local, /data-testid="sandbox-status-pill"/);
+
+  // No state known yet: the pill would say nothing useful, so it stays away.
+  const unknown = renderToStaticMarkup(
+    React.createElement(ui.AgentControls, { ...base, workspaces: [sandbox], sandboxState: null })
+  );
+  assert.doesNotMatch(unknown, /data-testid="sandbox-status-pill"/);
+});
+
+test('the sandbox pill is the one-click way into the account-wide manager', async () => {
+  const ui = await loadComponent('src/components/AgentControls.tsx');
+  const html = renderToStaticMarkup(
+    React.createElement(ui.AgentControls, {
+      enabled: true,
+      onToggle: () => {},
+      workspaces: [{ id: 'ws-1', name: 'cloudy', kind: 'sandbox', root: '/home/user/cloudy', autoRun: true }],
+      activeWorkspaceId: 'ws-1',
+      onSelectWorkspace: () => {},
+      onCreate: () => {},
+      onDelete: () => {},
+      onToggleAutoRun: () => {},
+      filesOpen: false,
+      onToggleFiles: () => {},
+      onOpenSandboxes: () => {},
+      sandboxState: 'running',
+    })
+  );
+  // The pill is always on screen for a cloud workspace, so the manager is never
+  // more than one click away.
+  assert.match(html, /data-testid="sandbox-status-pill"/);
+  assert.match(html, /open the sandbox manager/);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nThinking accordion');
+// ---------------------------------------------------------------------------
+
+test('only one thinking block is open at a time', () => {
+  accordion.setOpenThinkingId(null);
+  assert.equal(accordion.getOpenThinkingId(), null);
+  accordion.setOpenThinkingId('think-1');
+  assert.equal(accordion.getOpenThinkingId(), 'think-1');
+  // Opening another closes the first: the store ever holds exactly one id.
+  accordion.setOpenThinkingId('think-2');
+  assert.equal(accordion.getOpenThinkingId(), 'think-2');
+  accordion.setOpenThinkingId(null);
+  assert.equal(accordion.getOpenThinkingId(), null);
+});
+
+test('the accordion notifies subscribers only when the open block really changes', () => {
+  let calls = 0;
+  accordion.setOpenThinkingId(null);
+  const unsubscribe = accordion.subscribeThinkingAccordion(() => {
+    calls++;
+  });
+  accordion.setOpenThinkingId(null); // already closed: no change
+  assert.equal(calls, 0);
+  accordion.setOpenThinkingId('think-9');
+  assert.equal(calls, 1);
+  accordion.setOpenThinkingId('think-9'); // same id: no change
+  assert.equal(calls, 1);
+  accordion.setOpenThinkingId(null);
+  assert.equal(calls, 2);
+  unsubscribe();
+  accordion.setOpenThinkingId('think-10');
+  assert.equal(calls, 2, 'an unsubscribed listener must not be called');
+  accordion.setOpenThinkingId(null);
+});
 
 const act = (over) => ({ id: 'a1', tool: 'write_file', status: 'done', args: {}, ...over });
 
@@ -264,6 +786,23 @@ test('wording: a tool that FAILED says so, with the first line of the reason', (
   assert.equal(s.verb, 'Search failed:');
 });
 
+test('wording: an action the run REFUSED reads "Refused", not "Couldn\'t"', () => {
+  // The gate stops a delete the agent never inspected. That is a redirection,
+  // not a crash, and it must not be dressed up as one.
+  const b = fmt.actionLabel(act({
+    tool: 'delete_file',
+    status: 'blocked',
+    args: { path: 'legacy' },
+    result: { kind: 'delete', path: 'legacy', isDir: true, blocked: true },
+    error: 'Refused: nothing was deleted. `legacy/` is a folder and you have not looked inside it in this run.',
+  }));
+  assert.equal(b.verb, 'Refused');
+  assert.equal(b.target, 'legacy');
+  assert.equal(b.meta, 'Refused: nothing was deleted. `legacy/` is a folder and you have not looked inside it in this run.');
+  assert.equal(b.added, undefined, 'and it never claims to have changed anything');
+  assert.equal(b.expandable, true, 'the full reason is one click away');
+});
+
 test('wording: an action cut off by Stop / a lost connection reads "Stopped" / "Interrupted"', () => {
   const stopped = fmt.actionLabel(act({ tool: 'run_command', status: 'error', error: 'Stopped', args: { command: 'npm install' }, output: 'added 3 packages' }));
   assert.deepEqual([stopped.verb, stopped.target, stopped.meta, stopped.expandable], ['Stopped', 'npm install', undefined, true]);
@@ -420,6 +959,64 @@ test('data path: runAgentTurn turns a real SSE run into ordered blocks (and Stop
       onFinish: (snap, error) => { failed = error; },
     });
     assert.match(failed, /Demo provider cannot run the agent/);
+  } finally {
+    globalThis.fetch = realFetch;
+    server.closeAllConnections?.();
+    await new Promise((r) => server.close(r));
+    await llm.close();
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    _resetStoreCache();
+  }
+});
+
+test('data path: an attached image reaches the provider as an image part', async () => {
+  const saved = {
+    DANAV_DATA_DIR: process.env.DANAV_DATA_DIR,
+    DANAV_WORKSPACES_DIR: process.env.DANAV_WORKSPACES_DIR,
+  };
+  process.env.DANAV_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-img-data-'));
+  process.env.DANAV_WORKSPACES_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-img-ws-'));
+  _resetStoreCache();
+  const llm = await startFakeLlm();
+  const app = express();
+  app.use(express.json({ limit: '10mb' }));
+  registerAgentRoutes(app, { runSearchTool: async () => ({ success: false }) });
+  const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (u, init) => realFetch(typeof u === 'string' && u.startsWith('/') ? base + u : u, init);
+
+  try {
+    const { runAgentTurn } = await load('src/agent/runAgentTurn.ts');
+    const { createWorkspace } = await load('src/services/agentApi.ts');
+    const ws = await createWorkspace({ name: 'img', kind: 'local', autoRun: true });
+    const provider = { id: 'p', name: 'fake', baseUrl: llm.baseUrl, apiType: 'openai', models: [] };
+    const imageUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+    await runAgentTurn({
+      provider, model: 'fake-silent', thinkingLevel: 'Auto', workspaceId: ws.id, activity: [],
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what is in this screenshot?' },
+          { type: 'image_url', image_url: { url: imageUrl } },
+        ],
+      }],
+      signal: new AbortController().signal,
+      onUpdate: () => {},
+      onFinish: () => {},
+    });
+
+    // The whole point: the image is still there when the request goes out.
+    // (cleanHistory used to drop every non-string message, so the model never saw it.)
+    const sent = llm.requests[0]?.messages || [];
+    const user = sent.find((m) => m.role === 'user');
+    assert.ok(user, 'the user message survived into the request');
+    assert.ok(Array.isArray(user.content), 'it kept its multimodal shape');
+    assert.deepEqual(user.content[0], { type: 'text', text: 'what is in this screenshot?' });
+    const image = user.content.find((p) => p.type === 'image_url');
+    assert.ok(image, 'an image part was sent');
+    assert.equal(image.image_url.url, imageUrl, 'the image bytes reached the provider');
   } finally {
     globalThis.fetch = realFetch;
     server.closeAllConnections?.();

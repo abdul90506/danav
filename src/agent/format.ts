@@ -132,6 +132,20 @@ function rawLabel(a: AgentAction): ActionLabel {
     if (a.status === 'denied') {
       return { verb: 'Skipped', ...extra, meta: 'not allowed', expandable: false, added: undefined, removed: undefined, lines: undefined };
     }
+    if (a.status === 'blocked') {
+      // Refused by the run, not by the user and not by a bug: the agent tried to
+      // change something it had never looked at. It gets told what to read, so
+      // this reads as a redirection rather than a crash.
+      return {
+        verb: 'Refused',
+        ...extra,
+        meta: firstLine(a.error) || 'not inspected yet',
+        added: undefined,
+        removed: undefined,
+        lines: undefined,
+        expandable: Boolean(a.error && a.error.length > 0),
+      };
+    }
     if (toolFailed) {
       return {
         verb: FAILED[a.tool] || 'Failed',
@@ -244,7 +258,13 @@ function rawLabel(a: AgentAction): ActionLabel {
       });
 
     case 'delete_file':
-      return base('Deleting', 'Deleted', { target: r?.path || args.path, targetKind: r?.isDir ? 'dir' : 'file' });
+      return base('Deleting', 'Deleted', {
+        target: r?.path || args.path,
+        targetKind: r?.isDir ? 'dir' : 'file',
+        // What a recursive delete actually covered — the one thing you cannot
+        // see from the outside, and the reason the run makes it look first.
+        meta: !live && r?.isDir && typeof r.files === 'number' ? plural(r.files, 'file') : undefined,
+      });
 
     case 'move_file':
       return base('Moving', 'Moved', {

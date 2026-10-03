@@ -10,7 +10,6 @@ import {
   Pin,
   ChevronDown,
   PanelLeftClose,
-  PanelLeftOpen,
   X,
   Check,
 } from 'lucide-react';
@@ -244,106 +243,75 @@ export const Sidebar: React.FC<SidebarProps> = ({
         />
       )}
 
-      {/* Main Sidebar */}
+      {/* Main Sidebar.
+          On desktop a collapsed sidebar is gone entirely — no icon rail, just
+          the floating reveal button the app renders in its place. On mobile the
+          drawer is driven by `isMobileOpen`, so it is unaffected. */}
       <aside
         className={`fixed top-0 bottom-0 left-0 z-50 flex flex-col bg-[#f9f9f9] dark:bg-[#171717] border-r border-zinc-200/70 dark:border-zinc-800/80 transition-all duration-200 ease-in-out lg:static ${
           isMobileOpen ? 'translate-x-0 w-72' : '-translate-x-full lg:translate-x-0'
-        } ${isCollapsed ? 'lg:w-16' : 'lg:w-64'}`}
+        } ${isCollapsed ? 'lg:hidden' : 'lg:w-64'}`}
       >
         {/* Header: Danav AI logo on left, Search & Sidebar Toggle on right */}
-        {isCollapsed ? (
-          <div className="flex flex-col items-center py-2.5 gap-1.5 border-b border-zinc-200/50 dark:border-zinc-800/60">
+        <div className="flex items-center justify-between h-12 px-3.5 border-b border-zinc-200/50 dark:border-zinc-800/60">
+          {/* Title / Logo */}
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-[14.5px] sm:text-[15px] tracking-tight text-zinc-900 dark:text-zinc-100 font-sans select-none">
+              Danav AI
+            </span>
+          </div>
+
+          {/* Header Action Icons: Leveled and aligned */}
+          <div className="flex items-center gap-0.5 sm:gap-1">
             <button
-              onClick={onToggleCollapse}
-              title="Expand sidebar"
-              aria-label="Expand sidebar"
-              className="w-8 h-8 sm:w-8.5 sm:h-8.5 flex items-center justify-center rounded-xl text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer"
-            >
-              <PanelLeftOpen className="w-4 h-4 stroke-[1.75]" />
-            </button>
-            <button
-              onClick={onNewChat}
-              title="New Chat"
-              aria-label="New Chat"
-              className="w-8 h-8 sm:w-8.5 sm:h-8.5 flex items-center justify-center rounded-xl text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer"
-            >
-              <SquarePen className="w-4 h-4 stroke-[1.75]" />
-            </button>
-            <button
-              onClick={() => {
-                onToggleCollapse();
-                setIsSearchOpen(true);
-              }}
+              onClick={() => setIsSearchOpen(!isSearchOpen)}
               title="Search chats"
               aria-label="Search chats"
-              className="w-8 h-8 sm:w-8.5 sm:h-8.5 flex items-center justify-center rounded-xl text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors shrink-0 cursor-pointer"
+              className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                isSearchOpen
+                  ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
+                  : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800'
+              }`}
             >
               <Search className="w-4 h-4 stroke-[1.75]" />
             </button>
-          </div>
-        ) : (
-          <div className="flex items-center justify-between h-12 px-3.5 border-b border-zinc-200/50 dark:border-zinc-800/60">
-            {/* Title / Logo */}
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-[14.5px] sm:text-[15px] tracking-tight text-zinc-900 dark:text-zinc-100 font-sans select-none">
-                Danav AI
-              </span>
-            </div>
 
-            {/* Header Action Icons: Leveled and aligned */}
-            <div className="flex items-center gap-0.5 sm:gap-1">
-              <button
-                onClick={() => setIsSearchOpen(!isSearchOpen)}
-                title="Search chats"
-                aria-label="Search chats"
-                className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
-                  isSearchOpen
-                    ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
-                    : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800'
-                }`}
-              >
-                <Search className="w-4 h-4 stroke-[1.75]" />
-              </button>
-
-              {/* Close Sidebar button */}
-              <button
-                onClick={onToggleCollapse}
-                title="Close sidebar"
-                aria-label="Close sidebar"
-                className="hidden lg:flex p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-              >
-                <PanelLeftClose className="w-4 h-4 stroke-[1.75]" />
-              </button>
-
-              {/* Mobile close */}
-              <button
-                onClick={onCloseMobile}
-                className="lg:hidden p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
-              >
-                <X className="w-4 h-4 stroke-[1.75]" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* New Chat Button: Transparent by default, highlighted only on hover */}
-        {!isCollapsed && (
-          <div className="px-3 pt-2.5 pb-1">
+            {/* Close Sidebar button */}
             <button
-              onClick={() => {
-                onNewChat();
-                if (isMobileOpen) onCloseMobile();
-              }}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 font-medium text-xs tracking-wide transition-all select-none cursor-pointer"
+              onClick={onToggleCollapse}
+              title="Close sidebar"
+              aria-label="Close sidebar"
+              className="hidden lg:flex p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
             >
-              <SquarePen className="w-4 h-4 text-zinc-500 dark:text-zinc-400 shrink-0 stroke-[1.75]" />
-              <span>New chat</span>
+              <PanelLeftClose className="w-4 h-4 stroke-[1.75]" />
+            </button>
+
+            {/* Mobile close */}
+            <button
+              onClick={onCloseMobile}
+              className="lg:hidden p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
+            >
+              <X className="w-4 h-4 stroke-[1.75]" />
             </button>
           </div>
-        )}
+        </div>
+
+        {/* New Chat Button: Transparent by default, highlighted only on hover */}
+        <div className="px-3 pt-2.5 pb-1">
+          <button
+            onClick={() => {
+              onNewChat();
+              if (isMobileOpen) onCloseMobile();
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 font-medium text-xs tracking-wide transition-all select-none cursor-pointer"
+          >
+            <SquarePen className="w-4 h-4 text-zinc-500 dark:text-zinc-400 shrink-0 stroke-[1.75]" />
+            <span>New chat</span>
+          </button>
+        </div>
 
         {/* Search input (when toggled open) */}
-        {!isCollapsed && isSearchOpen && (
+        {isSearchOpen && (
           <div className="px-3 py-2 animate-in fade-in duration-150">
             <div className="relative flex items-center">
               <Search className="absolute left-2.5 w-3.5 h-3.5 text-zinc-400" />
@@ -367,54 +335,50 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         )}
 
-        {/* Chat History List: Only rendered when sidebar is open */}
-        {!isCollapsed ? (
-          <div className="flex-1 overflow-y-auto px-2 py-2 space-y-3">
-            {filteredConversations.length === 0 ? (
-              <div className="text-center py-8 text-xs text-zinc-400 select-none">
-                {searchQuery ? 'No chats found' : 'No chats yet'}
-              </div>
-            ) : (
-              <>
-                {/* Pinned Section */}
-                {pinnedConversations.length > 0 && (
-                  <div>
-                    <div className="px-3 py-1 text-[11px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-wider select-none">
-                      Pinned
-                    </div>
-                    <div className="space-y-0.5 mt-0.5">
-                      {pinnedConversations.map((chat) => renderChatItem(chat, true))}
-                    </div>
+        {/* Chat History List */}
+        <div className="flex-1 overflow-y-auto px-2 py-2 space-y-3">
+          {filteredConversations.length === 0 ? (
+            <div className="text-center py-8 text-xs text-zinc-400 select-none">
+              {searchQuery ? 'No chats found' : 'No chats yet'}
+            </div>
+          ) : (
+            <>
+              {/* Pinned Section */}
+              {pinnedConversations.length > 0 && (
+                <div>
+                  <div className="px-3 py-1 text-[11px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-wider select-none">
+                    Pinned
+                  </div>
+                  <div className="space-y-0.5 mt-0.5">
+                    {pinnedConversations.map((chat) => renderChatItem(chat, true))}
+                  </div>
+                </div>
+              )}
+
+              {/* Recents Section with Hide/Collapse Chevron toggle */}
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setIsRecentsCollapsed(!isRecentsCollapsed)}
+                  className="w-full flex items-center justify-between px-3 py-1 text-[11px] font-semibold text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 uppercase tracking-wider select-none transition-colors"
+                >
+                  <span>Recents</span>
+                  <ChevronDown
+                    className={`w-3.5 h-3.5 transition-transform duration-200 ${
+                      isRecentsCollapsed ? '-rotate-90' : 'rotate-0'
+                    }`}
+                  />
+                </button>
+
+                {!isRecentsCollapsed && (
+                  <div className="space-y-0.5 mt-0.5">
+                    {recentConversations.map((chat) => renderChatItem(chat, false))}
                   </div>
                 )}
-
-                {/* Recents Section with Hide/Collapse Chevron toggle */}
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => setIsRecentsCollapsed(!isRecentsCollapsed)}
-                    className="w-full flex items-center justify-between px-3 py-1 text-[11px] font-semibold text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 uppercase tracking-wider select-none transition-colors"
-                  >
-                    <span>Recents</span>
-                    <ChevronDown
-                      className={`w-3.5 h-3.5 transition-transform duration-200 ${
-                        isRecentsCollapsed ? '-rotate-90' : 'rotate-0'
-                      }`}
-                    />
-                  </button>
-
-                  {!isRecentsCollapsed && (
-                    <div className="space-y-0.5 mt-0.5">
-                      {recentConversations.map((chat) => renderChatItem(chat, false))}
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        ) : (
-          <div className="flex-1" />
-        )}
+              </div>
+            </>
+          )}
+        </div>
 
         {/* Bottom bar with Settings */}
         <div className="p-2 border-t border-zinc-200/60 dark:border-zinc-800/70">
@@ -424,12 +388,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
               if (isMobileOpen) onCloseMobile();
             }}
             title="Settings"
-            className={`flex items-center gap-2.5 w-full h-10 px-3 rounded-xl text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors select-none cursor-pointer ${
-              isCollapsed ? 'justify-center px-0' : ''
-            }`}
+            className="flex items-center gap-2.5 w-full h-10 px-3 rounded-xl text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors select-none cursor-pointer"
           >
             <SettingsIcon className="w-4 h-4 shrink-0 text-zinc-500 dark:text-zinc-400 stroke-[1.75]" />
-            {!isCollapsed && <span>Settings</span>}
+            <span>Settings</span>
           </button>
         </div>
       </aside>

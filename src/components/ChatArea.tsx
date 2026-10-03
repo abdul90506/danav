@@ -14,8 +14,12 @@ interface ChatAreaProps {
   onWatchMedia?: (mediaId: string, mediaType: 'movie' | 'tv' | string, title?: string) => void;
   /** Agent mode: the user answered an "Allow this command?" prompt. */
   onAgentApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
+  /** Show the running app the agent built in the docked preview panel. */
+  onOpenPreview?: (url: string, title?: string) => void;
   /** Agent mode shows an extra controls row above the input, so leave more room below the messages. */
   agentMode?: boolean;
+  /** The sidebar is hidden on desktop, so the reveal button floats over the chat. */
+  sidebarCollapsed?: boolean;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -27,76 +31,64 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onContinueResponse,
   onWatchMedia,
   onAgentApproval,
+  onOpenPreview,
   agentMode,
+  sidebarCollapsed,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const [showScrollBottom, setShowScrollBottom] = useState(false);
-  const isAutoScrollEnabledRef = useRef<boolean>(true);
+  /** Following the bottom. Only the user can turn this off — see handleScroll. */
+  const [pinned, setPinned] = useState(true);
+  const pinnedRef = useRef(true);
+  /** Scroll events before this moment are ours (we moved the container), not the user's. */
+  const ignoreScrollUntilRef = useRef(0);
   const prevMessagesCountRef = useRef<number>(messages.length);
 
-  const lastScrollTopRef = useRef<number>(0);
+  const setPinnedBoth = useCallback((value: boolean) => {
+    pinnedRef.current = value;
+    setPinned(value);
+  }, []);
 
-  // Scroll to bottom helper using direct container scroll to avoid scrollIntoView glitches
-  const scrollToBottom = useCallback((smooth = true) => {
-    const container = scrollContainerRef.current;
-    if (container) {
+  // Move the container ourselves, and remember that the scroll events which follow are ours.
+  const scrollToBottom = useCallback(
+    (smooth = false) => {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      ignoreScrollUntilRef.current = performance.now() + (smooth ? 700 : 120);
       if (smooth) {
         container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
       } else {
         container.scrollTop = container.scrollHeight;
       }
-    }
-    isAutoScrollEnabledRef.current = true;
-    setShowScrollBottom(false);
-  }, []);
+      setPinnedBoth(true);
+    },
+    [setPinnedBoth]
+  );
 
-  // Monitor user scrolling:
-  // - Scrolling DOWN manually: immediately hide the scroll-to-bottom icon
-  // - Scrolling UP: enable the scroll-to-bottom zone (revealed on hover)
-  // - Near bottom: reset to auto-scroll
+  // The user is the only one who can stop the chat following: our own scrolls are ignored
+  // above, so streaming can never be mistaken for someone scrolling up to read.
   const handleScroll = () => {
     const container = scrollContainerRef.current;
     if (!container) return;
-
-    const currentScrollTop = container.scrollTop;
-    const distanceFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
-
-    const isScrollingDown = currentScrollTop > lastScrollTopRef.current + 3;
-    const isScrollingUp = currentScrollTop < lastScrollTopRef.current - 3;
-    lastScrollTopRef.current = currentScrollTop;
-
-    if (distanceFromBottom <= 50) {
-      // Reached the bottom
-      isAutoScrollEnabledRef.current = true;
-      setShowScrollBottom(false);
-    } else if (isScrollingDown) {
-      // User is manually scrolling downwards: hide the button
-      setShowScrollBottom(false);
-    } else if (isScrollingUp && distanceFromBottom > 70) {
-      // User is scrolling upwards to read history: make button available
-      isAutoScrollEnabledRef.current = false;
-      setShowScrollBottom(true);
-    }
+    if (performance.now() < ignoreScrollUntilRef.current) return;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    setPinnedBoth(distanceFromBottom <= 64);
   };
 
-  // When a new message is sent (especially user message), force auto-scroll to bottom
+  // Sending a message always comes back to the bottom, even after reading back through history.
   useEffect(() => {
     if (messages.length > prevMessagesCountRef.current) {
       const lastMsg = messages[messages.length - 1];
       if (lastMsg?.role === 'user') {
-        scrollToBottom(true);
+        scrollToBottom(false);
       }
     }
     prevMessagesCountRef.current = messages.length;
   }, [messages.length, scrollToBottom]);
 
-  // While AI is generating/streaming, only auto-scroll if user has NOT scrolled up
+  // While an answer streams, follow it — but only while the user is still at the bottom.
   useEffect(() => {
-    if (isAutoScrollEnabledRef.current) {
-      scrollToBottom(false);
-    }
+    if (pinnedRef.current) scrollToBottom(false);
   }, [messages, scrollToBottom]);
 
   const lastMessage = messages[messages.length - 1];
@@ -110,7 +102,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         onScroll={handleScroll}
         className="h-full overflow-y-auto w-full"
       >
-        <div className={`max-w-3xl w-full mx-auto px-4 sm:px-6 pt-6 space-y-2 ${agentMode ? 'pb-40 sm:pb-44' : 'pb-28 sm:pb-32'}`}>
+        {/*
+          `chat-column` makes this box a container, so the prose inside can size
+          itself from the width it is actually given rather than from the window
+          — see the `.chat-column` rules in index.css.
+        */}
+        <div className={`chat-column max-w-3xl w-full mx-auto px-4 sm:px-6 space-y-2 ${sidebarCollapsed ? 'pt-14 lg:pt-6' : 'pt-6'} ${agentMode ? 'pb-40 sm:pb-44' : 'pb-28 sm:pb-32'}`}>
           {messages.length === 0 ? (
             // Clean Empty State
             <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-4 pt-12">
@@ -136,6 +133,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   onContinueResponse={onContinueResponse}
                   onWatchMedia={onWatchMedia}
                   onAgentApproval={onAgentApproval}
+                  onOpenPreview={onOpenPreview}
                 />
               ))}
 
@@ -160,7 +158,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
       {/* Floating "Scroll to Bottom" hover zone: Centered right above input box.
           Does not show automatically; becomes visible when mouse cursor moves over its zone */}
-      {showScrollBottom && (
+      {!pinned && (
         <div
           onClick={() => scrollToBottom(true)}
           className="group absolute bottom-20 sm:bottom-[88px] left-1/2 -translate-x-1/2 z-30 w-14 h-12 flex items-center justify-center cursor-pointer pointer-events-auto"

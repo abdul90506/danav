@@ -1,10 +1,15 @@
 import type {
   AgentConfig,
   AgentWorkspace,
+  ChatMessageContent,
   Provider,
+  SandboxState,
+  SandboxStatus,
+  SandboxSummary,
+  SandboxTotals,
   ThinkingLevel,
 } from '../types';
-import { previewAuthHeaders } from './previewAuth';
+import { previewAuthHeaders } from './previewAuth.ts';
 
 /**
  * Client for the Agent mode API. Every request carries `x-danav-agent: 1`:
@@ -67,12 +72,54 @@ export async function createWorkspace(opts: {
 
 export async function updateWorkspace(
   id: string,
-  patch: { autoRun?: boolean; name?: string }
+  patch: { autoRun?: boolean; autoPause?: boolean; name?: string }
 ): Promise<AgentWorkspace> {
   return (await call<{ workspace: AgentWorkspace }>('PATCH', `/workspaces/${encodeURIComponent(id)}`, patch)).workspace;
 }
 
 export const deleteWorkspace = (id: string) => call('DELETE', `/workspaces/${encodeURIComponent(id)}`);
+
+// ---------------------------------------------------------------------------
+// Sandboxes (account-wide)
+// ---------------------------------------------------------------------------
+// The agent only knows the sandboxes it created, one per workspace. These calls
+// see the WHOLE Novita account, so leftovers from old sessions can be paused or
+// deleted instead of quietly burning CPU.
+
+export async function listSandboxes(state?: 'running' | 'paused') {
+  return call<{ configured: boolean; sandboxes: SandboxSummary[]; totals: SandboxTotals }>(
+    'GET',
+    `/sandboxes${state ? `?state=${state}` : ''}`
+  );
+}
+
+export const pauseSandbox = (sandboxId: string) =>
+  call<{ sandboxId: string; state: SandboxState; changed: boolean }>(
+    'POST',
+    `/sandboxes/${encodeURIComponent(sandboxId)}/pause`
+  );
+
+export const resumeSandbox = (sandboxId: string) =>
+  call<{ sandboxId: string; state: SandboxState; changed: boolean }>(
+    'POST',
+    `/sandboxes/${encodeURIComponent(sandboxId)}/resume`
+  );
+
+export const killSandbox = (sandboxId: string) =>
+  call<{ sandboxId: string; state: SandboxState; changed: boolean; detachedWorkspaceId: string | null }>(
+    'DELETE',
+    `/sandboxes/${encodeURIComponent(sandboxId)}`
+  );
+
+export const getSandboxStatus = (workspaceId: string) =>
+  call<{ configured: boolean; status: SandboxStatus }>(
+    'GET',
+    `/sandboxes/status?workspaceId=${encodeURIComponent(workspaceId)}`
+  );
+
+/** Wake a workspace's sandbox and reset its idle clock (used before a preview). */
+export const wakeWorkspace = (workspaceId: string) =>
+  call<{ sandboxId: string | null }>('POST', `/workspaces/${encodeURIComponent(workspaceId)}/wake`);
 
 export interface TreeEntry {
   name: string;
@@ -139,7 +186,7 @@ export interface AgentStreamOptions {
   provider: Provider;
   model: string;
   thinkingLevel: ThinkingLevel;
-  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: ChatMessageContent }>;
   workspaceId: string;
   /** One-line summaries of what the agent did earlier in this conversation. */
   activity?: string[];

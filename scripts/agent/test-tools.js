@@ -228,8 +228,15 @@ test('multi_edit: ordered, atomic, combined ranges; accepts a JSON-string edits 
 test('delete / move / create_dir, and writes inside .git are refused', async () => {
   const { run, dir } = await setup();
   await run('write_file', { path: 'd/f.txt', content: 'x\n' });
+  await run('write_file', { path: 'd/nested/g.txt', content: 'x\n' });
   assert.equal((await run('delete_file', { path: 'd' })).ok, false); // non-empty without recursive
-  assert.equal((await run('delete_file', { path: 'd', recursive: true })).ok, true);
+  const gone = await run('delete_file', { path: 'd', recursive: true });
+  assert.equal(gone.ok, true);
+  // A recursive delete says how much it covered: that is the part a person
+  // cannot see for themselves.
+  assert.equal(gone.ui.files, 2);
+  assert.equal(gone.ui.isDir, true);
+  assert.match(gone.output, /2 files removed/);
   await run('write_file', { path: 'a.txt', content: 'x\n' });
   const mv = await run('move_file', { from: 'a.txt', to: 'sub/b.txt' });
   assert.equal(mv.ui.kind, 'move');
@@ -668,12 +675,12 @@ test('progress tracker: an overwrite waits for the file on disk, and the live nu
   }
   assert.ok(seq.at(-1).removed <= 40);
 
-  // a brand-new file: numbers appear immediately (after the quick "does it exist?" check) and there is no "−"
+  // a brand-new file: numbers appear immediately (after the quick "does it exist?" check) and the "−" is a real 0
   const n = tools.progressTracker('write_file');
   n.update('{"path": "fresh.txt", "content": "a');
   await new Promise((r) => setTimeout(r, 60));
   const fresh = n.update('{"path": "fresh.txt", "content": "a\\nb\\nc').progress;
-  assert.deepEqual([fresh.added, fresh.removed], [3, undefined]);
+  assert.deepEqual([fresh.added, fresh.removed], [3, 0]);
 
   // other tools need no disk lookup at all
   assert.equal(tools.progressTracker('edit_file').update('{"path": "a.js", "old_string": "x", "new_string": "y\\nz').progress.added, 2);

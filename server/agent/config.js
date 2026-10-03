@@ -101,12 +101,36 @@ export const limits = {
   /** Default command timeout. */
   commandTimeoutMs: () => num('DANAV_AGENT_COMMAND_TIMEOUT_SECONDS', 120) * 1000,
   maxCommandTimeoutMs: () => num('DANAV_AGENT_MAX_COMMAND_TIMEOUT_SECONDS', 900) * 1000,
-  /** Sandbox lifetime that is refreshed on activity; it pauses (not dies) after this. */
-  sandboxTimeoutMs: () => num('NOVITA_SANDBOX_TIMEOUT_MINUTES', 30) * 60_000,
+  /**
+   * Platform-level backstop: Novita itself pauses the sandbox this long after the
+   * last activity, even if this server died. It is refreshed on every use, so it
+   * only has to outlast a single long tool call — the app-level idle pause below
+   * is what normally stops the meter.
+   */
+  sandboxTimeoutMs: () => num('NOVITA_SANDBOX_TIMEOUT_MINUTES', 15) * 60_000,
+  /** No activity in a workspace for this long -> the sandbox is paused. */
+  sandboxIdlePauseMs: () => num('DANAV_SANDBOX_IDLE_PAUSE_SECONDS', 180) * 1000,
+  /**
+   * A finished run is a strong "we are done here" signal, so the clock starts
+   * shorter: after this long with nothing else happening the sandbox pauses,
+   * even if the general idle window has not elapsed yet.
+   */
+  sandboxRunGraceMs: () => num('DANAV_SANDBOX_RUN_GRACE_SECONDS', 90) * 1000,
   maxOutputChars: 30_000,
   maxReadChars: 100_000,
   maxReadLines: 2000,
   maxWriteChars: 2_000_000,
+
+  /**
+   * How fast a tool call whose body arrived whole is revealed in the chat (see
+   * the reveal plan in loop.js). Characters per second, floored and capped by a
+   * duration range. The defaults are tuned for a person watching the file being
+   * written; the test suite raises them so behavioural tests do not spend
+   * seconds of wall clock on an animation.
+   */
+  revealCharsPerSec: () => num('DANAV_REVEAL_CHARS_PER_SEC', 1100),
+  revealMinMs: () => num('DANAV_REVEAL_MIN_MS', 800),
+  revealMaxMs: () => num('DANAV_REVEAL_MAX_MS', 2800),
 };
 
 // ---------------------------------------------------------------------------

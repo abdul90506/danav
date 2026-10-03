@@ -121,6 +121,20 @@ test('a <thought> inside a written file stays verbatim in content', () => {
   );
 });
 
+test('a </thought> inside a written file stays verbatim in content', () => {
+  const { thinking, content } = run([
+    '<write_file path="notes.md">',
+    'Close it with </thought> when done.\n',
+    '</write_file>',
+    '\nWrote notes.md.',
+  ]);
+  assert.strictEqual(thinking, '', 'a file body must never become reasoning');
+  assert(
+    content.includes('Close it with </thought> when done.'),
+    `file body must be verbatim: ${content}`
+  );
+});
+
 test('a <thought> inside a code fence stays in content', () => {
   const { thinking, content } = run([
     '<thought>Planning the sample.</thought>',
@@ -138,9 +152,33 @@ test('a self-closing write_file does not swallow later thoughts', () => {
   assert.strictEqual(thinking, 'back to thinking');
 });
 
-test('a stray closing tag outside a thought is preserved', () => {
+test('a stray closing tag outside a thought is dropped, prose survives', () => {
   const { content } = run(['<web_search query="x" />', '\n</thought>\nDone.']);
+  assert(!content.includes('</thought>'), `wrapper residue leaked: ${content}`);
   assert(content.includes('Done.'), 'prose must survive a stray closing tag');
+});
+
+test('closing-tag residue from a native reasoning channel never reaches content', () => {
+  // The provider delivered the reasoning on `reasoning_content` — so the
+  // OPENING <thought> never passed through this splitter — and then left the
+  // closing wrapper at the head of the text stream. Nothing here opened a
+  // thought block, so the old parser called it a "stray" tag and rendered it
+  // verbatim in front of the answer. This is the bug from the chat screenshot.
+  const { thinking, content } = run([
+    '</thought>Main background mein static server chalane laga hoon.',
+  ]);
+  assert.strictEqual(thinking, '', 'the residue must not open a thought block');
+  assert(
+    !/<\/?thought>|<\/?think>/i.test(content),
+    `wrapper residue leaked into the answer: ${content}`
+  );
+  assert(content.startsWith('Main background'), `answer must start clean: ${content}`);
+});
+
+test('closing-tag residue split across deltas is still dropped', () => {
+  const { content } = run(['</thou', 'ght>', 'Clean answer.']);
+  assert(!/thought>/i.test(content), `wrapper residue leaked: ${content}`);
+  assert(content.includes('Clean answer.'), `answer must survive: ${content}`);
 });
 
 console.log('\nFences and other tools');

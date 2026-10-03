@@ -16,6 +16,7 @@ import { applyAnyEdits, applyEdit, diffSummary, numberLines, splitLines, stripLi
 import { formatOutline, outline } from './outline.js';
 import { checkSyntax, syntaxWarning } from './check.js';
 import { addNote, readNotes, removeNotes, searchNotes } from './memory.js';
+import { observeFile, observeListing, observeOwned } from './policy.js';
 import { peekPartialArgs, salvageWrite, extractStringFields } from './partial.js';
 import { limits } from './config.js';
 import { WorkspaceError } from './workspaces/base.js';
@@ -791,10 +792,14 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
 
   const impl = {
     // ------------------------------------------------------------------ files
-    async list_dir(args) {
+    async list_dir(args, ctx) {
       const abs = await target(optStr(args, 'path') || '.');
       const depth = clampInt(args.depth, 1, 4, 1);
       const { entries, truncated } = await ws.listTree(abs, { depth, maxEntries: 300 });
+      // Everything the listing revealed is now something the agent has looked
+      // at, and the folder itself is one whose contents it knows. The policy
+      // gate reads this back before it lets a delete through.
+      observeListing(ws, ctx.state, abs, entries, { truncated, depth });
       const lines = entries.map((e) => (e.type === 'dir' ? `${e.path}/` : e.size !== undefined ? `${e.path} (${formatBytes(e.size)})` : e.path));
       const head = `${rel(abs)}/ — ${entries.length}${truncated ? '+' : ''} item${entries.length === 1 ? '' : 's'}`;
       return {
@@ -808,6 +813,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const r = await ws.readText(abs);
       if (r.binary) throw new ToolError(`${rel(abs)} is a binary file (${formatBytes(r.size)}); it cannot be shown as text.`);
       ctx.state.readFiles.add(abs);
+      observeFile(ctx.state, abs);
       const lines = splitLines(r.text);
       const total = lines.length;
       if (total === 0) {
@@ -855,6 +861,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const r = await ws.readText(abs);
       if (r.binary) throw new ToolError(`${rel(abs)} is a binary file; it has no outline.`);
       ctx.state.readFiles.add(abs);
+      observeFile(ctx.state, abs);
       const o = outline(r.text, rel(abs));
       return {
         output: safe(formatOutline(rel(abs), o)),
@@ -889,6 +896,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         }
       }
       await ws.writeText(abs, content);
+      observeOwned(ctx.state, abs);
       const d = diffSummary(old, content, { maxPreviewLines: 40 });
       noteChange(ctx, rel(abs), d.added, d.removed);
       const note = fixed ? ' (the content arrived with escaped "\\n" sequences; they were converted to real line breaks)' : '';
@@ -913,6 +921,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const next = text + glue + content;
       if (next.length > limits.maxWriteChars) throw new ToolError(`The file would be ${next.length} characters; the limit is ${limits.maxWriteChars}.`);
       await ws.writeText(abs, next);
+      observeOwned(ctx.state, abs);
       const d = diffSummary(text, next, { maxPreviewLines: 30 });
       noteChange(ctx, rel(abs), d.added, d.removed);
       const res = {
@@ -993,24 +1002,61 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       return res;
     },
 
-    async delete_file(args) {
+    async delete_file(args, ctx) {
       const abs = await target(reqStr(args, 'path'));
       guardWrite(abs);
+      // Count what is about to go BEFORE it goes. A recursive delete is the one
+      // action whose scope a person cannot see from the outside, so the result
+      // says how much it covered instead of just "Deleted folder x".
+      let files = 0;
+      let counted = false;
+      let truncated = false;
+      const before = await ws.stat(abs).catch(() => null);
+      if (before?.type === 'dir') {
+        try {
+          const tree = await ws.listTree(abs, { depth: 4, maxEntries: 4000 });
+          truncated = tree.truncated;
+          counted = !truncated;
+          files = tree.entries.filter((e) => e.type !== 'dir').length;
+        } catch {
+          /* the count is a courtesy; the delete is the job */
+        }
+      }
       const { type } = await ws.remove(abs, { recursive: asBool(args.recursive) });
-      return { output: `Deleted ${type === 'dir' ? 'folder' : 'file'} ${rel(abs)}.`, ui: { kind: 'delete', path: rel(abs), isDir: type === 'dir' } };
+      // It is gone; nothing about it is worth remembering.
+      ctx.state.ledger?.seen.delete(abs);
+      ctx.state.ledger?.owned.delete(abs);
+      ctx.state.ledger?.listed.delete(abs);
+      const scope = type === 'dir' && counted && files > 0 ? ` — ${files} file${files === 1 ? '' : 's'} removed` : '';
+      return {
+        output: `Deleted ${type === 'dir' ? 'folder' : 'file'} ${rel(abs)}${scope}.`,
+        ui: {
+          kind: 'delete',
+          path: rel(abs),
+          isDir: type === 'dir',
+          ...(counted ? { files } : {}),
+          ...(truncated ? { truncated: true } : {}),
+        },
+      };
     },
 
-    async move_file(args) {
+    async move_file(args, ctx) {
       const from = await target(reqStr(args, 'from'));
       const to = await target(reqStr(args, 'to'));
       guardWrite(to);
       await ws.move(from, to);
+      ctx.state.ledger?.seen.delete(from);
+      ctx.state.ledger?.owned.delete(from);
+      observeOwned(ctx.state, to); // the agent knows exactly what landed there
       return { output: `Moved ${rel(from)} → ${rel(to)}.`, ui: { kind: 'move', from: rel(from), to: rel(to) } };
     },
 
-    async create_dir(args) {
+    async create_dir(args, ctx) {
       const abs = await target(reqStr(args, 'path'));
       await ws.mkdirp(abs);
+      // The agent made it, so it already knows it is empty — no listing needed
+      // before it can be removed again.
+      observeListing(ws, ctx.state, abs, [], { depth: 1 });
       return { output: `Created folder ${rel(abs)}/.`, ui: { kind: 'mkdir', path: rel(abs) } };
     },
 
@@ -1230,6 +1276,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       if (!dry) {
         for (const c of changes) {
           await ws.writeText(c.abs, c.next);
+          observeOwned(ctx.state, c.abs);
           noteChange(ctx, rel(c.abs), c.added, c.removed);
         }
         for (const c of changes) {
@@ -1477,6 +1524,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const d = diffSummary(pl.old, pl.next, { maxPreviewLines: Math.max(8, Math.min(30, previewBudget)) });
       previewBudget -= d.hunks.reduce((n, h) => n + h.lines.length, 0);
       noteChange(ctx, rel(pl.abs), d.added, d.removed);
+      observeOwned(ctx.state, pl.abs); // the agent now knows this file's contents first-hand
       added += d.added;
       removed += d.removed;
       editCount += pl.edits ?? 1;

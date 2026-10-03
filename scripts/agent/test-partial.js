@@ -78,8 +78,12 @@ test('peekPartialArgs (overwrite): "−" is what is really being replaced, and t
   const same = old.map((l, i) => (i === 10 ? 'CHANGED' : l)).join('\\n') + '\\n';
   const s = peekPartialArgs('write_file', `{"path": "a.txt", "content": "${same}`, { oldLines: old }).progress;
   assert.deepEqual([s.added, s.removed], [1, 1]);
-  // a brand-new file has no "−"
-  assert.equal(peekPartialArgs('write_file', '{"path": "n.txt", "content": "a\\nb\\n').progress.removed, undefined);
+  // a brand-new file removes nothing — and says so with a 0 rather than by
+  // leaving the key off, which would put `removed: undefined` in every live
+  // update the chat receives.
+  const fresh = peekPartialArgs('write_file', '{"path": "n.txt", "content": "a\\nb\\n').progress;
+  assert.deepEqual([fresh.added, fresh.removed], [2, 0]);
+  assert.equal(typeof fresh.removed, 'number', 'both counters are always numbers');
 });
 
 test('peekPartialArgs (edits): "−" from the old text, "+" from the new text, as each arrives', () => {

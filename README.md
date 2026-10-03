@@ -154,3 +154,15 @@ Also hit a **real** Novita sandbox (creates one sandbox, uses it, kills it):
 npm run test:agent:sandbox        # needs NOVITA_API_KEY in .env
 ```
 Try Agent mode in the browser without a model key: `npm run fake-llm`, then add a provider with base URL `http://127.0.0.1:4010/v1` and model `fake-build`.
+
+### Measuring what a unit test cannot
+
+Some behaviour only exists in a real browser or against a real model. These drive one and print what they measured (they need `npm run dev:web` running, and a Chrome/Edge install):
+
+```bash
+npm run harness:preview            # drag the divider: renders per frame, header height, font ramp
+npm run harness:preview:reload     # rebuild the app behind a stable preview URL: does the panel follow?
+npm run probe:raw <model>          # is a tool call really streamed, or dumped in one SSE frame?
+npm run probe:live <model>         # the whole HTTP/SSE path, with the gap between live updates
+npm run probe:gate <model>         # asks a real model to delete a folder it has never seen
+```

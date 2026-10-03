@@ -5,6 +5,7 @@ const STORAGE_KEYS = {
   PROVIDERS: 'danav_chat_providers_v2',
   THEME: 'danav_chat_theme_v2',
   ACTIVE_CHAT: 'danav_active_chat_id_v2',
+  PREVIEW_WIDTH: 'danav_preview_width_v1',
 };
 
 export const DEFAULT_PROVIDERS: Provider[] = [
@@ -45,6 +46,28 @@ export function saveStoredTheme(theme: Theme): void {
     localStorage.setItem(STORAGE_KEYS.THEME, theme);
   } catch (e) {
     console.error('Failed saving theme to localStorage', e);
+  }
+}
+
+/**
+ * How wide the docked preview was last time, in px. Remembered so the split the
+ * user dragged into place survives a reload. Returns null when there is nothing
+ * sensible stored (the caller then picks a default from the viewport).
+ */
+export function getStoredPreviewWidth(): number | null {
+  try {
+    const raw = Number(localStorage.getItem(STORAGE_KEYS.PREVIEW_WIDTH));
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveStoredPreviewWidth(width: number): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.PREVIEW_WIDTH, String(Math.round(width)));
+  } catch (e) {
+    console.error('Failed saving the preview width to localStorage', e);
   }
 }
 
@@ -174,12 +197,41 @@ export function getStoredConversations(): Conversation[] {
   return [];
 }
 
+/**
+ * Drop the base64 payload of image attachments.
+ *
+ * Used only as a fallback: images make a conversation big, and localStorage
+ * has a hard quota. Losing the pixels from the local mirror is far better than
+ * losing the whole conversation, and the backend copy keeps them intact.
+ */
+function stripImagePayloads(conversations: Conversation[]): Conversation[] {
+  return conversations.map((conv) => ({
+    ...conv,
+    messages: (conv.messages || []).map((msg) =>
+      msg.attachments && msg.attachments.length > 0
+        ? {
+            ...msg,
+            attachments: msg.attachments.map((a) =>
+              a.type === 'image' ? { ...a, content: undefined, previewUrl: undefined } : a
+            ),
+          }
+        : msg
+    ),
+  }));
+}
+
 export function saveStoredConversations(conversations: Conversation[]): void {
+  const sanitized = sanitizeConversations(conversations);
   try {
-    const sanitized = sanitizeConversations(conversations);
     localStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(sanitized));
   } catch (e) {
-    console.error('Failed saving conversations to localStorage', e);
+    // Out of quota, almost always because of attached images. Retry without
+    // them so the conversation itself still survives a reload.
+    try {
+      localStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(stripImagePayloads(sanitized)));
+    } catch (retryError) {
+      console.error('Failed saving conversations to localStorage', retryError);
+    }
   }
 }
 

@@ -16,6 +16,7 @@ import {
 } from '../store.js';
 import { genId, slugify } from '../util.js';
 import { clearNotes } from '../memory.js';
+import { forget } from '../sandboxActivity.js';
 
 const instances = new Map();
 const SANDBOX_BASE = '/home/user';
@@ -37,6 +38,8 @@ export function publicInfo(record) {
     root: record.root,
     autoRun: record.autoRun !== false,
     sandboxId: record.sandboxId,
+    /** Pause this sandbox once it has been idle for a while (sandboxes only). */
+    autoPause: record.kind === 'sandbox' ? record.autoPause !== false : false,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
@@ -80,6 +83,8 @@ export async function createWorkspace({ name, kind, path: customPath, autoRun } 
     name: cleanName,
     kind,
     autoRun: autoRun === undefined ? kind === 'sandbox' : Boolean(autoRun),
+    // Sandboxes bill while running, so auto-pause is ON unless the user opts out.
+    autoPause: kind === 'sandbox' ? true : undefined,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -131,6 +136,7 @@ export async function openWorkspace(id) {
 export function updateWorkspace(id, patch) {
   const allowed = {};
   if (typeof patch.autoRun === 'boolean') allowed.autoRun = patch.autoRun;
+  if (typeof patch.autoPause === 'boolean') allowed.autoPause = patch.autoPause;
   if (typeof patch.name === 'string' && patch.name.trim()) allowed.name = patch.name.trim().slice(0, 60);
   const rec = updateWorkspaceRecord(id, allowed);
   if (!rec) throw new WorkspaceError('Workspace not found.', 'not_found');
@@ -152,6 +158,7 @@ export async function deleteWorkspace(id, { deleteFiles = false } = {}) {
     instances.delete(id);
     removeWorkspaceRecord(id);
     clearNotes(id);
+    forget(id); // stop the idle sweeper tracking a workspace that no longer exists
   }
 }
 

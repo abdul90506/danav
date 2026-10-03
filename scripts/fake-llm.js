@@ -6,7 +6,7 @@
  *   node scripts/fake-llm.js 4010        # then use baseUrl http://127.0.0.1:4010/v1
  *
  * The `model` name picks the scenario: fake-build, fake-slow, fake-fail,
- * fake-approval, fake-silent, fake-bad-calls, fake-loop, fake-bulky, fake-preview, fake-project, fake-burst, fake-batch, fake-edit-streak.
+ * fake-approval, fake-silent, fake-bad-calls, fake-loop, fake-bulky, fake-preview, fake-project, fake-burst, fake-batch, fake-edit-streak, fake-gate.
  */
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
@@ -284,6 +284,33 @@ export const scenarios = {
     roundIdx < 6
       ? { toolCalls: [{ name: 'run_command', args: { command: `node -e "console.log('x'.repeat(9000))"` } }] }
       : { text: 'done' },
+
+  /**
+   * The impatient model: it goes straight for the delete, is refused, and only
+   * then does what the gate asks. `legacy/` and `src/` are seeded by the test.
+   *
+   * The removal is spelled the way THIS platform's shell spells it, so the test
+   * asserts something the gate decided — not something the shell refused to run.
+   */
+  gate: ({ roundIdx }) => {
+    const remove = process.platform === 'win32' ? 'Remove-Item -Recurse -Force' : 'rm -rf';
+    switch (roundIdx) {
+      case 0:
+        return { text: 'Removing the old folder.', toolCalls: [{ name: 'delete_file', args: { path: 'legacy', recursive: true } }] };
+      case 1:
+        return { text: 'Looking at it first.', toolCalls: [{ name: 'list_dir', args: { path: 'legacy', depth: 3 } }] };
+      case 2:
+        return { toolCalls: [{ name: 'delete_file', args: { path: 'legacy', recursive: true } }] };
+      case 3:
+        return { text: 'Clearing src with a command.', toolCalls: [{ name: 'run_command', args: { command: `${remove} src` } }] };
+      case 4:
+        return { toolCalls: [{ name: 'list_dir', args: { path: 'src', depth: 3 } }] };
+      case 5:
+        return { toolCalls: [{ name: 'run_command', args: { command: `${remove} src` } }] };
+      default:
+        return { text: 'Both folders are gone.' };
+    }
+  },
 };
 
 const byModel = {
@@ -305,6 +332,7 @@ const byModel = {
   'fake-parallel': scenarios.parallel,
   'fake-check': scenarios.check,
   'fake-delegate': scenarios.delegate,
+  'fake-gate': scenarios.gate,
 };
 
 export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {

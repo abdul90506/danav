@@ -2,6 +2,8 @@
  * Agent test-suite (no network, no API keys needed).
  *
  *   node scripts/test-agent.js            # unit + local-workspace + loop tests
+ *   node scripts/test-agent.js --module frontend      # only the frontend section
+ *   node scripts/test-agent.js --only "preview panel" # only tests whose name matches
  *   NOVITA_API_KEY=sk_... node scripts/test-agent.js --sandbox   # also hit a real Novita sandbox
  *
  * Grows section by section; every section is independent.
@@ -235,7 +237,31 @@ const args = process.argv.slice(2);
 globalThis.__agentTest = { test, args };
 
 // Later sections are registered by dynamic imports so one file stays readable.
-for (const mod of ['./agent/test-partial.js', './agent/test-memory.js', './agent/test-journal.js', './agent/test-context.js', './agent/test-thinking.js', './agent/test-settings.js', './agent/test-edits.js', './agent/test-workspace.js', './agent/test-tools.js', './agent/test-loop.js', './agent/test-frontend.js', './agent/test-sandbox.js']) {
+const MODULES = [
+  './agent/test-partial.js',
+  './agent/test-memory.js',
+  './agent/test-journal.js',
+  './agent/test-context.js',
+  './agent/test-thinking.js',
+  './agent/test-settings.js',
+  './agent/test-edits.js',
+  './agent/test-workspace.js',
+  './agent/test-tools.js',
+  './agent/test-policy.js',
+  './agent/test-loop.js',
+  './agent/test-sandboxes.js',
+  './agent/test-frontend.js',
+  './agent/test-sandbox.js',
+];
+
+// `--module frontend` loads only the modules whose path contains that text. The
+// loop suite alone is ~50s of deliberate streaming waits, so while iterating on
+// one area there is no reason to pay for the rest of the file.
+const moduleIdx = process.argv.indexOf('--module');
+const onlyModule = moduleIdx > -1 ? process.argv[moduleIdx + 1] : null;
+
+for (const mod of MODULES) {
+  if (onlyModule && !mod.includes(onlyModule)) continue;
   try {
     await import(mod);
   } catch (err) {

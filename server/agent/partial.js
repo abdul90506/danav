@@ -124,14 +124,17 @@ export function peekPartialArgs(name, text, { oldLines } = {}) {
   if (name === 'write_file' || name === 'append_file') {
     const body = fields.find((f) => f.key === 'content')?.value ?? '';
     let added = startedLines(body);
-    let removed;
+    let removed = 0;
     if (oldLines && name === 'write_file') {
       // Overwriting: count what really differs from the file on disk, like the final diff will.
       const live = liveDiffStats(oldLines, completeLines(body));
       removed = live.removed;
       added = live.added + (body !== '' && !body.endsWith('\n') ? 1 : 0); // + the line being typed right now
     }
-    return { args, progress: { added, ...(removed !== undefined ? { removed } : {}), tail: lastLines(body, 6) }, body };
+    // `removed` is always a number. A brand-new file removes nothing, and leaving
+    // the key off made every live update carry `removed: undefined` — a shape the
+    // UI then has to defend against, and one that reads as a bug in any log.
+    return { args, progress: { added, removed, tail: lastLines(body, 6) }, body };
   }
 
   // edits: the old text is what goes away, the new text is what appears

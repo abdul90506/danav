@@ -22,6 +22,14 @@
  *    fenced code sample, or inside a file the model is writing — is emitted as
  *    content, verbatim, and never opens the Thinking channel.
  *
+ * 4. WRAPPER RESIDUE IS DROPPED. When the reasoning arrives on a native
+ *    channel, the provider has already consumed the opening tag but can leave
+ *    the closing one ("</thought>") at the head of the text stream. Because
+ *    nothing opened a thought block here, that tag used to be treated as a
+ *    "stray" and rendered verbatim in front of the answer. It is not content,
+ *    so a closing tag with no open block (and no fence / file body around it)
+ *    is discarded instead.
+ *
  * `splitDelta(text)` returns `{ thinking }` / `{ content }` events in emission
  * order. `splitDelta.flush()` releases any held-back partial at end of stream.
  */
@@ -103,8 +111,18 @@ export function createStreamSplitter() {
       }
 
       if (lower === '</thought>' || lower === '</think>') {
-        if (inThoughtBlock) inThoughtBlock = false;
-        else push('content', token); // stray closing tag — keep it visible
+        if (inThoughtBlock) {
+          inThoughtBlock = false;
+        } else if (fenceCount % 2 === 1 || inToolBody) {
+          // A literal tag inside a fence or a file body is data, not control.
+          push('content', token);
+        }
+        // Otherwise this is wrapper residue. Some providers deliver the
+        // reasoning on a native channel (`reasoning_content`, Gemini's
+        // `extra_content.google.thought`) and then leave the CLOSING tag at
+        // the head of the text stream — the opening tag never reached us, so
+        // `inThoughtBlock` is false and this looked like a "stray" tag. It is
+        // not part of the answer, so it must not reach the visible channel.
         return;
       }
 

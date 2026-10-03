@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
-import { ChevronRight, Circle, CircleCheck, CircleDot, ExternalLink } from 'lucide-react';
+import React, { useState } from 'react';
+import { ChevronRight, Circle, CircleCheck, CircleDot, ExternalLink, PanelRight } from 'lucide-react';
 import type { AgentAction, AgentDiffHunk } from '../types';
-import { actionLabel, formatRanges, isLive, isWorking } from '../agent/format';
+import { actionLabel, formatRanges, isWorking } from '../agent/format';
 import { AnimatedCount } from './AnimatedCount';
 import { FileTypeIcon } from './FileTypeIcon';
 
@@ -22,12 +22,11 @@ const lastLines = (text = '', n = 3) =>
     .split('\n')
     .slice(-n);
 
-/** While a finished write's numbers are still rolling up, its verb keeps the present tense. */
-const PRESENT: Record<string, string> = { Created: 'Creating', Rewrote: 'Creating', Edited: 'Editing', Appended: 'Appending', Replaced: 'Replacing' };
-
 interface RowProps {
   action: AgentAction;
   onApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
+  /** Show this URL in the docked preview panel instead of a new tab. */
+  onOpenPreview?: (url: string, title?: string) => void;
 }
 
 const Diff: React.FC<{ hunks: AgentDiffHunk[] }> = ({ hunks }) => (
@@ -129,30 +128,25 @@ const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
   );
 };
 
-export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApproval }) => {
+export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApproval, onOpenPreview }) => {
   const [open, setOpen] = useState(false);
-  // Was this row on screen while it was live? Then a number that shows up late (the model sent the whole
-  // file at once) rolls up from 0 instead of popping in; rows loaded from history simply show their numbers.
-  const [sawLive, setSawLive] = useState(isLive(action));
-  useEffect(() => {
-    if (isLive(action)) setSawLive(true);
-  }, [action.status]); // eslint-disable-line react-hooks/exhaustive-deps
-  const [addRolling, setAddRolling] = useState(false);
-  const [remRolling, setRemRolling] = useState(false);
-  const settling = (addRolling || remRolling) && action.status === 'done' && sawLive;
   const label = actionLabel(action);
-  if (settling) label.verb = PRESENT[label.verb] ?? label.verb;
-  const live = isWorking(action) || settling; // shimmer = working on it right now (or its numbers are still rolling in)
+  const live = isWorking(action); // shimmer = working on it right now
   const queued = action.status === 'queued';
   const awaiting = action.status === 'awaiting_approval';
   const failedTool = label.verb.startsWith("Couldn't") || label.verb.includes('failed') || label.verb.startsWith('Preview not');
   const muted = action.status === 'denied' || label.verb === 'Stopped' || label.verb === 'Interrupted';
+  // A refusal is neither a crash nor a success: the run stopped the agent so it
+  // could look first. Amber, so it reads as a redirection.
+  const refused = action.status === 'blocked';
 
-  const verbTone = failedTool
-    ? 'text-rose-600 dark:text-rose-400'
-    : muted || queued
-      ? 'text-zinc-400 dark:text-zinc-500'
-      : 'text-zinc-500 dark:text-zinc-400';
+  const verbTone = refused
+    ? 'text-amber-600 dark:text-amber-400'
+    : failedTool
+      ? 'text-rose-600 dark:text-rose-400'
+      : muted || queued
+        ? 'text-zinc-400 dark:text-zinc-500'
+        : 'text-zinc-500 dark:text-zinc-400';
 
   const tail = live && action.output && (action.tool === 'run_command' || action.tool === 'read_process_output') ? lastLines(action.output, 3) : [];
   const previewUrl = action.result?.url;
@@ -203,12 +197,10 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
           {labelContent}
 
           {label.lines && <span className="shrink-0 font-mono text-[11.5px] text-zinc-400 dark:text-zinc-500">{label.lines}</span>}
-          {label.added !== undefined && label.added > 0 && (
+          {label.added !== undefined && (
             <AnimatedCount
               value={label.added}
               sign="+"
-              fromZero={sawLive}
-              onAnimating={setAddRolling}
               className="shrink-0 font-mono text-[12px] tabular-nums text-emerald-600 dark:text-emerald-400"
             />
           )}
@@ -216,8 +208,6 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
             <AnimatedCount
               value={label.removed}
               sign="−"
-              fromZero={sawLive}
-              onAnimating={setRemRolling}
               className="shrink-0 font-mono text-[12px] tabular-nums text-rose-500 dark:text-rose-400"
             />
           )}
@@ -239,15 +229,46 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
         </button>
 
         {previewUrl && action.tool === 'get_preview_url' && (
-          <a
-            href={previewUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="shrink-0 inline-flex items-center gap-1 text-[12px] text-sky-600 dark:text-sky-400 hover:underline"
-          >
-            <span className="max-w-[260px] truncate">{previewUrl.replace(/^https?:\/\//, '')}</span>
-            <ExternalLink className="w-3 h-3" />
-          </a>
+          <span className="shrink-0 inline-flex items-center gap-0.5">
+            {onOpenPreview ? (
+              <>
+                {/* The URL itself opens the panel — that is what "give me the
+                    link" means here. A new tab stays one small click away for
+                    pages that refuse to be framed. */}
+                <button
+                  type="button"
+                  onClick={() => onOpenPreview(previewUrl, action.result?.title)}
+                  className="inline-flex items-center gap-1.5 pl-2 pr-1.5 h-6 rounded-md rounded-r-none text-[11.5px] font-medium bg-emerald-50 dark:bg-emerald-500/10 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/80 dark:border-emerald-500/30 border-r-0 transition-colors cursor-pointer"
+                  title="Open it in the panel next to the chat"
+                  data-testid="open-preview-panel"
+                >
+                  <PanelRight className="w-3.5 h-3.5 shrink-0" />
+                  <span>Preview</span>
+                  <span className="max-w-[200px] truncate font-normal opacity-80">{previewUrl.replace(/^https?:\/\//, '')}</span>
+                </button>
+                <a
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center h-6 px-1.5 rounded-md rounded-l-none bg-emerald-50 dark:bg-emerald-500/10 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/80 dark:border-emerald-500/30 border-l-0 transition-colors"
+                  title="Open in a new tab"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </>
+            ) : (
+              <a
+                href={previewUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[12px] text-sky-600 dark:text-sky-400 hover:underline"
+                title="Open in a new tab"
+              >
+                <span className="max-w-[220px] truncate">{previewUrl.replace(/^https?:\/\//, '')}</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
+          </span>
         )}
 
         {awaiting && onApproval && (

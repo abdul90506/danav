@@ -96,7 +96,8 @@ export type AgentActionStatus =
   | 'awaiting_approval'
   | 'done'
   | 'error'
-  | 'denied';
+  | 'denied' // the user said no
+  | 'blocked'; // the run refused it: the target had never been inspected
 
 export interface AgentDiffLine {
   /** ' ' context, '+' added, '-' removed */
@@ -205,14 +206,59 @@ export interface AgentWorkspace {
   kind: 'sandbox' | 'local';
   root: string;
   autoRun: boolean;
+  /** Sandboxes only: pause once idle so a forgotten one stops costing money. */
+  autoPause?: boolean;
   sandboxId?: string;
   createdAt?: number;
+}
+
+/** The lifecycle of a sandbox as Novita reports it. */
+export type SandboxState = 'running' | 'paused' | 'gone';
+
+/** One sandbox in the Novita account — whether or not Danav created it. */
+export interface SandboxSummary {
+  sandboxId: string;
+  state: SandboxState;
+  templateId: string | null;
+  name: string | null;
+  cpuCount: number | null;
+  memoryMB: number | null;
+  startedAt: number | null;
+  /** When Novita will pause it on its own if nothing keeps it alive. */
+  endAt: number | null;
+  metadata: Record<string, string>;
+  /** Created by Danav at some point, even if its workspace is long gone. */
+  isDanav: boolean;
+  /** A workspace in this app still points at it. */
+  managed: boolean;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  autoPause: boolean | null;
+}
+
+export interface SandboxTotals {
+  all: number;
+  running: number;
+  paused: number;
+  /** Running and unclaimed by any workspace: pure waste. */
+  orphans: number;
+}
+
+/** What the active workspace's own sandbox is doing right now. */
+export interface SandboxStatus {
+  workspaceId: string;
+  sandboxId: string | null;
+  state: SandboxState | 'local' | 'none' | 'missing' | 'unknown';
+  endAt?: number | null;
+  autoPause?: boolean;
 }
 
 export interface AgentConfig {
   novita: { configured: boolean; source: 'env' | 'saved' | null };
   local: { workspacesDir: string; allowAnyPath: boolean; platform: string };
   limits: { maxSteps: number; commandTimeoutSeconds: number };
+  /** Auto-pause policy, so the UI can explain why a sandbox went to sleep. */
+  sandbox: { idlePauseSeconds: number; runGraceSeconds: number; timeoutMinutes: number };
   tools: string[];
 }
 
@@ -285,6 +331,18 @@ export interface Conversation {
   updatedAt: number;
 }
 
+/**
+ * One piece of a multimodal message, in the OpenAI-compatible shape every
+ * provider we talk to understands. A plain string is still valid content — the
+ * array form is only used when a message actually carries an image.
+ */
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+/** Text-only, or text plus images. */
+export type ChatMessageContent = string | ChatContentPart[];
+
 export interface ChatRequestPayload {
   provider: {
     id: string;
@@ -296,7 +354,7 @@ export interface ChatRequestPayload {
   thinkingLevel: ThinkingLevel;
   messages: Array<{
     role: 'user' | 'assistant' | 'system';
-    content: string;
+    content: ChatMessageContent;
   }>;
   /** Hand the web tools to the model so it can research on its own. */
   toolsEnabled?: boolean;

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bot, Check, ChevronDown, Cloud, FolderTree, Laptop, Plus, Trash2 } from 'lucide-react';
-import type { AgentWorkspace } from '../types';
+import { Bot, Check, ChevronDown, Cloud, FolderTree, Laptop, Layers, Plus, Trash2 } from 'lucide-react';
+import type { AgentWorkspace, SandboxStatus } from '../types';
 
 interface AgentControlsProps {
   enabled: boolean;
@@ -13,6 +13,10 @@ interface AgentControlsProps {
   onToggleAutoRun: (id: string, autoRun: boolean) => void;
   filesOpen: boolean;
   onToggleFiles: () => void;
+  /** Open the account-wide sandbox manager. */
+  onOpenSandboxes: () => void;
+  /** What the active workspace's sandbox is doing (null while unknown / local). */
+  sandboxState?: SandboxStatus['state'] | null;
   /** An agent run is in progress: switching or deleting a workspace is locked. */
   busy?: boolean;
 }
@@ -20,18 +24,45 @@ interface AgentControlsProps {
 const KindIcon: React.FC<{ kind: AgentWorkspace['kind']; className?: string }> = ({ kind, className = 'w-3.5 h-3.5' }) =>
   kind === 'sandbox' ? <Cloud className={className} /> : <Laptop className={className} />;
 
+/** A live dot on the workspace chip: green running, grey asleep, amber in between. */
+const SANDBOX_DOT: Record<string, { className: string; text: string; title: string; short: string; label: string }> = {
+  running: {
+    className: 'bg-emerald-500', text: 'text-emerald-700 dark:text-emerald-400',
+    title: 'Sandbox is running — it bills while it is up', short: 'Running', label: 'Sandbox running',
+  },
+  paused: {
+    className: 'bg-zinc-400 dark:bg-zinc-500', text: 'text-zinc-500 dark:text-zinc-400',
+    title: 'Sandbox is paused — files kept, nothing billed', short: 'Paused',
+    label: 'Sandbox paused — wakes on the next message',
+  },
+  gone: {
+    className: 'bg-rose-500', text: 'text-rose-600 dark:text-rose-400',
+    title: 'Sandbox is gone; the next run creates a fresh one', short: 'Deleted',
+    label: 'Sandbox deleted — the next run creates a fresh one',
+  },
+  none: {
+    className: 'bg-zinc-300 dark:bg-zinc-600', text: 'text-zinc-500 dark:text-zinc-400',
+    title: 'No sandbox yet — the next run creates one', short: 'No sandbox', label: 'No sandbox yet',
+  },
+  unknown: {
+    className: 'bg-amber-400', text: 'text-amber-600 dark:text-amber-400',
+    title: 'Sandbox state unknown', short: 'Unknown', label: 'Sandbox state unknown',
+  },
+};
+
 /**
  * The row above the message box: the Agent switch and, when it is on, the
  * workspace the agent works in (a cloud sandbox or a folder on this machine).
  */
 export const AgentControls: React.FC<AgentControlsProps> = ({
   enabled, onToggle, workspaces, activeWorkspaceId, onSelectWorkspace, onCreate, onDelete,
-  onToggleAutoRun, filesOpen, onToggleFiles, busy,
+  onToggleAutoRun, filesOpen, onToggleFiles, onOpenSandboxes, sandboxState, busy,
 }) => {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const active = workspaces.find((w) => w.id === activeWorkspaceId) || null;
+  const dot = active?.kind === 'sandbox' && sandboxState ? SANDBOX_DOT[sandboxState] : null;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -50,7 +81,7 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
     : 'bg-white/70 dark:bg-zinc-900/60 text-zinc-500 dark:text-zinc-400 border-zinc-200 dark:border-zinc-800 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800';
 
   return (
-    <div className="flex items-center gap-1.5 flex-wrap px-1 pb-2 select-none" data-testid="agent-controls">
+    <div className="flex items-center gap-1.5 flex-wrap select-none" data-testid="agent-controls">
       <button
         type="button"
         onClick={onToggle}
@@ -145,6 +176,17 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
                 </label>
               )}
 
+              {/* Why a cloud workspace sometimes goes quiet: it is asleep, on purpose. */}
+              {active?.kind === 'sandbox' && sandboxState && SANDBOX_DOT[sandboxState] && (
+                <div
+                  className="flex items-center gap-2 px-3 pb-2 text-[11px] text-zinc-500 dark:text-zinc-400"
+                  data-testid="sandbox-status-line"
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${SANDBOX_DOT[sandboxState].className}`} />
+                  <span className="truncate">{SANDBOX_DOT[sandboxState].label}</span>
+                </div>
+              )}
+
               <button
                 type="button"
                 onClick={() => {
@@ -156,6 +198,19 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
               >
                 <Plus className="w-3.5 h-3.5" />
                 New workspace…
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onOpenSandboxes();
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 border-t border-zinc-100 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                data-testid="manage-sandboxes"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                Sandboxes…
               </button>
             </div>
           )}
@@ -176,6 +231,24 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
         >
           <FolderTree className="w-3.5 h-3.5" />
           <span>Files</span>
+        </button>
+      )}
+
+      {/*
+        Always-visible sandbox state, one click from the manager. A paused
+        sandbox is the single most confusing thing about this app ("why is my
+        preview dead?"), so the answer never hides behind a dropdown.
+      */}
+      {enabled && active?.kind === 'sandbox' && dot && (
+        <button
+          type="button"
+          onClick={onOpenSandboxes}
+          title={`${dot.title} — open the sandbox manager`}
+          className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[11.5px] font-medium border border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+          data-testid="sandbox-status-pill"
+        >
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot.className} ${sandboxState === 'running' ? 'animate-pulse' : ''}`} />
+          <span className={dot.text}>{dot.short}</span>
         </button>
       )}
 

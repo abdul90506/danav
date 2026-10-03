@@ -20,8 +20,15 @@
     "typecheck": "tsc --noEmit",
     "start": "node server/index.js",
     "test:agent": "node scripts/test-agent.js",
+    "test:ui": "node scripts/test-agent.js --module frontend",
+    "test:loop": "node scripts/test-agent.js --module test-loop",
+    "harness:preview": "node scripts/preview-harness.js",
     "test:agent:sandbox": "node --env-file=.env scripts/test-agent.js --sandbox",
-    "fake-llm": "node scripts/fake-llm.js"
+    "fake-llm": "node scripts/fake-llm.js",
+    "probe:raw": "node scripts/probe-raw.js",
+    "probe:live": "node scripts/probe-live.js",
+    "harness:preview:reload": "node scripts/preview-reload-harness.js",
+    "probe:gate": "node scripts/probe-gate.js"
   },
   "dependencies": {
     "@types/prismjs": "^1.26.6",
