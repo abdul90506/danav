@@ -72,6 +72,28 @@ const content = await load('src/utils/messageContent.ts');
 const api = await load('src/services/api.ts');
 
 // ---------------------------------------------------------------------------
+console.log('\nAttachment budget');
+// ---------------------------------------------------------------------------
+
+test('a message carries a bounded payload, and says so when a file does not fit', async () => {
+  const budget = await load('src/utils/attachmentBudget.ts');
+  assert.equal(budget.totalPayloadBytes([{ content: 'abc' }, { content: 'de' }]), 5);
+  assert.equal(budget.totalPayloadBytes([]), 0);
+
+  assert.equal(budget.fitsAttachmentBudget(0, budget.ATTACHMENT_BUDGET_BYTES), true);
+  assert.equal(budget.fitsAttachmentBudget(0, budget.ATTACHMENT_BUDGET_BYTES + 1), false);
+  // An image data URL is the payload: it must count like any other content.
+  const half = budget.ATTACHMENT_BUDGET_BYTES / 2;
+  assert.equal(budget.fitsAttachmentBudget(half, half), true);
+  assert.equal(budget.fitsAttachmentBudget(half, half + 1), false);
+
+  assert.equal(budget.formatBytesAsMegabytes(15 * 1024 * 1024), '16 MB');
+  assert.equal(budget.formatBytesAsMegabytes(budget.ATTACHMENT_BUDGET_BYTES), '12 MB');
+  // The composer's budget has to leave room under the server's body limit.
+  assert.ok(budget.ATTACHMENT_BUDGET_BYTES < 25 * 1_000_000);
+});
+
+// ---------------------------------------------------------------------------
 console.log('\nChat titles');
 // ---------------------------------------------------------------------------
 

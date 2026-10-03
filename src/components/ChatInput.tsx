@@ -14,6 +14,13 @@ import {
   Folder,
 } from 'lucide-react';
 import { Attachment, Provider, ThinkingLevel, Model } from '../types';
+import {
+  ATTACHMENT_BUDGET_BYTES,
+  MAX_ATTACHMENT_BYTES,
+  fitsAttachmentBudget,
+  formatBytesAsMegabytes,
+  totalPayloadBytes,
+} from '../utils/attachmentBudget';
 
 /**
  * Images are sent to the model inline as base64, so a 12MP photo straight off
@@ -23,6 +30,7 @@ import { Attachment, Provider, ThinkingLevel, Model } from '../types';
  */
 const MAX_IMAGE_EDGE = 1568;
 const MAX_IMAGE_BYTES = 1_500_000;
+
 
 function readAsDataURL(file: File): Promise<string> {
   return new Promise<string>((resolve) => {
@@ -326,6 +334,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  /** Why a dropped or picked file did not attach — shown next to the paperclip. */
+  const [attachmentNotice, setAttachmentNotice] = useState('');
   const [isInputExpanded, setIsInputExpanded] = useState(false);
   /** Docked controls bar: hidden until you reach for the arrow, click to pin. */
   const [controlsPinned, setControlsPinned] = useState(false);
@@ -369,9 +379,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   // Process files/folders into Attachment objects
   const processFiles = async (fileList: FileList | File[], isFolder = false) => {
     const newAttachments: Attachment[] = [];
+    const skipped: string[] = [];
+    // What this message would carry after the new files are added.
+    let payloadBytes = totalPayloadBytes(attachments);
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
-      if (file.size > 15 * 1024 * 1024) continue; // skip oversized files >15MB
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        skipped.push(`${file.name} is over ${formatBytesAsMegabytes(MAX_ATTACHMENT_BYTES)}`);
+        continue;
+      }
 
       const isImage = file.type.startsWith('image/');
       let content = '';
@@ -396,19 +412,31 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         } catch (e) {}
       }
 
+      // Images carry their whole data URL; text files are capped so a huge log
+      // does not dominate the prompt.
+      const storedContent = isImage ? content : content.slice(0, 100000);
+      if (!fitsAttachmentBudget(payloadBytes, storedContent.length)) {
+        skipped.push(`${file.name} would take this message over the ${formatBytesAsMegabytes(ATTACHMENT_BUDGET_BYTES)} limit`);
+        continue;
+      }
+      payloadBytes += storedContent.length;
+
       newAttachments.push({
         id: `att-${Date.now()}-${Math.random().toString(36).substr(2, 5)}-${i}`,
         name: file.name,
         type: isImage ? 'image' : isFolder ? 'folder' : 'file',
         size,
-        // Images carry their whole data URL; text files are capped so a huge
-        // log does not dominate the prompt.
-        content: isImage ? content : content.slice(0, 100000),
+        content: storedContent,
         previewUrl,
         path: (file as any).webkitRelativePath || file.name,
       });
     }
 
+    setAttachmentNotice(
+      skipped.length
+        ? `Not attached — ${skipped.slice(0, 2).join('; ')}${skipped.length > 2 ? `; and ${skipped.length - 2} more` : ''}.`
+        : ''
+    );
     setAttachments((prev) => [...prev, ...newAttachments]);
   };
 
@@ -559,6 +587,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   ) : (
                     <File className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
                   )}
+
+          {attachmentNotice && (
+            <p className="px-3.5 pt-2 text-[11px] text-amber-600 dark:text-amber-400" role="status">
+              {attachmentNotice}
+            </p>
+          )}
                   <span className="font-mono text-[11px] truncate max-w-[130px]">{att.name}</span>
                   <span className="text-[10px] text-zinc-400">{Math.round(att.size / 1024) || 1}KB</span>
                   <button
@@ -928,6 +962,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               ) : (
                 <File className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
               )}
+
+      {attachmentNotice && (
+        <p className="mb-2 px-1 text-[11px] text-amber-600 dark:text-amber-400" role="status">
+          {attachmentNotice}
+        </p>
+      )}
               <span className="font-mono text-[11px] truncate max-w-[130px]">{att.name}</span>
               <span className="text-[10px] text-zinc-400">{Math.round(att.size / 1024) || 1}KB</span>
               <button

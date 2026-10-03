@@ -20,6 +20,7 @@ A modern, clean, professional AI chatbot application built with a flat 2D interf
   - **Subtle Status Indicator**: Unobtrusive "Thinking..." or "Generating..." indicator without bulky cards or progress bars.
   - **Retry Handling**: A provider that is briefly unavailable — HTTP 429, 5xx, or a connection that dies before the first token — is retried twice with backoff (honouring `Retry-After`), so one rate-limit blip no longer ends a turn. The reply says it was retried. Anything still failing gets an inline **Retry** button in the message.
 - **Polished Input Area**:
+  - **Attachments**: images are resized before they are sent, text files are truncated, and the whole set is kept inside one message's budget — a file that does not fit says why instead of quietly dropping (or failing the send with a server error later).
   - Auto-growing multiline textarea.
   - `Enter` to send, `Shift + Enter` for new lines.
   - One-click **Stop Generation** button during streaming.

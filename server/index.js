@@ -89,7 +89,10 @@ app.use(
     },
   })
 );
-app.use(express.json({ limit: '10mb' }));
+// Screenshots are the big payload: the composer resizes each one, and it keeps
+// the whole set under its own budget below this ceiling, so a request that gets
+// here always fits. (Chat history is stored per conversation, not per request.)
+app.use(express.json({ limit: '25mb' }));
 app.use((req, res, next) => {
   const normalizedPath = req.path.replace(/\/+$/, '').toLowerCase() || '/';
   if (!previewToken() || !normalizedPath.startsWith('/api/') || normalizedPath === '/api/preview-auth/check') return next();

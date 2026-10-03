@@ -284,6 +284,19 @@ await test('junk entries in a conversations save are dropped, not fatal', async 
   assert.deepStrictEqual(stored.conversations.map((c) => c.id), ['keep', 'no-messages']);
 });
 
+await test('a body over the server limit is a clean 413, not a hang', async () => {
+  // The composer keeps one message under 12 MB, so this is the backstop for a
+  // caller that ignores it: an answer the UI can show, never a dropped socket.
+  const huge = 'x'.repeat(26 * 1024 * 1024);
+  const { status, json } = await api('POST', '/api/chat', {
+    provider: { baseUrl: 'https://example.invalid/v1' },
+    model: 'm',
+    messages: [{ role: 'user', content: huge }],
+  });
+  assert.strictEqual(status, 413);
+  assert.ok(json && json.error, 'the refusal must be JSON the client can read');
+});
+
 await test('conversations round-trip through the server store', async () => {
   const save = await api('POST', '/api/conversations', {
     conversations: [chat('a', 4), chat('b', 2)],
