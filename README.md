@@ -39,7 +39,7 @@ A modern, clean, professional AI chatbot application built with a flat 2D interf
 - **Persistent Storage**:
   - Conversations, active chat, custom providers, and theme preferences survive page refreshes via local storage.
   - Agent workspaces are listed in `server/data/agent-workspaces.json` (names, paths, sandbox ids — never keys or file contents).
-  - The server keeps the chat store on disk, and before it ever lets it *shrink* (a stale tab saving over newer history, an accidental wipe) it writes the previous version aside to `server/data/conversations.backup.json`. **Settings → Chat Data** restores that copy — repeatedly, because restoring leaves the backup in place — and exports every chat as a JSON file.
+  - The server keeps the chat store on disk, and before it ever lets it *shrink* (a stale tab saving over newer history, an accidental wipe) it writes the previous version aside to `server/data/conversations.backup.json`. The store route has its own, larger request ceiling (the store carries every conversation and its images) and a store that is somehow still too big to post is retried without the older chats' image payloads — the open chat keeps its pictures — so syncing degrades instead of stopping. **Settings → Chat Data** restores that copy — repeatedly, because restoring leaves the backup in place — and exports every chat as a JSON file.
 
 ## 🚀 Getting Started
 

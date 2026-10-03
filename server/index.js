@@ -91,8 +91,21 @@ app.use(
 );
 // Screenshots are the big payload: the composer resizes each one, and it keeps
 // the whole set under its own budget below this ceiling, so a request that gets
-// here always fits. (Chat history is stored per conversation, not per request.)
-app.use(express.json({ limit: '25mb' }));
+// here always fits.
+const jsonBody = express.json({ limit: '25mb' });
+/**
+ * The chat store is different: it carries every conversation at once, including
+ * the base64 image attachments the user added. A store like that can be far
+ * larger than any single message, and refusing it would mean the server's copy
+ * silently stopped tracking the chat — so this one route gets a bigger ceiling.
+ */
+const conversationsBody = express.json({ limit: '64mb' });
+app.use((req, res, next) => {
+  if (req.method === 'POST' && req.path.replace(/\/+$/, '').toLowerCase() === '/api/conversations') {
+    return conversationsBody(req, res, next);
+  }
+  return jsonBody(req, res, next);
+});
 app.use((req, res, next) => {
   const normalizedPath = req.path.replace(/\/+$/, '').toLowerCase() || '/';
   if (!previewToken() || !normalizedPath.startsWith('/api/') || normalizedPath === '/api/preview-auth/check') return next();

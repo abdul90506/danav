@@ -297,6 +297,25 @@ await test('a body over the server limit is a clean 413, not a hang', async () =
   assert.ok(json && json.error, 'the refusal must be JSON the client can read');
 });
 
+await test('the chat store route accepts a store too big for a chat message', async () => {
+  // The store carries every conversation's image attachments, so it has its own
+  // (larger) ceiling — a 413 here would silently stop the server's copy of the
+  // chat from tracking the browser's.
+  const heavy = {
+    conversations: [
+      {
+        ...chat('heavy', 1),
+        messages: [{ id: 'h1', role: 'user', content: 'look', attachments: [{ id: 'a1', name: 'x.png', type: 'image', size: 30_000_000, content: 'A'.repeat(30_000_000) }] }],
+      },
+    ],
+    activeChatId: 'heavy',
+  };
+  const { status, json } = await api('POST', '/api/conversations', heavy);
+  assert.strictEqual(status, 200, `a 30 MB store must be accepted, got ${status} ${JSON.stringify(json)}`);
+  const stored = readStore();
+  assert.strictEqual(stored.conversations[0].id, 'heavy');
+});
+
 await test('conversations round-trip through the server store', async () => {
   const save = await api('POST', '/api/conversations', {
     conversations: [chat('a', 4), chat('b', 2)],

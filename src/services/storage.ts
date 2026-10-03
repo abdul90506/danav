@@ -203,20 +203,29 @@ export function getStoredConversations(): Conversation[] {
  * Used only as a fallback: images make a conversation big, and localStorage
  * has a hard quota. Losing the pixels from the local mirror is far better than
  * losing the whole conversation, and the backend copy keeps them intact.
+ *
+ * `keepConversationIds` spares conversations whose images should stay — the
+ * backend fallback keeps the chat the user is actually in, and lets the older
+ * ones give up their pixels so the store still fits in one request.
  */
-function stripImagePayloads(conversations: Conversation[]): Conversation[] {
+export function stripImagePayloads(
+  conversations: Conversation[],
+  keepConversationIds: Set<string> = new Set()
+): Conversation[] {
   return conversations.map((conv) => ({
     ...conv,
-    messages: (conv.messages || []).map((msg) =>
-      msg.attachments && msg.attachments.length > 0
-        ? {
-            ...msg,
-            attachments: msg.attachments.map((a) =>
-              a.type === 'image' ? { ...a, content: undefined, previewUrl: undefined } : a
-            ),
-          }
-        : msg
-    ),
+    messages: keepConversationIds.has(conv.id)
+      ? conv.messages || []
+      : (conv.messages || []).map((msg) =>
+          msg.attachments && msg.attachments.length > 0
+            ? {
+                ...msg,
+                attachments: msg.attachments.map((a) =>
+                  a.type === 'image' ? { ...a, content: undefined, previewUrl: undefined } : a
+                ),
+              }
+            : msg
+        ),
   }));
 }
 

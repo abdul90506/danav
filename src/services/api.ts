@@ -7,7 +7,7 @@ import type {
   ThinkingLevel,
   ToolExecution,
 } from '../types';
-import { sanitizeConversations } from './storage.ts';
+import { sanitizeConversations, stripImagePayloads } from './storage.ts';
 import { previewAuthHeaders } from './previewAuth.ts';
 
 export interface TestProviderResponse {
@@ -451,20 +451,43 @@ export async function restoreConversationsBackup(): Promise<{ success: boolean; 
   }
 }
 
+export interface BackendSaveResult {
+  /** The server's copy of the chats is up to date. */
+  ok: boolean;
+  /** It only fit without the image payloads of older conversations. */
+  degraded?: boolean;
+}
+
 export async function saveBackendConversations(
   conversations: Conversation[],
   activeChatId?: string | null
-): Promise<boolean> {
-  try {
-    const sanitized = sanitizeConversations(conversations);
+): Promise<BackendSaveResult> {
+  const post = async (list: Conversation[]) => {
     const res = await fetch('/api/conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...previewAuthHeaders() },
-      body: JSON.stringify({ conversations: sanitized, activeChatId }),
+      body: JSON.stringify({ conversations: sanitizeConversations(list), activeChatId }),
     });
     return res.ok;
+  };
+
+  try {
+    if (await post(conversations)) return { ok: true };
   } catch (err) {
     console.warn('Could not save conversations to backend:', err);
-    return false;
+    return { ok: false };
   }
+
+  // A store that has grown too large to post is not a reason to stop syncing:
+  // the conversation the user is in keeps its images, the older ones give up
+  // theirs (exactly what the localStorage fallback does under quota pressure),
+  // and the caller can say that the server copy is lighter than the local one.
+  try {
+    const activeId = activeChatId || '';
+    const stripped = stripImagePayloads(conversations, new Set(activeId ? [activeId] : []));
+    if (await post(stripped)) return { ok: true, degraded: true };
+  } catch (err) {
+    console.warn('Could not save the lighter conversations payload either:', err);
+  }
+  return { ok: false };
 }

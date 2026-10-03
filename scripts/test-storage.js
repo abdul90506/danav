@@ -1,5 +1,5 @@
 import assert from 'assert';
-import { getStoredProviders, sanitizeConversations, sanitizeProvidersForClient } from '../src/services/storage.ts';
+import { getStoredProviders, sanitizeConversations, sanitizeProvidersForClient, stripImagePayloads } from '../src/services/storage.ts';
 
 /**
  * Regression tests for how a stored conversation is revived.
@@ -127,6 +127,32 @@ await test('legacy provider keys are removed from localStorage but available for
     if (previous === undefined) delete globalThis.localStorage;
     else Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: previous });
   }
+});
+
+await test("a store too large to post keeps the open chat's images and sheds the older ones", () => {
+  const img = (name) => ({ id: `a-${name}`, name, type: 'image', size: 10, content: 'data:image/png;base64,AAAA', previewUrl: 'data:image/png;base64,AAAA' });
+  const chatWith = (id) => ({
+    id,
+    title: id,
+    messages: [{ id: `${id}-m`, role: 'user', content: 'look', attachments: [img(`${id}.png`)] }],
+    selectedProviderId: 'p',
+    selectedModelId: 'm',
+    thinkingLevel: 'Auto',
+    createdAt: 1,
+    updatedAt: 2,
+  });
+
+  const full = [chatWith('active'), chatWith('old-1'), chatWith('old-2')];
+  const lighter = stripImagePayloads(full, new Set(['active']));
+
+  assert.strictEqual(lighter[0].messages[0].attachments[0].content, 'data:image/png;base64,AAAA', 'the open chat keeps its picture');
+  for (const conv of lighter.slice(1)) {
+    assert.strictEqual(conv.messages[0].attachments[0].content, undefined);
+    assert.strictEqual(conv.messages[0].attachments[0].previewUrl, undefined);
+    assert.strictEqual(conv.messages[0].attachments[0].name, `${conv.id}.png`, 'the attachment is still listed');
+  }
+  assert.strictEqual(stripImagePayloads(full, new Set()).length, full.length);
+  assert.ok(stripImagePayloads(full).every((c) => c.messages[0].attachments[0].content === undefined));
 });
 
 console.log('\n====================================================');

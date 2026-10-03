@@ -150,6 +150,8 @@ export const App: React.FC = () => {
 
   // Backend save debouncer ref
   const backendSaveTimerRef = useRef<any>(null);
+  /** The server's copy of the chat store stopped accepting updates. */
+  const [backendSaveFailed, setBackendSaveFailed] = useState(false);
 
   // Has the server's copy of the conversations been READ yet?
   // Until it has, this tab's local state (which is just one empty chat in a fresh browser
@@ -334,7 +336,9 @@ export const App: React.FC = () => {
     if (!backendHydrated) return;
     if (backendSaveTimerRef.current) clearTimeout(backendSaveTimerRef.current);
     backendSaveTimerRef.current = setTimeout(() => {
-      saveBackendConversations(conversations, activeChatId);
+      void saveBackendConversations(conversations, activeChatId).then((result) => {
+        if (!result.ok) setBackendSaveFailed(true);
+      });
     }, 400);
     return () => {
       if (backendSaveTimerRef.current) clearTimeout(backendSaveTimerRef.current);
@@ -403,6 +407,19 @@ export const App: React.FC = () => {
       if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
     };
   }, []);
+
+  /**
+   * A chat that lives only in this browser is something the user has to know
+   * about — but saying it on every message would be noise, so it is said once
+   * per session. The local copy is still complete; the server copy is not.
+   */
+  useEffect(() => {
+    if (backendSaveFailed) {
+      showNotice(
+        'Your chats are saved in this browser, but the server copy could not be updated. Settings → Chat Data can export them.'
+      );
+    }
+  }, [backendSaveFailed, showNotice]);
 
   const handleSaveProviders = async (newProviders: Provider[]): Promise<boolean> => {
     // Persist first so a just-added provider can be used immediately without
