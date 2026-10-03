@@ -95,11 +95,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   // Chat Data tab
   const [backupStatus, setBackupStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
+  /** Set while the user is being asked to confirm a restore, with its size. */
+  const [pendingRestore, setPendingRestore] = useState<{ count: number } | null>(null);
+  const [exportStatus, setExportStatus] = useState('');
 
   /**
-   * Restore the server's safety copy, then let the app re-read its store so the
-   * sidebar shows what actually came back — a restore that only changed the file
-   * would look like nothing happened.
+   * Step one: look at the backup and ask. Restoring replaces what is on screen,
+   * so it is confirmed in the page rather than with `window.confirm` — a modal
+   * dialog is blocked inside a sandboxed preview iframe (the button would silently
+   * do nothing there) and cannot describe the copy it is about to restore.
    */
   const handleCheckBackup = async () => {
     setBackupBusy(true);
@@ -110,23 +114,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         setBackupStatus({ ok: false, message: backup.error || 'No backup available' });
         return;
       }
-      const count = backup.conversations?.length || 0;
-      const confirmed = window.confirm(
-        `Restore the backup copy?\n\nThe backup holds ${count} conversation${count === 1 ? '' : 's'}. ` +
-          'The chats you have now are replaced by that copy. The backup itself is kept, so you can ' +
-          'restore again or download your current chats first.'
-      );
-      if (!confirmed) {
-        setBackupStatus({ ok: true, message: `Backup found: ${count} conversations (nothing changed)` });
-        return;
-      }
+      setPendingRestore({ count: backup.conversations?.length || 0 });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  /** Step two: the confirmed restore, then re-read the store the app displays. */
+  const handleConfirmRestore = async () => {
+    setBackupBusy(true);
+    setBackupStatus(null);
+    try {
       const result = await restoreConversationsBackup();
       if (!result.success) {
         setBackupStatus({ ok: false, message: result.error || 'Restore failed' });
         return;
       }
       await onConversationsRestored();
-      setBackupStatus({ ok: true, message: `Restored ${result.restored ?? count} conversations` });
+      setPendingRestore(null);
+      setBackupStatus({
+        ok: true,
+        message: `Restored ${result.restored ?? pendingRestore?.count ?? 0} conversations`,
+      });
     } finally {
       setBackupBusy(false);
     }
@@ -138,16 +147,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       null,
       2
     );
+    const fileName = `danav-chats-${new Date().toISOString().slice(0, 10)}.json`;
     const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = `danav-chats-${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = fileName;
     document.body.appendChild(link);
     link.click();
     link.remove();
     // Revoke on the next tick: some browsers cancel the download if the object
     // URL disappears in the same frame as the click.
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // Say what was handed to the browser: a sandboxed preview frame (or a
+    // blocked-download setting) can swallow it silently, and then the button
+    // looks broken rather than blocked.
+    setExportStatus(
+      `Prepared ${fileName} (${conversations.length} conversation${conversations.length === 1 ? '' : 's'}). ` +
+        'If nothing downloads, open the app in its own browser tab and try again.'
+    );
   };
 
   if (!isOpen) return null;
@@ -942,16 +959,48 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     leaves it in place, so this can be undone by restoring again.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleCheckBackup}
-                    disabled={backupBusy}
-                    className="h-8 px-3.5 rounded-lg border border-zinc-300 dark:border-zinc-700 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50 flex items-center gap-1.5"
-                  >
-                    {backupBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
-                    <span>{backupBusy ? 'Working…' : 'Restore previous backup'}</span>
-                  </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {pendingRestore ? (
+                    <div className="w-full rounded-lg border border-amber-300/70 dark:border-amber-800/70 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2.5 space-y-2">
+                      <p
+                        className="text-xs text-amber-800 dark:text-amber-200"
+                        data-testid="restore-confirm"
+                      >
+                        Restore the backup? It holds {pendingRestore.count} conversation
+                        {pendingRestore.count === 1 ? '' : 's'}. The chats you have now are replaced by that
+                        copy — the backup itself is kept, so this can be undone by restoring again.
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleConfirmRestore}
+                          disabled={backupBusy}
+                          className="h-7 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                        >
+                          {backupBusy && <Loader2 className="w-3 h-3 animate-spin" />}
+                          <span>Restore {pendingRestore.count} conversations</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPendingRestore(null)}
+                          disabled={backupBusy}
+                          className="h-7 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleCheckBackup}
+                      disabled={backupBusy}
+                      className="h-8 px-3.5 rounded-lg border border-zinc-300 dark:border-zinc-700 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                    >
+                      {backupBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                      <span>{backupBusy ? 'Working…' : 'Restore previous backup'}</span>
+                    </button>
+                  )}
                   {backupStatus?.message && (
                     <span
                       className={`text-xs ${
@@ -980,6 +1029,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <Download className="w-3.5 h-3.5" />
                   <span>Download chats (JSON)</span>
                 </button>
+                {exportStatus && (
+                  <p className="text-[11px] text-zinc-500" data-testid="export-status">
+                    {exportStatus}
+                  </p>
+                )}
               </div>
             </div>
           )}

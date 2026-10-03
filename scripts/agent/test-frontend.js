@@ -1075,3 +1075,30 @@ test('a missing backup reads as "nothing to restore yet", not as an error', asyn
     globalThis.fetch = realFetch;
   }
 });
+
+test('copying falls back when the Clipboard API is refused (sandboxed preview)', async () => {
+  const { copyText } = await load('src/utils/clipboard.ts');
+  const realNavigator = globalThis.navigator;
+  const realDocument = globalThis.document;
+  try {
+    // A sandboxed iframe: `navigator.clipboard` rejects, and the legacy path is
+    // the only one left. Before this fallback the Copy button silently did nothing.
+    globalThis.navigator = { clipboard: { writeText: async () => { throw new Error('NotAllowedError'); } } };
+    let copiedValue = '';
+    let appended = null;
+    globalThis.document = {
+      createElement: () => ({ style: {}, setAttribute() {}, select() { copiedValue = this.value; }, remove() {} }),
+      body: { appendChild: (el) => { appended = el; } },
+      getSelection: () => null,
+      execCommand: (command) => command === 'copy',
+    };
+
+    const ok = await copyText('hello');
+    assert.equal(ok, true, 'the fallback reports success');
+    assert.equal(copiedValue, 'hello', 'the text was actually in the selected element');
+    assert.ok(appended, 'it was attached to the document to be selectable');
+  } finally {
+    if (realNavigator === undefined) delete globalThis.navigator; else globalThis.navigator = realNavigator;
+    if (realDocument === undefined) delete globalThis.document; else globalThis.document = realDocument;
+  }
+});

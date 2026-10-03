@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { PanelLeft } from 'lucide-react';
+import { PanelLeft, X } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { ChatArea } from './components/ChatArea';
 import { ChatInput } from './components/ChatInput';
@@ -114,6 +114,14 @@ export const App: React.FC = () => {
   const [previewAuthChecking, setPreviewAuthChecking] = useState(true);
   const [previewTokenInput, setPreviewTokenInput] = useState('');
   const [previewAuthError, setPreviewAuthError] = useState('');
+  /**
+   * A short, in-page notice.
+   *
+   * These messages used to be `alert()`: a dialog is blocked inside the sandboxed
+   * preview iframe, so "configure a provider first" (and a failed workspace
+   * delete) produced no feedback at all — the button just looked dead.
+   */
+  const [notice, setNotice] = useState<string | null>(null);
   const [previewAuthBusy, setPreviewAuthBusy] = useState(false);
 
   // Agent mode: server capabilities, the workspaces, and the dialog / files panel
@@ -383,6 +391,19 @@ export const App: React.FC = () => {
   };
 
   // Handle Save Providers from Settings
+  const noticeTimerRef = useRef<number | null>(null);
+  const showNotice = useCallback((message: string) => {
+    setNotice(message);
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = window.setTimeout(() => setNotice(null), 7000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    };
+  }, []);
+
   const handleSaveProviders = async (newProviders: Provider[]): Promise<boolean> => {
     // Persist first so a just-added provider can be used immediately without
     // racing its credential write. Credentials never enter React state/storage.
@@ -650,7 +671,7 @@ export const App: React.FC = () => {
     try {
       await deleteAgentWorkspace(id);
     } catch (e: any) {
-      alert(e?.message || 'Could not delete the workspace.');
+      showNotice(e?.message || 'Could not delete the workspace.');
       return;
     }
     await refreshAgent();
@@ -661,7 +682,7 @@ export const App: React.FC = () => {
     try {
       await updateAgentWorkspace(id, { autoRun });
     } catch (e: any) {
-      alert(e?.message || 'Could not change that setting.');
+      showNotice(e?.message || 'Could not change that setting.');
     }
     refreshAgent();
   };
@@ -707,7 +728,7 @@ export const App: React.FC = () => {
     const existingMessages = baseMessages || activeConversation.messages;
 
     if (!activeProvider) {
-      alert('Please configure at least one provider in Settings.');
+      showNotice('No provider is configured yet — open Settings → Providers & Models to add one.');
       return;
     }
 
@@ -1332,7 +1353,7 @@ export const App: React.FC = () => {
   );
 
   return (
-    <div className="app-viewport flex w-screen overflow-hidden bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 font-sans">
+    <div className="app-viewport relative flex w-screen overflow-hidden bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 font-sans">
       {/* Sidebar */}
       <Sidebar
         conversations={conversations}
@@ -1453,6 +1474,27 @@ export const App: React.FC = () => {
                   agentControls={agentControlsNode}
                 />
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* In-page notice: the feedback that used to be an alert() */}
+        {notice && (
+          <div
+            role="status"
+            data-testid="app-notice"
+            className="pointer-events-auto absolute left-1/2 top-3 z-40 -translate-x-1/2 max-w-[92vw] sm:max-w-md"
+          >
+            <div className="flex items-start gap-2 rounded-xl border border-amber-300/80 dark:border-amber-800/70 bg-amber-50 dark:bg-amber-950/70 px-3.5 py-2.5 shadow-lg">
+              <span className="text-xs text-amber-900 dark:text-amber-100 leading-relaxed">{notice}</span>
+              <button
+                type="button"
+                onClick={() => setNotice(null)}
+                aria-label="Dismiss"
+                className="ml-1 shrink-0 rounded-md p-0.5 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
         )}

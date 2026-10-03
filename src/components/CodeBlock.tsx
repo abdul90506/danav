@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Check, Copy } from 'lucide-react';
 import Prism from 'prismjs';
+import { copyText } from '../utils/clipboard.ts';
 
 // Import essential language grammars
 import 'prismjs/components/prism-javascript';
@@ -47,6 +48,7 @@ const PLAIN_LANGS = new Set(['text', 'plain', 'plaintext', 'txt', 'none', 'outpu
 
 export const CodeBlock: React.FC<CodeBlockProps> = ({ language = 'text', value }) => {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const normalizedLang = useMemo(() => {
     const raw = (language || 'text').toLowerCase().trim();
@@ -71,13 +73,15 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ language = 'text', value }
   }, [value, normalizedLang]);
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
+    const ok = await copyText(value);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
-      console.error('Failed to copy code to clipboard', e);
+      return;
     }
+    // Say so instead of looking dead: this environment refused both copy paths.
+    setCopyFailed(true);
+    setTimeout(() => setCopyFailed(false), 2500);
   };
 
   return (
@@ -96,6 +100,11 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ language = 'text', value }
             <>
               <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
               <span className="text-emerald-600 dark:text-emerald-400 font-medium">Copied!</span>
+            </>
+          ) : copyFailed ? (
+            <>
+              <Copy className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+              <span className="text-amber-600 dark:text-amber-400 font-medium">Select to copy</span>
             </>
           ) : (
             <>

@@ -6,6 +6,7 @@ import { AgentAction, Message, MessageBlock, MovieItem } from '../types';
 import { CodeBlock } from './CodeBlock';
 import { ToolExecutionCard } from './ToolExecutionCard';
 import { MovieCard } from './MovieCard';
+import { copyText } from '../utils/clipboard.ts';
 import { normalizeMessageContent } from '../utils/markdownNormalize';
 import { isPreviewUrl, previewHost } from '../utils/previewUrl';
 import { AgentActionRow } from './AgentActionRow';
@@ -266,12 +267,9 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
       : null;
 
   const handleCopyMessage = async () => {
-    try {
-      await navigator.clipboard.writeText(safeMessageContent);
+    if (await copyText(safeMessageContent)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
-      console.error('Failed to copy message', e);
     }
   };
 
