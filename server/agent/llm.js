@@ -9,6 +9,7 @@
  *   - a provider that rejects the thinking parameters is retried without them
  */
 import { createStreamSplitter } from '../streamSplitter.js';
+import { isCloudMetadataUrl } from '../publicFetch.js';
 import { modelForProvider, normalizeThinkingLevel, thinkingParams } from './thinking.js';
 
 export class LlmError extends Error {
@@ -64,6 +65,11 @@ export async function streamCompletion({
 }) {
   const baseUrl = normalizeBaseUrl(provider.baseUrl);
   if (!baseUrl) throw new LlmError('The provider has no Base URL. Set one in Settings.');
+  if (isCloudMetadataUrl(baseUrl)) {
+    throw new LlmError(
+      'That Base URL points at a cloud metadata address, which this app will not call. Point it at your provider\'s real API endpoint.'
+    );
+  }
   const endpoint = `${baseUrl}/chat/completions`;
   const requestModel = modelForProvider(baseUrl, model);
   const normalizedLevel = normalizeThinkingLevel(thinkingLevel);

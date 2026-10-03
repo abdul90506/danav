@@ -13,7 +13,7 @@ import {
   File,
   Folder,
 } from 'lucide-react';
-import { Attachment, Provider, ThinkingLevel } from '../types';
+import { Attachment, Provider, ThinkingLevel, Model } from '../types';
 
 /**
  * Images are sent to the model inline as base64, so a 12MP photo straight off
@@ -109,7 +109,7 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
 
   // Collect and filter models
   const filteredItems = useMemo(() => {
-    const list: Array<{ provider: Provider; model: { id: string; name: string } }> = [];
+    const list: Array<{ provider: Provider; model: Model }> = [];
     const targetProviders =
       activeTab === 'all' ? providers : providers.filter((p) => p.id === activeTab);
 
@@ -122,7 +122,10 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
           const matchesName = (m.name || '').toLowerCase().includes(q);
           const matchesId = m.id.toLowerCase().includes(q);
           const matchesProv = prov.name.toLowerCase().includes(q);
-          if (matchesName || matchesId || matchesProv) {
+          // A catalogue description often carries the useful word ("vision",
+          // "code", "reasoning") that the id does not.
+          const matchesDescription = (m.description || '').toLowerCase().includes(q);
+          if (matchesName || matchesId || matchesProv || matchesDescription) {
             list.push({ provider: prov, model: m });
           }
         }
@@ -135,8 +138,19 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
     return providers.reduce((acc, p) => acc + (p.models?.length || 0), 0);
   }, [providers]);
 
-  const isThinkingCapable = (modelId: string) => {
-    const id = modelId.toLowerCase();
+  /**
+   * Does this model reason?
+   *
+   * `supportsThinking` is what the provider's own catalogue said when the models
+   * were fetched (Novita/OpenRouter/Groq declare `features: [... "reasoning"]`),
+   * so it wins. The id heuristic is only the fallback for models that were typed
+   * in by hand, or fetched from an API that declares nothing: it cannot see
+   * "zai-org/glm-5.3" or "minimax/minimax-m3", and it misfires on unrelated
+   * names, so the badge and the Thinking control disagreed with Settings.
+   */
+  const isThinkingCapable = (model: Model) => {
+    if (typeof model.supportsThinking === 'boolean') return model.supportsThinking;
+    const id = (model.id || '').toLowerCase();
     return (
       id.includes('reason') ||
       id.includes('r1') ||
@@ -232,7 +246,7 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
         ) : (
           filteredItems.map(({ provider, model }) => {
             const isSelected = selectedProviderId === provider.id && selectedModelId === model.id;
-            const hasThinking = isThinkingCapable(model.id);
+            const hasThinking = isThinkingCapable(model);
             const isFast = isFastModel(model.id);
             const cleanDisplayName = (model.name || model.id).replace(/^models\//, '');
 

@@ -18,9 +18,18 @@ import {
   Brain,
   Check,
   Search,
+  Database,
+  Download,
+  RotateCcw,
+  Loader2,
 } from 'lucide-react';
-import { ApiType, Model, Provider, Theme } from '../types';
-import { fetchProviderModels, testProviderConnection } from '../services/api';
+import { ApiType, Conversation, Model, Provider, Theme } from '../types';
+import {
+  fetchConversationsBackup,
+  fetchProviderModels,
+  restoreConversationsBackup,
+  testProviderConnection,
+} from '../services/api';
 import { buildEditedProvider } from './providerSettings.js';
 
 interface SettingsModalProps {
@@ -30,6 +39,10 @@ interface SettingsModalProps {
   onThemeChange: (theme: Theme) => void;
   providers: Provider[];
   onSaveProviders: (providers: Provider[]) => Promise<boolean> | boolean | void;
+  /** The chats this browser is showing, for the export and the Data tab counts. */
+  conversations: Conversation[];
+  /** Re-read the server's store after a restore, so the UI shows what came back. */
+  onConversationsRestored: () => void | Promise<void>;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -39,8 +52,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onThemeChange,
   providers,
   onSaveProviders,
+  conversations,
+  onConversationsRestored,
 }) => {
-  const [activeTab, setActiveTab] = useState<'appearance' | 'providers'>('appearance');
+  const [activeTab, setActiveTab] = useState<'appearance' | 'providers' | 'data'>('appearance');
 
   // Provider Form State
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
@@ -76,6 +91,64 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     success?: boolean;
     message?: string;
   }>({ loading: false });
+
+  // Chat Data tab
+  const [backupStatus, setBackupStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+
+  /**
+   * Restore the server's safety copy, then let the app re-read its store so the
+   * sidebar shows what actually came back — a restore that only changed the file
+   * would look like nothing happened.
+   */
+  const handleCheckBackup = async () => {
+    setBackupBusy(true);
+    setBackupStatus(null);
+    try {
+      const backup = await fetchConversationsBackup();
+      if (!backup.success) {
+        setBackupStatus({ ok: false, message: backup.error || 'No backup available' });
+        return;
+      }
+      const count = backup.conversations?.length || 0;
+      const confirmed = window.confirm(
+        `Restore the backup copy?\n\nThe backup holds ${count} conversation${count === 1 ? '' : 's'}. ` +
+          'The chats you have now are replaced by that copy. The backup itself is kept, so you can ' +
+          'restore again or download your current chats first.'
+      );
+      if (!confirmed) {
+        setBackupStatus({ ok: true, message: `Backup found: ${count} conversations (nothing changed)` });
+        return;
+      }
+      const result = await restoreConversationsBackup();
+      if (!result.success) {
+        setBackupStatus({ ok: false, message: result.error || 'Restore failed' });
+        return;
+      }
+      await onConversationsRestored();
+      setBackupStatus({ ok: true, message: `Restored ${result.restored ?? count} conversations` });
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleExportConversations = () => {
+    const payload = JSON.stringify(
+      { exportedAt: new Date().toISOString(), conversations },
+      null,
+      2
+    );
+    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `danav-chats-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // Revoke on the next tick: some browsers cancel the download if the object
+    // URL disappears in the same frame as the click.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
 
   if (!isOpen) return null;
 
@@ -290,10 +363,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   // Filtered candidate models in picker
-  const filteredCandidates = fetchedCandidateModels.filter((m) =>
-    m.id.toLowerCase().includes(modelFilterQuery.toLowerCase()) ||
-    (m.name && m.name.toLowerCase().includes(modelFilterQuery.toLowerCase()))
-  );
+  const filteredCandidates = fetchedCandidateModels.filter((m) => {
+    const q = modelFilterQuery.toLowerCase();
+    return (
+      m.id.toLowerCase().includes(q) ||
+      (m.name && m.name.toLowerCase().includes(q)) ||
+      (m.description || '').toLowerCase().includes(q)
+    );
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-900/40 backdrop-blur-sm animate-in fade-in duration-150">
@@ -340,6 +417,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             Providers & Models
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab('data');
+              cancelProviderForm();
+            }}
+            className={`pb-2.5 transition-colors border-b-2 ${
+              activeTab === 'data'
+                ? 'border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100 font-semibold'
+                : 'border-transparent text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300'
+            }`}
+          >
+            Chat Data
           </button>
         </div>
 
@@ -712,8 +802,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                   onChange={() => toggleModelCheck(m.id)}
                                   className="w-3.5 h-3.5 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-400 cursor-pointer"
                                 />
-                                <span className="font-mono text-[11px] truncate">
-                                  {m.id}
+                                <span className="min-w-0">
+                                  <span className="block font-mono text-[11px] truncate">{m.id}</span>
+                                  {m.description && (
+                                    <span className="block text-[10px] text-zinc-400 truncate max-w-[340px]">
+                                      {m.description}
+                                    </span>
+                                  )}
                                 </span>
                               </div>
                               {m.supportsThinking && (
@@ -818,6 +913,74 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 </div>
               )}
+            </div>
+          )}
+          {/* TAB 3: CHAT DATA */}
+          {activeTab === 'data' && (
+            <div className="space-y-5">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Where your chats live</h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Every conversation is kept on this server (<code className="font-mono">server/data/conversations.json</code>)
+                  and mirrored in this browser, so a closed tab or a restart never loses history.
+                </p>
+                <div className="mt-3 flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
+                  <Database className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>
+                    {conversations.length} conversation{conversations.length === 1 ? '' : 's'} ·{' '}
+                    {conversations.reduce((n, c) => n + (c.messages?.length || 0), 0)} messages
+                  </span>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3">
+                <div>
+                  <h4 className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">Restore an older copy</h4>
+                  <p className="text-xs text-zinc-500 mt-1">
+                    Before the server ever lets the chat store shrink — a stale tab saving over newer data, an
+                    accidental wipe — it keeps the previous version aside. Restoring brings that copy back and
+                    leaves it in place, so this can be undone by restoring again.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCheckBackup}
+                    disabled={backupBusy}
+                    className="h-8 px-3.5 rounded-lg border border-zinc-300 dark:border-zinc-700 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    {backupBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                    <span>{backupBusy ? 'Working…' : 'Restore previous backup'}</span>
+                  </button>
+                  {backupStatus?.message && (
+                    <span
+                      className={`text-xs ${
+                        backupStatus.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      {backupStatus.message}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3">
+                <div>
+                  <h4 className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">Export</h4>
+                  <p className="text-xs text-zinc-500 mt-1">
+                    Download every chat as a single JSON file — a copy you hold, independent of this machine.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleExportConversations}
+                  disabled={conversations.length === 0}
+                  className="h-8 px-3.5 rounded-lg border border-zinc-300 dark:border-zinc-700 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download chats (JSON)</span>
+                </button>
+              </div>
             </div>
           )}
         </div>

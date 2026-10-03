@@ -183,7 +183,7 @@ function detectPorts(text) {
 // and send me the result"). fetch_url therefore refuses anything that is not on the public internet.
 
 /** IPv6 text -> 8 numeric groups (handles "::" and a dotted IPv4 tail). null if malformed. */
-function ipv6Groups(ip) {
+export function ipv6Groups(ip) {
   let text = ip.toLowerCase();
   const tail = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
   if (tail) {
@@ -245,7 +245,7 @@ export async function assertPublicUrl(raw, lookup = dns.lookup) {
   const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   const blocked = () =>
     new ToolError(
-      'That address is on a local or private network, so the agent may not fetch it (it could expose local services or secrets). ' +
+      'That address is on a local or private network, so it will not be fetched (it could expose local services or secrets). ' +
         'Only public web pages can be read.'
     );
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) throw blocked();

@@ -29,6 +29,7 @@ A modern, clean, professional AI chatbot application built with a flat 2D interf
   - "Fetch Models" button queries `/v1/models` and populates the model selector in real time.
   - Built-in Demo provider for out-of-the-box offline testing.
 - **AI Agent Mode** (the **Agent** pill above the message box) — the model builds instead of describing: it creates and edits files, runs commands, reads the output and fixes what breaks, in a **cloud sandbox** or a **folder on this machine**. Every step is a plain line of text, in the order it happened (see [Agent mode](#-agent-mode)).
+- **Web tools that refuse to be turned inward**: `fetch_url` follows redirects one hop at a time and checks every hop, so a public page cannot answer `302 → http://localhost:3001/api/settings` and have the model read it back. Loopback, private, link-local and cloud-metadata addresses are refused; only public pages are fetched. Provider Base URLs are held to the same rule for the metadata address class, so a URL typed into Settings cannot be aimed at the instance's credentials.
 - **Resilient search & fetching**:
   - `web_search` cascades through DuckDuckGo HTML → DuckDuckGo Lite → Bing → Mojeek → DDG Instant Answer → Wikipedia, so one blocked engine never fails a query. Results are deduped (max 2 per domain) and returned as structured cards.
   - `fetch_url` detects anti-bot/security interstitials (Cloudflare challenges, captchas, 403/429) and automatically retries through a reader proxy. If a page still can't be read it fails honestly instead of feeding the model a captcha page.
@@ -36,6 +37,7 @@ A modern, clean, professional AI chatbot application built with a flat 2D interf
 - **Persistent Storage**:
   - Conversations, active chat, custom providers, and theme preferences survive page refreshes via local storage.
   - Agent workspaces are listed in `server/data/agent-workspaces.json` (names, paths, sandbox ids — never keys or file contents).
+  - The server keeps the chat store on disk, and before it ever lets it *shrink* (a stale tab saving over newer history, an accidental wipe) it writes the previous version aside to `server/data/conversations.backup.json`. **Settings → Chat Data** restores that copy — repeatedly, because restoring leaves the backup in place — and exports every chat as a JSON file.
 
 ## 🚀 Getting Started
 
@@ -116,7 +118,7 @@ Edits are exact-match with guidance when they miss (closest lines are shown), to
 
 - **Local file tools cannot leave the workspace folder** (`..`, absolute paths and symlinks are checked; `.ssh`, `.aws`, `.gnupg`, `.kube` are blocked; `.git` is read-only for the file tools).
 - **Commands run with the app's own secrets stripped from their environment**, and anything resembling those secrets is redacted from file/command output before it reaches the model or the chat. Catastrophic commands (`rm -rf /`, `mkfs`, fork bombs, …) are blocked outright on local workspaces — a heuristic, not a sandbox: that is why local workspaces ask before running commands.
-- **The web cannot be a way in:** `fetch_url` refuses localhost, private, link-local and cloud-metadata addresses, so a hostile page cannot make the agent read your local services.
+- **The web cannot be a way in:** `fetch_url` refuses localhost, private, link-local and cloud-metadata addresses, so a hostile page cannot make the agent read your local services. The same guard covers the **chat's** web tools — it follows redirects one hop at a time and checks each one, because a public URL can answer `302 → http://localhost:3001/api/settings`. Provider Base URLs supplied by the browser are refused for the cloud-metadata address class (no real endpoint lives there, while a local Ollama or a LAN gateway keeps working).
 - **Agent routes are not reachable from other websites:** `/api/agent/*` sends no CORS headers, requires a custom header, and only answers on `localhost` unless you list more hosts in `DANAV_ALLOWED_HOSTS`. If you expose Danav publicly, put it behind authentication first — whoever can reach it can run commands in your workspaces.
 - Runs are bounded (steps, time, per-command timeout), one run per workspace at a time, and **Stop** kills whatever is running — including child processes.
 
@@ -133,17 +135,28 @@ Edits are exact-match with guidance when they miss (closest lines are shown), to
 | `DANAV_AGENT_COMMAND_TIMEOUT_SECONDS` | 120 | default per-command timeout (max 900) |
 | `DANAV_AGENT_CONTEXT_CHARS` | 420000 | old tool output is trimmed beyond this |
 | `DANAV_MAX_TOKENS` | 32768 | output cap per model round |
+| `TMDB_API_KEY` | TMDB's published sample key | the key behind `movie_search`; your own gets a private quota |
+| `FLIXRAID_API_URL` | – | optional self-hosted catalogue API used when TMDB returns nothing |
 
 On **Windows**, local commands run in PowerShell (set `DANAV_SHELL=cmd` for `cmd.exe`).
 
 ## 🧪 Testing
 
-Full app / streaming suite (requires the backend and Vite dev server running):
+Full app / streaming suite — runs against the instance you are using, so it needs the dev server up (it drives the mock provider, not your keys):
 ```bash
 node scripts/test-all.js
 ```
 
-The repo's unit suites (`test:splitter`, `test:tooltrail`, `test:markdown`, `test:storage`, `test:api`, `test:agent`) run together with `npm run test:suites`. The TypeScript ones use `--experimental-strip-types`, so they need **Node 22.6+** (`test:agent` works on Node 20 too).
+Everything else is self-contained and runs together with `npm run test:suites`:
+
+| Suite | What it covers |
+|---|---|
+| `test:splitter` | the fence/thought stream splitter |
+| `test:tooltrail` | how a tool trail is persisted and settled |
+| `test:fetchguard` | the web-fetch guard: loopback/private/metadata refusal, per-hop redirect checks, provider Base URL policy |
+| `test:server` | a real `server/index.js` on a spare port with its own data dir: keys never reach the browser, the chat store round-trips, shrinks are backed up, restore works and survives itself, 4xx answers are JSON |
+| `test:markdown`, `test:storage`, `test:api` | the frontend's normalisers, storage revival and streaming client, run against the real `.ts` sources |
+| `test:agent` | agent mode end to end with a scripted model |
 
 Agent mode (no API keys or network needed — a scripted fake LLM drives the real loop, tools, HTTP routes and the UI's data path):
 ```bash

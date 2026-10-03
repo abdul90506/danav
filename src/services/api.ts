@@ -383,6 +383,58 @@ export async function fetchBackendConversations(): Promise<BackendConversationsD
   return null;
 }
 
+export interface BackupInfo {
+  success: boolean;
+  conversations?: Conversation[];
+  activeChatId?: string | null;
+  error?: string;
+}
+
+/**
+ * The copy the server keeps before it lets the chat store shrink (see
+ * writeConversationsToDisk). It is the undo button for an accidental wipe.
+ */
+export async function fetchConversationsBackup(): Promise<BackupInfo> {
+  try {
+    const res = await fetch('/api/conversations/backup', { headers: previewAuthHeaders() });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      // 404 is the normal "nothing has gone wrong yet" case, not a failure: the
+      // copy is only made the first time the store is about to shrink.
+      if (res.status === 404) {
+        return {
+          success: false,
+          error: 'No backup yet — one is kept automatically the first time a save would shrink your history.',
+        };
+      }
+      return { success: false, error: data.error || `No backup available (HTTP ${res.status})` };
+    }
+    return {
+      success: true,
+      conversations: sanitizeConversations(data.conversations || []),
+      activeChatId: data.activeChatId || null,
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Could not read the backup' };
+  }
+}
+
+export async function restoreConversationsBackup(): Promise<{ success: boolean; restored?: number; error?: string }> {
+  try {
+    const res = await fetch('/api/conversations/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...previewAuthHeaders() },
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || `Restore failed (HTTP ${res.status})` };
+    }
+    return { success: true, restored: data.restored };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Restore failed' };
+  }
+}
+
 export async function saveBackendConversations(
   conversations: Conversation[],
   activeChatId?: string | null

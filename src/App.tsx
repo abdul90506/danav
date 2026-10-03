@@ -399,6 +399,27 @@ export const App: React.FC = () => {
     return true;
   };
 
+  /**
+   * Re-read the server's conversation store and show exactly what it holds.
+   *
+   * Used after "Restore previous backup": the restore changes the file, and
+   * without this the sidebar would keep displaying the (now replaced) chats that
+   * are still in memory — the restore would look like it silently did nothing.
+   */
+  const handleConversationsRestored = useCallback(async () => {
+    const data = await fetchBackendConversations();
+    if (!data) return;
+    const restored = data.conversations.length > 0 ? data.conversations : [];
+    setConversations(restored);
+    saveStoredConversations(restored);
+    const nextActive =
+      data.activeChatId && restored.some((c) => c.id === data.activeChatId)
+        ? data.activeChatId
+        : restored[0]?.id ?? null;
+    setActiveChatId(nextActive);
+    saveStoredActiveChatId(nextActive);
+  }, []);
+
   // Create New Chat: retains the exact model, provider and thinking level
   const handleNewChat = () => {
     if (isLoading && abortControllerRef.current) {
@@ -1462,6 +1483,8 @@ export const App: React.FC = () => {
         onThemeChange={handleThemeChange}
         providers={providers}
         onSaveProviders={handleSaveProviders}
+        conversations={conversations}
+        onConversationsRestored={handleConversationsRestored}
       />
 
       {/* Agent mode: create a workspace (cloud sandbox or a folder on this machine) */}

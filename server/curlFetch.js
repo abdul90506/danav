@@ -12,7 +12,10 @@ import path from 'path';
  * fallback that actually retrieves the page, and curl ships with Windows 10+,
  * macOS and virtually every Linux image.
  *
- * Resolves to `{ status, text }` or `null` when curl is unavailable / fails.
+ * Resolves to `{ status, text, effectiveUrl }` or `null` when curl is
+ * unavailable / fails. `effectiveUrl` is where the request ended up after
+ * redirects: curl follows them (`-L`) invisibly, so the caller needs it to
+ * confirm the body really came from a public address.
  */
 export function fetchViaCurl(targetUrl, { timeoutMs = 20000, userAgent = '' } = {}) {
   return new Promise((resolve) => {
@@ -43,7 +46,7 @@ export function fetchViaCurl(targetUrl, { timeoutMs = 20000, userAgent = '' } = 
       '-o',
       tmpFile,
       '-w',
-      '%{http_code}',
+      '%{http_code} %{url_effective}',
       '-H',
       'Accept: text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8',
       '-H',
@@ -93,9 +96,19 @@ export function fetchViaCurl(targetUrl, { timeoutMs = 20000, userAgent = '' } = 
       }
       cleanup();
 
-      const status = parseInt(statusText.trim().slice(-3), 10);
+      // `-w` prints "<code> <final url>"; split on the first space so a URL with
+      // spaces in it survives.
+      const written = statusText.trim();
+      const firstSpace = written.indexOf(' ');
+      const codeText = firstSpace === -1 ? written : written.slice(0, firstSpace);
+      const effectiveUrl = firstSpace === -1 ? '' : written.slice(firstSpace + 1).trim();
+      const status = parseInt(codeText, 10);
       if (!text || text.length < 200) return finish(null);
-      finish({ status: Number.isFinite(status) ? status : 0, text });
+      finish({
+        status: Number.isFinite(status) ? status : 0,
+        text,
+        effectiveUrl: effectiveUrl || targetUrl,
+      });
     });
   });
 }

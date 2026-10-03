@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { createStreamSplitter } from './streamSplitter.js';
 import { normalizeToolExecutionsForDisk } from './toolTrail.js';
 import { fetchViaCurl } from './curlFetch.js';
+import { assertPublicResultUrl, fetchPublicUrl, isCloudMetadataUrl, UrlRefusedError } from './publicFetch.js';
 import { registerAgentRoutes, _activeRuns } from './agent/routes.js';
 import { startIdlePauseSweeper } from './agent/idlePause.js';
 import { normalizeAgentBlockForDisk } from './agent/persist.js';
@@ -573,7 +574,14 @@ function readConversationsFromDisk() {
   return { conversations: [], activeChatId: null };
 }
 
-function writeConversationsToDisk(data) {
+/**
+ * @param {object} data
+ * @param {object} [options]
+ * @param {boolean} [options.keepBackup] Restoring FROM the backup must not
+ *   overwrite that backup with the state being replaced — otherwise "Restore
+ *   older backup" would be a one-way door with no copy left to go back to.
+ */
+function writeConversationsToDisk(data, { keepBackup = false } = {}) {
   try {
     const toSave = {
       ...data,
@@ -590,21 +598,23 @@ function writeConversationsToDisk(data) {
     // tab can save the same number of chats while dropping most of the history,
     // which the conversation count alone would not notice.
     try {
-      const previousCount = countConversationsInFile(CONVERSATIONS_FILE);
-      const nextCount = toSave.conversations.length;
-      const previousMessages = countMessagesInFile(CONVERSATIONS_FILE);
-      const nextMessages = toSave.conversations.reduce(
-        (sum, c) => sum + (Array.isArray(c?.messages) ? c.messages.length : 0),
-        0
-      );
-      const shrank = previousCount > nextCount || previousMessages > nextMessages;
-      if (shrank && previousCount >= countConversationsInFile(CONVERSATIONS_BACKUP_FILE)) {
-        atomicWriteFileSync(CONVERSATIONS_BACKUP_FILE, fs.readFileSync(CONVERSATIONS_FILE, 'utf-8'));
-        console.warn(
-          `[conversations] store shrank (${previousCount} chats/${previousMessages} msgs -> ` +
-            `${nextCount} chats/${nextMessages} msgs); previous state saved to ` +
-            `${path.basename(CONVERSATIONS_BACKUP_FILE)}`
+      if (!keepBackup) {
+        const previousCount = countConversationsInFile(CONVERSATIONS_FILE);
+        const nextCount = toSave.conversations.length;
+        const previousMessages = countMessagesInFile(CONVERSATIONS_FILE);
+        const nextMessages = toSave.conversations.reduce(
+          (sum, c) => sum + (Array.isArray(c?.messages) ? c.messages.length : 0),
+          0
         );
+        const shrank = previousCount > nextCount || previousMessages > nextMessages;
+        if (shrank && previousCount >= countConversationsInFile(CONVERSATIONS_BACKUP_FILE)) {
+          atomicWriteFileSync(CONVERSATIONS_BACKUP_FILE, fs.readFileSync(CONVERSATIONS_FILE, 'utf-8'));
+          console.warn(
+            `[conversations] store shrank (${previousCount} chats/${previousMessages} msgs -> ` +
+              `${nextCount} chats/${nextMessages} msgs); previous state saved to ` +
+              `${path.basename(CONVERSATIONS_BACKUP_FILE)}`
+          );
+        }
       }
     } catch {
       /* a missing or unreadable backup must never block a legitimate save */
@@ -664,7 +674,9 @@ app.post('/api/conversations/restore', (req, res) => {
     }
     const parsed = JSON.parse(fs.readFileSync(CONVERSATIONS_BACKUP_FILE, 'utf-8'));
     const conversations = parsed.conversations || [];
-    if (!writeConversationsToDisk({ conversations, activeChatId: parsed.activeChatId || null })) {
+    // keepBackup: the copy being restored must survive the restore, so the action
+    // stays repeatable instead of destroying the only fallback on use.
+    if (!writeConversationsToDisk({ conversations, activeChatId: parsed.activeChatId || null }, { keepBackup: true })) {
       return res.status(500).json({ success: false, error: 'Could not restore conversations' });
     }
     return res.json({ success: true, restored: conversations.length });
@@ -679,6 +691,11 @@ app.post('/api/chat/title', async (req, res) => {
   const provider = providerWithStoredCredentials(suppliedProvider);
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'Message is required' });
+  }
+  if (metadataUrlRefusal(provider)) {
+    // Falls back to the local title rather than reporting an error: naming a chat
+    // is not worth failing a request over.
+    return res.json({ title: fallbackTitle(message) });
   }
 
   function fallbackTitle(text) {
@@ -749,6 +766,23 @@ function normalizeBaseUrl(url) {
   return cleaned;
 }
 
+/**
+ * A provider Base URL comes from the browser, and the server then calls it and
+ * streams the answer back — so it must never be aimed at a cloud metadata
+ * service, which would hand over the host's credentials as the "model reply".
+ * Only that one address class is refused: a local Ollama or a LAN gateway is a
+ * real setup and stays allowed (see server/publicFetch.js).
+ */
+function metadataUrlRefusal(provider) {
+  if (!provider || typeof provider !== 'object') return null;
+  if (!isCloudMetadataUrl(provider.baseUrl)) return null;
+  return (
+    'That Base URL points at a cloud metadata address ("' +
+    String(provider.baseUrl).slice(0, 80) +
+    '"), which this app will not call. Use your provider\'s real API endpoint.'
+  );
+}
+
 function providerWithStoredCredentials(provider) {
   return resolveConfiguredProvider(provider, readSettingsFromDisk());
 }
@@ -757,6 +791,9 @@ function providerWithStoredCredentials(provider) {
 app.post('/api/providers/test', async (req, res) => {
   const resolved = providerWithStoredCredentials(req.body || {});
   const { baseUrl, apiKey, apiType } = resolved;
+
+  const refusal = metadataUrlRefusal(resolved);
+  if (refusal) return res.status(400).json({ success: false, error: refusal });
 
   if (apiType === 'mock') {
     return res.json({ success: true, message: 'Built-in Demo provider is ready.' });
@@ -830,10 +867,36 @@ app.post('/api/providers/test', async (req, res) => {
   }
 });
 
+/**
+ * Does the provider itself say this model can reason?
+ *
+ * Returns true / false when the catalogue declares its capabilities, and null
+ * when it says nothing either way. Modern OpenAI-compatible catalogues (Novita,
+ * OpenRouter, Groq) do declare them — `features: ["function-calling",
+ * "reasoning"]`, `capabilities`, `tags` — and that answer beats guessing from
+ * the name: "zai-org/glm-5.3", "minimax/minimax-m3" or "moonshotai/kimi-k3"
+ * tell a name heuristic nothing, and the user then loses the Thinking control
+ * (and the Reasoning badge in the picker) for a model that has it.
+ */
+function declaredReasoningSupport(model) {
+  if (!model || typeof model !== 'object') return null;
+  const declared = [];
+  for (const key of ['features', 'capabilities', 'tags']) {
+    const value = model[key];
+    if (Array.isArray(value)) declared.push(...value.map(String));
+    else if (typeof value === 'string') declared.push(value);
+  }
+  if (declared.length === 0) return null;
+  return /reasoning|thinking|chain[-_ ]?of[-_ ]?thought/i.test(declared.join(' ')) ? true : null;
+}
+
 // Fetch Models
 app.post('/api/providers/models', async (req, res) => {
   const resolved = providerWithStoredCredentials(req.body || {});
   const { baseUrl, apiKey, apiType } = resolved;
+
+  const refusal = metadataUrlRefusal(resolved);
+  if (refusal) return res.status(400).json({ success: false, error: refusal });
 
   if (apiType === 'mock') {
     return res.json({
@@ -915,9 +978,9 @@ app.post('/api/providers/models', async (req, res) => {
       });
     } else if (Array.isArray(data.data)) {
       modelList = data.data.map((m) => {
-        const id = m.id;
+        const id = String(m.id ?? m.name ?? '');
         const lower = id.toLowerCase();
-        const supportsThinking =
+        const byName =
           lower.includes('gemini-2.5') ||
           lower.includes('gemini-3') ||
           lower.includes('o1') ||
@@ -926,12 +989,21 @@ app.post('/api/providers/models', async (req, res) => {
           lower.includes('r1') ||
           lower.includes('thinking') ||
           lower.includes('claude-3-7') ||
-          lower.includes('qwq');
+          lower.includes('qwq') ||
+          lower.includes('glm-5') ||
+          lower.includes('deepseek-v4') ||
+          lower.includes('kimi-k2') ||
+          lower.includes('kimi-k3') ||
+          lower.includes('minimax-m');
 
+        const description = typeof m.description === 'string' ? m.description.replace(/\s+/g, ' ').trim() : '';
         return {
           id,
-          name: m.name || id,
-          supportsThinking,
+          name: m.name || m.display_name || id,
+          // Only ever upgraded by the declared capabilities, never downgraded:
+          // a provider that omits `features` must not lose its name match.
+          supportsThinking: Boolean(declaredReasoningSupport(m)) || byName,
+          ...(description ? { description: description.slice(0, 240) } : {}),
         };
       });
     } else if (Array.isArray(data)) {
@@ -1203,6 +1275,11 @@ app.post('/api/chat', async (req, res) => {
 
   if (!provider) {
     return res.status(400).json({ error: 'Provider configuration is missing' });
+  }
+
+  const refusal = metadataUrlRefusal(provider);
+  if (refusal) {
+    return res.status(400).json({ error: refusal });
   }
 
   if (!modelInput) {
@@ -2209,7 +2286,9 @@ async function handleSearchTool(req, res) {
       }
       const query = rawQuery.replace(/\s+/g, ' ').trim().slice(0, 200);
 
-      const TMDB_API_KEY = '15d2ea6d0dc1d476efbca3eba2b9bbfb';
+      // Configurable so a deployment can use its own key (higher limits, no shared
+      // quota). The default is TMDB's long-published public sample key.
+      const TMDB_API_KEY = process.env.TMDB_API_KEY || '15d2ea6d0dc1d476efbca3eba2b9bbfb';
 
       try {
         let results = [];
@@ -2237,7 +2316,9 @@ async function handleSearchTool(req, res) {
                   const poster = item.poster_path
                     ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
                     : '';
-                  const score = item.vote_average ? `${(item.vote_average * 10).toFixed(0)}%` : '';
+                  // TMDB's vote_average is already a 0–10 score; keep it that way
+                  // so the chat, the markdown and the movie card all agree.
+                  const score = item.vote_average ? item.vote_average.toFixed(1) : '';
                   const overview = (item.overview || '').slice(0, 160);
                   return {
                     id: String(item.id),
@@ -2255,10 +2336,13 @@ async function handleSearchTool(req, res) {
           // Fallback to local flixraid or themoviedb.org web scraper if direct API is blocked
         }
 
-        // 2. Fallback: query local flixraid api if direct TMDB had 0 results
-        if (results.length === 0) {
+        // 2. Optional fallback: a self-hosted catalogue API. Off unless configured
+        //    (it used to point at http://localhost/flixraid/... — a path that only
+        //    existed on the author's machine and just cost a 3s timeout here).
+        const catalogueBase = (process.env.FLIXRAID_API_URL || '').replace(/\/+$/, '');
+        if (results.length === 0 && catalogueBase) {
           try {
-            const localApiUrl = `http://localhost/flixraid/api/search.php?q=${encodeURIComponent(query)}`;
+            const localApiUrl = `${catalogueBase}/api/search.php?q=${encodeURIComponent(query)}`;
             const localRes = await fetchWithTimeout(localApiUrl, {
               headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
             }, 3000);
@@ -2339,6 +2423,9 @@ async function handleSearchTool(req, res) {
       let blocked = false;
       let statusCode = 0;
       let fetchNote = '';
+      // The address actually read: after a redirect chain it may differ from the
+      // one asked for, and that is the URL the model is told about.
+      let finalUrl = targetUrl;
 
       // Some sites 403 the first hit and serve the retry (rate-limit / bot
       // heuristics). One retry with a different UA turns a flaky 403 into a
@@ -2350,27 +2437,26 @@ async function handleSearchTool(req, res) {
 
       for (let attempt = 0; attempt < USER_AGENTS.length && !bodyText; attempt++) {
         try {
-          const pageRes = await fetchWithTimeout(
-            targetUrl,
-            {
-              headers: {
-                'User-Agent': USER_AGENTS[attempt],
-                Accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cache-Control': 'no-cache',
-                // Browser-ish client hints: some bot walls check for these.
-                'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Upgrade-Insecure-Requests': '1',
-              },
-              redirect: 'follow',
+          // Every hop is checked before the request leaves this machine: a
+          // public page may answer `302 → http://localhost:3001/api/settings`,
+          // and the model must never be able to read a local service. See
+          // server/publicFetch.js.
+          const { response: pageRes, url: resolvedUrl } = await fetchPublicUrl(targetUrl, {
+            timeoutMs: 12000,
+            headers: {
+              'User-Agent': USER_AGENTS[attempt],
+              'Cache-Control': 'no-cache',
+              // Browser-ish client hints: some bot walls check for these.
+              'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+              'sec-ch-ua-mobile': '?0',
+              'sec-ch-ua-platform': '"Windows"',
+              'Sec-Fetch-Dest': 'document',
+              'Sec-Fetch-Mode': 'navigate',
+              'Sec-Fetch-Site': 'none',
+              'Upgrade-Insecure-Requests': '1',
             },
-            12000
-          );
+          });
+          finalUrl = resolvedUrl;
           statusCode = pageRes.status;
           const contentType = pageRes.headers.get('content-type') || '';
           const raw = await pageRes.text();
@@ -2392,6 +2478,21 @@ async function handleSearchTool(req, res) {
             blocked = false;
           }
         } catch (err) {
+          // A refusal is final: retrying, curling or proxying it would be the
+          // bypass this guard exists to prevent. Report it in its own words.
+          if (err instanceof UrlRefusedError) {
+            return res.json({
+              success: false,
+              tool: 'fetch_url',
+              url: finalUrl,
+              refused: true,
+              error: err.message,
+              output:
+                `Refused to fetch ${finalUrl}: ${err.message}\n` +
+                'Only public web pages can be read — local, private and cloud-metadata addresses are off limits. ' +
+                'Use a link from a web search instead, or answer from the search snippets.',
+            });
+          }
           blocked = true;
           statusCode = 0;
           if (attempt < USER_AGENTS.length - 1) {
@@ -2408,7 +2509,12 @@ async function handleSearchTool(req, res) {
       // they render JavaScript-only pages).
       if (blocked || bodyText.length < 120) {
         const viaCurl = await fetchViaCurl(targetUrl, { userAgent: BROWSER_UA });
-        if (viaCurl && viaCurl.status >= 200 && viaCurl.status < 400) {
+        // curl follows redirects with -L and cannot be watched hop by hop, so the
+        // address it reports landing on is checked before its body is used: a
+        // public URL must not be a way to read a private one.
+        const curlLandedSomewherePublic =
+          !viaCurl?.effectiveUrl || (await assertPublicResultUrl(viaCurl.effectiveUrl));
+        if (viaCurl && curlLandedSomewherePublic && viaCurl.status >= 200 && viaCurl.status < 400) {
           if (viaCurl.text.includes('<html') || /<body[\s>]/i.test(viaCurl.text)) {
             const parsed = htmlToReadableText(viaCurl.text);
             pageTitle = parsed.title || pageTitle;
@@ -2418,13 +2524,14 @@ async function handleSearchTool(req, res) {
           }
           if (bodyText.length >= 120) {
             blocked = false;
+            finalUrl = viaCurl.effectiveUrl || finalUrl;
             fetchNote = '(retrieved with the system curl fallback after a direct fetch was blocked)';
           }
         }
       }
 
       if (blocked || bodyText.length < 120) {
-        const proxied = await fetchViaReaderProxy(targetUrl);
+        const proxied = await fetchViaReaderProxy(finalUrl);
         if (proxied) {
           bodyText = proxied;
           blocked = false;
@@ -2438,10 +2545,10 @@ async function handleSearchTool(req, res) {
         return res.json({
           success: false,
           tool: 'fetch_url',
-          url: targetUrl,
-          error: `Could not read ${targetUrl} (${reason}). The site likely blocks automated access.`,
+          url: finalUrl,
+          error: `Could not read ${finalUrl} (${reason}). The site likely blocks automated access.`,
           output:
-            `Could not read ${targetUrl} (${reason}) — the page is behind a bot/security wall or is unreachable.\n` +
+            `Could not read ${finalUrl} (${reason}) — the page is behind a bot/security wall or is unreachable.\n` +
             `Do NOT invent its contents. Either try a different link from your web search, or answer from the search snippets and clearly say what you could not verify.`,
         });
       }
@@ -2467,14 +2574,14 @@ async function handleSearchTool(req, res) {
 
         const searchOutput =
           matchedSentences.length > 0
-            ? `# Search matches for "${searchQuery}" in ${pageTitle || targetUrl}:\n\n` +
+            ? `# Search matches for "${searchQuery}" in ${pageTitle || finalUrl}:\n\n` +
               matchedSentences.map((s, idx) => `${idx + 1}. ... ${s} ...`).join('\n\n')
             : `No specific matches for "${searchQuery}" found in page content. Overview:\n\n${bodyText.slice(0, 4000)}`;
 
         return res.json({
           success: true,
           tool: 'fetch_url',
-          url: targetUrl,
+          url: finalUrl,
           searchQuery,
           title: pageTitle,
           output: fetchNote ? `${searchOutput}\n\n_${fetchNote}_` : searchOutput,
@@ -2488,7 +2595,7 @@ async function handleSearchTool(req, res) {
       return res.json({
         success: true,
         tool: 'fetch_url',
-        url: targetUrl,
+        url: finalUrl,
         title: pageTitle,
         output: fetchNote ? `${summary}\n\n_${fetchNote}_` : summary,
       });
@@ -2575,6 +2682,22 @@ app.use((err, req, res, next) => {
   return res.status(status >= 400 && status < 600 ? status : 500).json({
     success: false,
     error: err?.message || 'Internal server error',
+  });
+});
+
+/**
+ * Unknown API route → JSON, never HTML.
+ *
+ * Without this, Express's default handler answers an unknown /api/* path with an
+ * HTML error page. Every client here parses API responses as JSON, so that page
+ * becomes `Unexpected token '<'` — an error message about the parser instead of
+ * about the route that does not exist. Registered before the SPA catch-all, which
+ * would otherwise serve index.html for an API typo.
+ */
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `Unknown API route: ${req.method} ${req.originalUrl}`,
   });
 });
 
