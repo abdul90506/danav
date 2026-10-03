@@ -4,7 +4,7 @@ import compression from 'compression';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { timingSafeEqual } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { createStreamSplitter } from './streamSplitter.js';
 import { normalizeToolExecutionsForDisk } from './toolTrail.js';
@@ -26,8 +26,28 @@ dotenv.config({ path: path.join(__dirname, '..', '.env') });
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+/**
+ * The preview access code.
+ *
+ * Danav is often served on a public URL (a tunnel, a hosting preview). Without a
+ * code, anyone who learns that URL can spend the configured provider key and
+ * drive Agent mode — the app itself has no other gate. So when the app is
+ * reachable beyond localhost (`DANAV_ALLOWED_HOSTS` is set), a code is required:
+ * `DANAV_PREVIEW_TOKEN` if the operator gave one, otherwise a generated code kept
+ * in `preview-token.txt` in the data directory and printed in the startup banner.
+ *
+ * Local development is untouched: no allowed hosts, no code.
+ * `DANAV_DISABLE_PREVIEW_AUTH=1` opts out (for deployments sitting behind their
+ * own authentication).
+ */
+let PREVIEW_TOKEN = String(process.env.DANAV_PREVIEW_TOKEN || '').trim();
+
+function previewToken() {
+  return PREVIEW_TOKEN;
+}
+
 function previewTokenMatches(req) {
-  const expected = Buffer.from(String(process.env.DANAV_PREVIEW_TOKEN || ''));
+  const expected = Buffer.from(previewToken());
   if (!expected.length) return true;
   const supplied = Buffer.from(String(req.headers['x-danav-preview-token'] || ''));
   return expected.length === supplied.length && timingSafeEqual(expected, supplied);
@@ -49,7 +69,7 @@ app.use((req, res, next) => {
   const protectedRoute = req.path.toLowerCase().startsWith('/api/agent') || credentialRoutes.has(normalizedPath);
   // The public preview uses Vite on a single origin and an access token for API
   // calls, so don't add permissive CORS headers to ANY API in that mode.
-  if (process.env.DANAV_PREVIEW_TOKEN && normalizedPath.startsWith('/api/')) return next();
+  if (previewToken() && normalizedPath.startsWith('/api/')) return next();
   return protectedRoute ? next() : openCors(req, res, next);
 });
 /**
@@ -72,7 +92,7 @@ app.use(
 app.use(express.json({ limit: '10mb' }));
 app.use((req, res, next) => {
   const normalizedPath = req.path.replace(/\/+$/, '').toLowerCase() || '/';
-  if (!process.env.DANAV_PREVIEW_TOKEN || !normalizedPath.startsWith('/api/') || normalizedPath === '/api/preview-auth/check') return next();
+  if (!previewToken() || !normalizedPath.startsWith('/api/') || normalizedPath === '/api/preview-auth/check') return next();
   if (!previewTokenMatches(req)) {
     return res.status(401).json({ success: false, error: 'Preview access code required.', code: 'preview_auth_required' });
   }
@@ -312,6 +332,48 @@ const DATA_DIR = process.env.DANAV_DATA_DIR || path.join(__dirname, 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+
+/**
+ * Work out whether this server needs an access code, and make sure one exists.
+ *
+ * The generated code is stable for the life of the data directory, so a browser
+ * that unlocked the preview stays unlocked across a restart.
+ */
+function resolvePreviewToken() {
+  if (PREVIEW_TOKEN) return 'configured';
+  if (process.env.DANAV_DISABLE_PREVIEW_AUTH === '1') return 'disabled';
+  if (!String(process.env.DANAV_ALLOWED_HOSTS || '').trim()) return 'local';
+
+  const tokenFile = path.join(DATA_DIR, 'preview-token.txt');
+  let code = '';
+  try {
+    code = fs.readFileSync(tokenFile, 'utf-8').trim();
+  } catch { /* first run */ }
+
+  if (!/^[a-z0-9-]{6,}$/i.test(code)) {
+    code = generatePreviewCode();
+    try {
+      fs.writeFileSync(tokenFile, `${code}\n`, { mode: 0o600 });
+      if (process.platform !== 'win32') fs.chmodSync(tokenFile, 0o600);
+    } catch (err) {
+      console.warn('Could not save the preview access code:', err.message);
+    }
+  }
+  PREVIEW_TOKEN = code;
+  return 'generated';
+}
+
+/** Unambiguous when read off a screen: no 0/O, 1/l/I, or lookalike pairs. */
+function generatePreviewCode() {
+  const alphabet = '23456789abcdefghjkmnpqrstuvwxyz';
+  const bytes = randomBytes(16);
+  const chars = Array.from(bytes, (byte) => alphabet[byte % alphabet.length]);
+  return [chars.slice(0, 4), chars.slice(4, 8), chars.slice(8, 12), chars.slice(12, 16)]
+    .map((group) => group.join(''))
+    .join('-');
+}
+
+const previewAuthMode = resolvePreviewToken();
 // The settings file can contain provider API keys. Restrict this store to the
 // account running Danav on POSIX systems; Windows uses its normal ACL model.
 if (process.platform !== 'win32') {
@@ -421,7 +483,7 @@ function writeSettingsToDisk(settings) {
 // Safe access-code check for the isolated public preview. It never returns the configured token.
 app.get('/api/preview-auth/check', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  const required = Boolean(process.env.DANAV_PREVIEW_TOKEN);
+  const required = Boolean(previewToken());
   const authenticated = !required || previewTokenMatches(req);
   return res.status(authenticated ? 200 : 401).json({ required, authenticated });
 });
@@ -2903,7 +2965,16 @@ app.get('*', (req, res, next) => {
   });
 });
 
-const listen = () => console.log(`Backend server running on http://localhost:${PORT}`);
+const listen = () => {
+  console.log(`Backend server running on http://localhost:${PORT}`);
+  if (previewAuthMode === 'generated') {
+    console.log('');
+    console.log('  This server is reachable beyond localhost, so the API needs an access code.');
+    console.log(`  Preview access code: ${PREVIEW_TOKEN}`);
+    console.log(`  (saved in ${path.join(DATA_DIR, 'preview-token.txt')}; set DANAV_PREVIEW_TOKEN to choose your own)`);
+    console.log('');
+  }
+};
 // The Vite dev server proxies /api requests locally. Keep its backend private by
 // default in dev so the exposed Vite preview is the only public entry point.
 if (process.env.DANAV_HOST) app.listen(PORT, process.env.DANAV_HOST, listen);

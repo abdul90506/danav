@@ -120,7 +120,8 @@ Edits are exact-match with guidance when they miss (closest lines are shown), to
 - **Local file tools cannot leave the workspace folder** (`..`, absolute paths and symlinks are checked; `.ssh`, `.aws`, `.gnupg`, `.kube` are blocked; `.git` is read-only for the file tools).
 - **Commands run with the app's own secrets stripped from their environment**, and anything resembling those secrets is redacted from file/command output before it reaches the model or the chat. Catastrophic commands (`rm -rf /`, `mkfs`, fork bombs, …) are blocked outright on local workspaces — a heuristic, not a sandbox: that is why local workspaces ask before running commands.
 - **The web cannot be a way in:** `fetch_url` refuses localhost, private, link-local and cloud-metadata addresses, so a hostile page cannot make the agent read your local services. The same guard covers the **chat's** web tools — it follows redirects one hop at a time and checks each one, because a public URL can answer `302 → http://localhost:3001/api/settings`. Provider Base URLs supplied by the browser are refused for the cloud-metadata address class (no real endpoint lives there, while a local Ollama or a LAN gateway keeps working).
-- **Agent routes are not reachable from other websites:** `/api/agent/*` sends no CORS headers, requires a custom header, and only answers on `localhost` unless you list more hosts in `DANAV_ALLOWED_HOSTS`. If you expose Danav publicly, put it behind authentication first — whoever can reach it can run commands in your workspaces.
+- **Agent routes are not reachable from other websites:** `/api/agent/*` sends no CORS headers, requires a custom header, and only answers on `localhost` unless you list more hosts in `DANAV_ALLOWED_HOSTS`.
+- **A public Danav asks for an access code.** The moment `DANAV_ALLOWED_HOSTS` says this app is reachable on another hostname, every `/api` route needs `x-danav-preview-token` — otherwise any visitor to that URL could spend your provider key and start Agent runs. Danav generates a code on first start, prints it in the banner and keeps it in `server/data/preview-token.txt`; the UI shows a lock screen and remembers the code for the tab. Set `DANAV_PREVIEW_TOKEN` to choose your own, or `DANAV_DISABLE_PREVIEW_AUTH=1` if something else in front of the app already authenticates everyone. Local development is unaffected.
 - Runs are bounded (steps, time, per-command timeout), one run per workspace at a time, and **Stop** kills whatever is running — including child processes.
 
 ### Serving the built app
@@ -134,7 +135,9 @@ Edits are exact-match with guidance when they miss (closest lines are shown), to
 | `NOVITA_API_KEY` | – | cloud sandboxes |
 | `DANAV_WORKSPACES_DIR` | `~/danav-workspaces` | where new local workspaces go |
 | `DANAV_ALLOW_ANY_LOCAL_PATH` | off | `1` lets a local workspace be any folder (never your whole home folder) |
-| `DANAV_ALLOWED_HOSTS` | loopback only | extra hostnames for `/api/agent/*` (e.g. `.trycloudflare.com`) |
+| `DANAV_ALLOWED_HOSTS` | loopback only | extra hostnames for `/api/agent/*` (e.g. `.trycloudflare.com`); also switches on the preview access code |
+| `DANAV_PREVIEW_TOKEN` | generated | the access code a public preview must send |
+| `DANAV_DISABLE_PREVIEW_AUTH` | off | `1` serves publicly with no access code (behind your own auth) |
 | `NOVITA_SANDBOX_TIMEOUT_MINUTES` | 30 | idle time before a sandbox pauses |
 | `DANAV_AGENT_MAX_STEPS` / `_MAX_RUN_MINUTES` | 80 / 45 | limits for one run |
 | `DANAV_AGENT_COMMAND_TIMEOUT_SECONDS` | 120 | default per-command timeout (max 900) |

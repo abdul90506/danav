@@ -1,9 +1,41 @@
 import assert from 'assert';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 console.log('=== STARTING COMPLETE APPLICATION VERIFICATION SUITE ===\n');
 
+/**
+ * This suite drives the instance you are using — which, when the app is served
+ * on a public hostname, is behind the preview access code. Read the same code
+ * the server would (env, or the file it keeps), so the suite tests the real app
+ * instead of failing on 401.
+ */
+function previewAccessCode() {
+  const fromEnv = String(process.env.DANAV_PREVIEW_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const dataDir = process.env.DANAV_DATA_DIR || path.join(root, 'server', 'data');
+  try {
+    return fs.readFileSync(path.join(dataDir, 'preview-token.txt'), 'utf-8').trim();
+  } catch {
+    return '';
+  }
+}
+
+const ACCESS_CODE = previewAccessCode();
+
+/** fetch() with the access header, when this instance asks for one. */
+const apiFetch = (url, init = {}) =>
+  fetch(url, {
+    ...init,
+    headers: { ...(init.headers || {}), ...(ACCESS_CODE ? { 'x-danav-preview-token': ACCESS_CODE } : {}) },
+  });
+
+
 async function runTests() {
   const BASE_URL = 'http://localhost:5173';
+  if (ACCESS_CODE) console.log(`(sending the preview access code from ${process.env.DANAV_PREVIEW_TOKEN ? 'DANAV_PREVIEW_TOKEN' : 'server/data/preview-token.txt'})\n`);
 
   // 1. Check Root UI HTML loads
   console.log('Test 1: Frontend HTML delivery...');
@@ -16,7 +48,7 @@ async function runTests() {
 
   // 2. Test Provider Connection Testing (Success)
   console.log('Test 2: Test Provider Connection (Mock/Local)...');
-  const testConnRes = await fetch(`${BASE_URL}/api/providers/test`, {
+  const testConnRes = await apiFetch(`${BASE_URL}/api/providers/test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ apiType: 'mock' }),
@@ -28,7 +60,7 @@ async function runTests() {
 
   // 3. Test Provider Connection Testing (Failure / Graceful error)
   console.log('Test 3: Provider Connection Failure Handling...');
-  const failConnRes = await fetch(`${BASE_URL}/api/providers/test`, {
+  const failConnRes = await apiFetch(`${BASE_URL}/api/providers/test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ baseUrl: 'http://127.0.0.1:59999', apiType: 'openai' }),
@@ -40,7 +72,7 @@ async function runTests() {
 
   // 4. Test Fetching Models
   console.log('Test 4: Dynamic Model Fetching...');
-  const fetchModelsRes = await fetch(`${BASE_URL}/api/providers/models`, {
+  const fetchModelsRes = await apiFetch(`${BASE_URL}/api/providers/models`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ apiType: 'mock' }),
@@ -56,7 +88,7 @@ async function runTests() {
 
   // 5. Test Chat SSE Streaming with Standard Model
   console.log('Test 5: Chat SSE Streaming (Standard)...');
-  const chatRes1 = await fetch(`${BASE_URL}/api/chat`, {
+  const chatRes1 = await apiFetch(`${BASE_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -103,7 +135,7 @@ async function runTests() {
 
   // 6. Test Chat SSE Streaming with Reasoning Model & High Thinking Level
   console.log('Test 6: Chat SSE Streaming with Reasoning & Thinking Level (High)...');
-  const chatRes2 = await fetch(`${BASE_URL}/api/chat`, {
+  const chatRes2 = await apiFetch(`${BASE_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -145,7 +177,7 @@ async function runTests() {
 
   // 7. Test Missing Fields in Chat Request
   console.log('Test 7: Missing fields validation in Chat...');
-  const chatErrRes = await fetch(`${BASE_URL}/api/chat`, {
+  const chatErrRes = await apiFetch(`${BASE_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),

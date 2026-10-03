@@ -53,6 +53,11 @@ function startServer({ port, extraEnv = {} } = {}) {
       PORT: String(port || PORT),
       DANAV_HOST: '127.0.0.1',
       DANAV_DATA_DIR: dataDir,
+      // An empty value is still "set": dotenv will not overwrite it from .env,
+      // so the suite is never affected by a real .env that serves publicly.
+      DANAV_ALLOWED_HOSTS: '',
+      DANAV_PREVIEW_TOKEN: '',
+      DANAV_DISABLE_PREVIEW_AUTH: '',
       // Never let a test touch the developer's real keys.
       NOVITA_API_KEY: '',
       GEMINI_API_KEY: '',
@@ -531,6 +536,100 @@ try {
   });
 } finally {
   locked.proc.kill();
+}
+
+// ---------------------------------------------------------------------------
+// A code nobody typed: the one Danav generates for itself the moment the app
+// is reachable on a public hostname. Forgetting this path means shipping a
+// preview whose API — and therefore whose provider key — is open to any visitor.
+// ---------------------------------------------------------------------------
+const AUTO_PORT = PORT + 2;
+const AUTO_BASE = `http://127.0.0.1:${AUTO_PORT}`;
+const autoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-auto-token-'));
+const auto = startServer({
+  port: AUTO_PORT,
+  extraEnv: { DANAV_ALLOWED_HOSTS: '.e2b.app', DANAV_DATA_DIR: autoDir },
+});
+const tokenFile = path.join(autoDir, 'preview-token.txt');
+
+try {
+  await waitForServer(auto, AUTO_BASE);
+
+  await test('a public host generates an access code and gates the API with it', async () => {
+    const open = await fetch(`${AUTO_BASE}/api/settings`);
+    assert.strictEqual(open.status, 401, 'no code, no settings');
+    assert.strictEqual((await open.json()).code, 'preview_auth_required');
+
+    const code = fs.readFileSync(tokenFile, 'utf-8').trim();
+    assert.match(code, /^[a-z0-9-]{6,}$/i);
+
+    const unlocked = await fetch(`${AUTO_BASE}/api/settings`, {
+      headers: { 'x-danav-preview-token': code },
+    });
+    assert.strictEqual(unlocked.status, 200);
+  });
+
+  await test('the generated code is private to the account and survives a restart', async () => {
+    if (process.platform !== 'win32') {
+      assert.strictEqual(fs.statSync(tokenFile).mode & 0o777, 0o600);
+    }
+    const code = fs.readFileSync(tokenFile, 'utf-8').trim();
+    auto.proc.kill();
+    const restarted = startServer({
+      port: AUTO_PORT,
+      extraEnv: { DANAV_ALLOWED_HOSTS: '.e2b.app', DANAV_DATA_DIR: autoDir },
+    });
+    try {
+      await waitForServer(restarted, AUTO_BASE);
+      assert.strictEqual(fs.readFileSync(tokenFile, 'utf-8').trim(), code, 'the code must not rotate');
+      const stillWorks = await fetch(`${AUTO_BASE}/api/settings`, {
+        headers: { 'x-danav-preview-token': code },
+      });
+      assert.strictEqual(stillWorks.status, 200, 'a tab that unlocked before the restart stays unlocked');
+    } finally {
+      restarted.proc.kill();
+    }
+  });
+
+  await test('an operator can switch the code off, and their own code wins', async () => {
+    const optOut = startServer({
+      port: AUTO_PORT,
+      extraEnv: { DANAV_ALLOWED_HOSTS: '.e2b.app', DANAV_DISABLE_PREVIEW_AUTH: '1', DANAV_DATA_DIR: autoDir },
+    });
+    try {
+      await waitForServer(optOut, AUTO_BASE);
+      const open = await fetch(`${AUTO_BASE}/api/settings`);
+      assert.strictEqual(open.status, 200, 'disabled means open, on purpose');
+    } finally {
+      optOut.proc.kill();
+    }
+
+    const chosen = startServer({
+      port: AUTO_PORT,
+      extraEnv: {
+        DANAV_ALLOWED_HOSTS: '.e2b.app',
+        DANAV_PREVIEW_TOKEN: 'chosen-by-the-operator',
+        DANAV_DATA_DIR: autoDir,
+      },
+    });
+    try {
+      await waitForServer(chosen, AUTO_BASE);
+      const generated = fs.readFileSync(tokenFile, 'utf-8').trim();
+      const withGenerated = await fetch(`${AUTO_BASE}/api/settings`, {
+        headers: { 'x-danav-preview-token': generated },
+      });
+      assert.strictEqual(withGenerated.status, 401, 'the generated code must not be a second key');
+      const withChosen = await fetch(`${AUTO_BASE}/api/settings`, {
+        headers: { 'x-danav-preview-token': 'chosen-by-the-operator' },
+      });
+      assert.strictEqual(withChosen.status, 200);
+    } finally {
+      chosen.proc.kill();
+    }
+  });
+} finally {
+  auto.proc.kill();
+  fs.rmSync(autoDir, { recursive: true, force: true });
 }
 
 fs.rmSync(dataDir, { recursive: true, force: true });

@@ -1566,7 +1566,12 @@ export const App: React.FC = () => {
             <div className="mb-5">
               <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo-300">Private sandbox</p>
               <h1 id="preview-auth-title" className="mt-2 text-xl font-semibold">Unlock Danav preview</h1>
-              <p className="mt-2 text-sm leading-6 text-zinc-400">Enter the temporary access code for this preview. It stays in this tab only.</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">
+                Danav answers only to someone holding this code, so an open preview cannot spend your provider key or your Agent sandboxes.
+              </p>
+              <p className="mt-2 text-xs leading-5 text-zinc-500">
+                It is printed where the server starts, and saved in <span className="font-mono">server/data/preview-token.txt</span>. Unlocking keeps it in this tab only.
+              </p>
             </div>
             <label htmlFor="preview-access-code" className="mb-1.5 block text-xs font-medium text-zinc-300">Access code</label>
             <input
