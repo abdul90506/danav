@@ -123,6 +123,10 @@ Edits are exact-match with guidance when they miss (closest lines are shown), to
 - **Agent routes are not reachable from other websites:** `/api/agent/*` sends no CORS headers, requires a custom header, and only answers on `localhost` unless you list more hosts in `DANAV_ALLOWED_HOSTS`. If you expose Danav publicly, put it behind authentication first — whoever can reach it can run commands in your workspaces.
 - Runs are bounded (steps, time, per-command timeout), one run per workspace at a time, and **Stop** kills whatever is running — including child processes.
 
+### Serving the built app
+
+`npm run build` writes `dist/`, and `npm start` serves it from the same process as the API (port 3001). Responses are compressed, hashed assets are sent with a one-year immutable cache, and `index.html` is always revalidated — so a deploy is picked up on the next load instead of being masked by a cached page.
+
 ### Configuration
 
 | Variable | Default | |

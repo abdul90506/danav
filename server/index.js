@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import express from 'express';
+import compression from 'compression';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
@@ -51,6 +52,23 @@ app.use((req, res, next) => {
   if (process.env.DANAV_PREVIEW_TOKEN && normalizedPath.startsWith('/api/')) return next();
   return protectedRoute ? next() : openCors(req, res, next);
 });
+/**
+ * Compress responses — except streams.
+ *
+ * The built frontend is ~250 kB of JS and ~160 kB of markdown, and this server
+ * may well be the only thing in front of the browser (no nginx to gzip for it).
+ * Server-sent events must never be compressed or buffered: the reply has to
+ * arrive token by token, and a buffering compressor would hold it back.
+ */
+app.use(
+  compression({
+    filter: (req, res) => {
+      const type = String(res.getHeader('Content-Type') || '');
+      if (type === 'text/event-stream') return false;
+      return compression.filter(req, res);
+    },
+  })
+);
 app.use(express.json({ limit: '10mb' }));
 app.use((req, res, next) => {
   const normalizedPath = req.path.replace(/\/+$/, '').toLowerCase() || '/';
@@ -2743,7 +2761,26 @@ async function runSearchTool(tool, args) {
 
 // Serve static frontend files if built
 const distPath = path.join(__dirname, '../dist');
-app.use(express.static(distPath));
+app.use(
+  express.static(distPath, {
+    /**
+     * Vite writes content-hashed file names (index-CGbc8-Ks.js), so those can be
+     * cached for a year: a new build changes the name. `index.html` is the
+     * opposite — it is what points at the new names, so caching it would keep
+     * serving the previous release to a returning browser.
+     */
+    setHeaders(res, filePath) {
+      const name = path.basename(filePath);
+      if (name === 'index.html') {
+        res.setHeader('Cache-Control', 'no-cache');
+      } else if (/-[A-Za-z0-9_-]{8,}\./.test(name)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+      }
+    },
+  })
+);
 
 /**
  * Final safety net.
@@ -2785,6 +2822,7 @@ app.get('*', (req, res, next) => {
     return next();
   }
   const indexPath = path.join(distPath, 'index.html');
+  res.set('Cache-Control', 'no-cache');
   res.sendFile(indexPath, (err) => {
     if (err) {
       res.status(200).send('API Server running. Start Vite for frontend development.');
