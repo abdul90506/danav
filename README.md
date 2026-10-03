@@ -18,7 +18,7 @@ A modern, clean, professional AI chatbot application built with a flat 2D interf
   - **Code Blocks**: Dedicated language badge and isolated **Copy** button per code block.
   - **Message Actions**: One-click copy for user and assistant messages.
   - **Subtle Status Indicator**: Unobtrusive "Thinking..." or "Generating..." indicator without bulky cards or progress bars.
-  - **Retry Handling**: Inline retry button if an upstream provider error occurs.
+  - **Retry Handling**: A provider that is briefly unavailable — HTTP 429, 5xx, or a connection that dies before the first token — is retried twice with backoff (honouring `Retry-After`), so one rate-limit blip no longer ends a turn. The reply says it was retried. Anything still failing gets an inline **Retry** button in the message.
 - **Polished Input Area**:
   - Auto-growing multiline textarea.
   - `Enter` to send, `Shift + Enter` for new lines.

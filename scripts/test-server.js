@@ -432,6 +432,128 @@ await test('a conversation that outgrew the context window is trimmed and retrie
   }
 });
 
+await test('a rate-limited provider is retried instead of failing the turn', async () => {
+  // The first 429 of the minute used to end a chat with "Rate limit reached".
+  // Nothing had been streamed yet, so the request is safe to repeat.
+  let calls = 0;
+  const fake = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      calls += 1;
+      if (calls === 1) {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '0' });
+        res.end(JSON.stringify({ error: { message: 'rate limit exceeded' } }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'Second time lucky.' } }] }) + '\n\n');
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  const fakePort = fake.address().port;
+
+  try {
+    const started = Date.now();
+    const res = await fetch(`${BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: { id: 'provider-retry', baseUrl: `http://127.0.0.1:${fakePort}`, apiType: 'openai' },
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+    const elapsed = Date.now() - started;
+    assert.strictEqual(res.status, 200, 'the retry must reach the stream');
+    const stream = await res.text();
+    assert.match(stream, /Second time lucky\./);
+    assert.match(stream, /retried once/, 'the user should know the pause was a retry');
+    assert.strictEqual(calls, 2);
+    // Retry-After: 0 must be honoured — falling back to the 1s backoff would
+    // make this turn take a second longer than the provider asked for.
+    assert.ok(elapsed < 900, `expected the header to be honoured, took ${elapsed}ms`);
+  } finally {
+    fake.close();
+  }
+});
+
+await test('a provider 5xx is retried, but a 401 fails immediately', async () => {
+  let serverErrors = 0;
+  const flaky = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      serverErrors += 1;
+      if (serverErrors === 1) {
+        res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '0' });
+        res.end('{"error":{"message":"upstream unavailable"}}');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'Recovered from 503.' } }] }) + '\n\n');
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise((resolve) => flaky.listen(0, '127.0.0.1', resolve));
+
+  let authCalls = 0;
+  const strict = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      authCalls += 1;
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end('{"error":{"message":"invalid api key"}}');
+    });
+  });
+  await new Promise((resolve) => strict.listen(0, '127.0.0.1', resolve));
+
+  const chatTo = (port) =>
+    fetch(`${BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: { id: 'provider-flaky', baseUrl: `http://127.0.0.1:${port}`, apiType: 'openai' },
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+
+  try {
+    const recovered = await chatTo(flaky.address().port);
+    assert.strictEqual(recovered.status, 200);
+    assert.match(await recovered.text(), /Recovered from 503\./);
+    assert.strictEqual(serverErrors, 2, 'a 503 is worth one more try');
+
+    const rejected = await chatTo(strict.address().port);
+    assert.strictEqual(rejected.status, 401);
+    assert.match(JSON.parse(await rejected.text()).error, /Invalid API Key/);
+    assert.strictEqual(authCalls, 1, 'a bad key must not be retried');
+  } finally {
+    flaky.close();
+    strict.close();
+  }
+});
+
+await test('a fallback chat title stays sidebar-sized, whatever was pasted', async () => {
+  // Unreachable provider -> the route answers with its local fallback title.
+  const blob = 'x'.repeat(20000);
+  const { status, json } = await api('POST', '/api/chat/title', {
+    provider: { baseUrl: 'http://127.0.0.1:9/v1' },
+    message: blob,
+  });
+  assert.strictEqual(status, 200);
+  assert.ok(json.title.length <= 40, `title must be short, got ${json.title.length} chars`);
+
+  const normal = await api('POST', '/api/chat/title', {
+    provider: { baseUrl: 'http://127.0.0.1:9/v1' },
+    message: '  "how do i deploy a vite app"  ',
+  });
+  assert.strictEqual(normal.status, 200);
+  assert.match(normal.json.title, /^How Do I Deploy$/);
+});
+
 await test('unknown search tool and empty chat payloads get clear 4xx answers', async () => {
   const unknownTool = await api('POST', '/api/search', { tool: 'nope', args: {} });
   assert.strictEqual(unknownTool.status, 400);

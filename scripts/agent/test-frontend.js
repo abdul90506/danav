@@ -69,6 +69,28 @@ const fmt = await load('src/agent/format.ts');
 const icons = await load('src/agent/fileIcons.ts');
 const accordion = await load('src/components/thinkingAccordion.ts');
 const content = await load('src/utils/messageContent.ts');
+const api = await load('src/services/api.ts');
+
+// ---------------------------------------------------------------------------
+console.log('\nChat titles');
+// ---------------------------------------------------------------------------
+
+test('a title from the model is trimmed to something the sidebar can show', () => {
+  assert.equal(api.sanitizeChatTitle('Deploying A Vite App'), 'Deploying A Vite App');
+  assert.equal(api.sanitizeChatTitle('  "Quoted Title"  '), 'Quoted Title');
+  assert.equal(api.sanitizeChatTitle('Two\nlines\there'), 'Two lines here');
+  const long = api.sanitizeChatTitle('x'.repeat(400));
+  assert.ok(long.length <= 61, `got ${long.length} chars`);
+  assert.ok(long.endsWith('…'));
+});
+
+test('an unusable title is empty, so the local one is kept', () => {
+  assert.equal(api.sanitizeChatTitle(''), '');
+  assert.equal(api.sanitizeChatTitle('   \n  '), '');
+  assert.equal(api.sanitizeChatTitle(null), '');
+  assert.equal(api.sanitizeChatTitle({ title: 'nope' }), '');
+  assert.equal(api.sanitizeChatTitle(42), '');
+});
 
 // ---------------------------------------------------------------------------
 console.log('\nMessage content (text vs images)');

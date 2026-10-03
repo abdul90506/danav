@@ -810,7 +810,12 @@ app.post('/api/chat/title', async (req, res) => {
     const capitalized = words
       .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
       .join(' ');
-    return capitalized || 'New Chat';
+    // Four "words" is not four words when the prompt is a pasted log line, a URL
+    // or a base64 blob: that is ONE word, and it used to come back as a title
+    // thousands of characters long. The client caps its own titles at 32 chars —
+    // match it, so a fallback title always fits the sidebar.
+    const trimmedTitle = capitalized.length > 32 ? `${capitalized.slice(0, 32).trim()}...` : capitalized;
+    return trimmedTitle || 'New Chat';
   }
 
   try {
@@ -1420,6 +1425,62 @@ const isContextLimitError = (text) =>
   );
 
 /**
+ * Providers are not always available.
+ *
+ * A free tier rate-limits, a gateway hiccups, a connection dies before any
+ * bytes arrive. Until the first token reaches the browser a request is safe to
+ * repeat, so 429/5xx answers and connection failures are retried with backoff —
+ * honouring `Retry-After` when the provider sends one. Without this, the first
+ * 429 of the minute ended a chat with "Rate limit reached" and nothing else.
+ *
+ * The wait is capped: the user is watching a spinner, so a provider that asks
+ * for a minute is reported as a rate limit instead of being waited out.
+ */
+const RETRYABLE_UPSTREAM_STATUS = new Set([429, 500, 502, 503, 504]);
+const UPSTREAM_RETRIES = 2;
+const MAX_RETRY_WAIT_MS = 8000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function retryWaitMs(response, attempt) {
+  const header = response?.headers?.get?.('retry-after');
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, MAX_RETRY_WAIT_MS);
+    const when = Date.parse(header);
+    if (!Number.isNaN(when)) return Math.min(Math.max(when - Date.now(), 0), MAX_RETRY_WAIT_MS);
+  }
+  return Math.min(1000 * 2 ** attempt, MAX_RETRY_WAIT_MS);
+}
+
+async function callProviderWithRetry(call, { onRetry, isCancelled } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    let response;
+    try {
+      response = await call();
+    } catch (err) {
+      // A disconnected client is not a provider problem: let it through.
+      if (attempt >= UPSTREAM_RETRIES || isCancelled?.()) throw err;
+      await onRetry?.(attempt, null, err);
+      await sleep(retryWaitMs(null, attempt));
+      continue;
+    }
+    if (response.ok || attempt >= UPSTREAM_RETRIES || !RETRYABLE_UPSTREAM_STATUS.has(response.status)) {
+      return response;
+    }
+    // Drain the failed response so the socket can be reused, then try again.
+    const waitMs = retryWaitMs(response, attempt);
+    try {
+      await response.body?.cancel?.();
+    } catch {
+      /* the body was already unusable */
+    }
+    await onRetry?.(attempt, response);
+    await sleep(waitMs);
+  }
+}
+
+/**
  * Drop the oldest exchanges, keeping whole user turns.
  *
  * Trimming must land on a user-message boundary: keeping an assistant tool-call
@@ -1566,6 +1627,9 @@ app.post('/api/chat', async (req, res) => {
         controller.abort();
       }
     });
+    // How many times a provider failure (429/5xx, or a dead connection) was
+    // retried before this turn got its answer.
+    let upstreamRetries = 0;
 
     const callProvider = (withTools, withThinking, messageList) => {
       const body = buildRequestBody(withTools, withThinking);
@@ -1815,7 +1879,16 @@ app.post('/api/chat', async (req, res) => {
       for (let i = 0; i < ladder.length; i++) {
         const step = ladder[i];
         failedStep = step;
-        upstreamResponse = await callProvider(step.tools, step.thinking);
+        upstreamResponse = await callProviderWithRetry(() => callProvider(step.tools, step.thinking), {
+          isCancelled: () => controller.signal.aborted,
+          onRetry: (attempt, response) => {
+            upstreamRetries += 1;
+            console.log(
+              `Provider ${response ? `answered HTTP ${response.status}` : 'did not answer'} on ${model}; ` +
+                `retrying in ${Math.round(retryWaitMs(response, attempt) / 1000)}s (attempt ${attempt + 2}).`
+            );
+          },
+        });
         if (upstreamResponse.ok) {
           toolsActive = step.tools;
           thinkingActive = step.thinking;
@@ -1902,6 +1975,15 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const startupNotices = [];
+    // A turn that only answered because it was retried is worth saying out loud:
+    // otherwise a slow first token looks like the app hanging.
+    if (upstreamRetries > 0) {
+      startupNotices.push(
+        upstreamRetries === 1
+          ? 'The provider was temporarily unavailable, so the request was retried once.'
+          : `The provider was temporarily unavailable, so the request was retried ${upstreamRetries} times.`
+      );
+    }
     if (contextTrimmed) {
       startupNotices.push(
         "This conversation is longer than the model's context window, so the oldest messages were left out of this request — they are still in the chat."
@@ -1925,7 +2007,10 @@ app.post('/api/chat', async (req, res) => {
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (round > 0) {
-        upstream = await callProvider(toolsActive, thinkingActive);
+        upstream = await callProviderWithRetry(() => callProvider(toolsActive, thinkingActive), {
+          isCancelled: () => controller.signal.aborted,
+          onRetry: () => writeEvent({ status: 'The provider is busy — retrying…' }),
+        });
         if (!upstream.ok) {
           const body = await upstream.text().catch(() => '');
           writeEvent({
@@ -1997,7 +2082,10 @@ app.post('/api/chat', async (req, res) => {
         });
       }
 
-      const finalRes = await callProvider(false, thinkingActive, flat);
+      const finalRes = await callProviderWithRetry(() => callProvider(false, thinkingActive, flat), {
+        isCancelled: () => controller.signal.aborted,
+        onRetry: () => writeEvent({ status: 'The provider is busy — retrying…' }),
+      });
       if (!finalRes.ok) {
         const body = await finalRes.text().catch(() => '');
         writeEvent({

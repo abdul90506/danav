@@ -327,6 +327,21 @@ export async function saveBackendSettings(settings: {
   }
 }
 
+/**
+ * A title the sidebar can actually show.
+ *
+ * The model is asked for 2-4 words, and mostly complies — but a fallback title,
+ * a chatty model or a mangled response must never arrive as a paragraph, and
+ * never with newlines in it. Anything unusable returns '' so the locally
+ * generated title is kept.
+ */
+export function sanitizeChatTitle(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const title = raw.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+  if (!title) return '';
+  return title.length > 60 ? `${title.slice(0, 60).trim()}…` : title;
+}
+
 export async function generateAIChatTitle({
   provider,
   model,
@@ -352,7 +367,8 @@ export async function generateAIChatTitle({
     });
     if (res.ok) {
       const data = await res.json();
-      if (data.title) return data.title;
+      const title = sanitizeChatTitle(data.title);
+      if (title) return title;
     }
   } catch (err) {
     console.error('Failed calling /api/chat/title:', err);
