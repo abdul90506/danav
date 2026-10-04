@@ -25,6 +25,8 @@ import {
 } from './codeindex.js';
 import { WorkspaceError } from './workspaces/base.js';
 import { formatBytes, truncateMiddle } from './util.js';
+import { formatBlameBlock, forgetRepo, gitBlame, gitDiff, gitLog, gitShow, readRepoState } from './githistory.js';
+import { detectChecks } from './verify.js';
 
 class ToolError extends Error {}
 
@@ -85,6 +87,58 @@ const clampInt = (v, min, max, fallback) => {
 };
 
 const asBool = (v) => v === true || v === 'true' || v === 1;
+
+/**
+ * Cheapest-check-first. A type error should cost three seconds, not a three-minute
+ * test suite: the fix loop wants the smallest failure that is still real.
+ */
+const CHECK_RANK = [
+  /(^|\s)(npx\s+)?tsc(\s|$)|typecheck|type-check|check-types|mypy|pyright|vue-tsc/i,
+  /eslint|ruff|flake8|pylint|lint/i,
+  /(^|\s)(vitest|jest|mocha|pytest|node\s+--test)|(npm|pnpm|yarn|bun)\s+(run\s+)?test|go\s+test|cargo\s+test|rspec|php\s+artisan\s+test|composer\s+test/i,
+  /build|compile|package/i,
+];
+function rankChecks(commands) {
+  const rank = (c) => {
+    const i = CHECK_RANK.findIndex((re) => re.test(c));
+    return i === -1 ? CHECK_RANK.length : i;
+  };
+  return [...commands].sort((a, b) => rank(a) - rank(b));
+}
+
+/** Strip ANSI, tabs; one line, bounded. */
+const plainLine = (line) => String(line).replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '');
+
+/**
+ * The lines worth showing from a failed check.
+ *
+ * Test and compiler output is mostly progress noise; the useful part is a few
+ * hundred characters of error. This picks the lines that look like errors (with a
+ * little context) and falls back to the tail when nothing matches — so the model
+ * reads the failure, not the suite's dot-progress.
+ */
+export function pickFailureLines(text, max = 45) {
+  const all = String(text || '').split('\n').map(plainLine).filter((l) => l.trim());
+  const hits = [];
+  const pattern = /(error|✗|✘|✖|FAIL|failed|failure|AssertionError|expected|received|throws|panic:|Traceback|not ok|exception|undefined is not|cannot find|TS\d{3,5})/i;
+  all.forEach((line, i) => {
+    if (!pattern.test(line)) return;
+    if (hits.length && i - hits[hits.length - 1] > 6) hits.push('  …');
+    hits.push(line.length > 220 ? `${line.slice(0, 219)}…` : line);
+  });
+  const picked = hits.length >= 2 ? hits : all.slice(-25);
+  return picked.slice(0, max).join('\n');
+}
+
+/** The last line that reads like a result ("Tests 42 passed", "0 problems"). */
+export function checkSummaryLine(text) {
+  const lines = String(text || '').split('\n').map(plainLine).filter((l) => l.trim());
+  const wanted = /(passed|failing|failed|ok\b|problems?|errors?|tests?|suites?|skipped|success|clean)/i;
+  for (let i = lines.length - 1; i >= 0 && i > lines.length - 8; i--) {
+    if (wanted.test(lines[i]) && lines[i].length < 160) return lines[i].trim();
+  }
+  return '';
+}
 
 /** A simple glob (test files, docs, a folder tree) as a regular expression. */
 function globToRe(glob) {
@@ -474,6 +528,27 @@ export const TOOL_DEFINITIONS = [
     ['query']
   ),
   fn(
+    'repo_status',
+    'Where this repository stands: branch, last commit, uncommitted changes (what you or the user already touched), and the most recent commits. One cheap call at the start of work in an unfamiliar repo — the prompt already carries a summary of this, so call it only when you need the detail.',
+    {},
+    []
+  ),
+  fn(
+    'repo_history',
+    'The project\'s own history, read-only. Three views: view="log" (with path) lists the commits that touched a file or folder — "when and why did this change?"; view="blame" (with path + symbol, or path + line_start/end) groups who last changed those lines and in which commit — "why is this code like this?"; view="diff" shows the uncommitted changes in the working tree, including your own edits so far (+added/−removed per file, then the hunks) — use it to review what you just did before you finish, or to see what the user had already changed. Nothing here can modify the repository.',
+    {
+      view: { type: 'string', enum: ['log', 'blame', 'diff'], description: 'log | blame | diff. Default log.' },
+      path: { type: 'string', description: 'Limit to one file or folder (relative path). Optional for log and diff; required for blame.' },
+      symbol: { type: 'string', description: 'blame only: the function/class/rule to attribute, instead of line numbers.' },
+      line_start: { type: 'integer', description: 'blame only: first line of the range.' },
+      line_end: { type: 'integer', description: 'blame only: last line of the range.' },
+      limit: { type: 'integer', description: 'log only: how many commits, default 12, max 80.' },
+      rev: { type: 'string', description: 'diff only: compare against this revision instead of HEAD (e.g. "HEAD~1", a commit sha, a branch).' },
+      staged: { type: 'boolean', description: 'diff only: show the staged changes (git diff --cached) instead of the working tree.' },
+    },
+    []
+  ),
+  fn(
     'replace_in_files',
     'Find-and-replace across MANY files in one call (rename a function, class, CSS colour or import path everywhere). `pattern` is literal text unless regex=true (then `replacement` may use $1, $2…). Skips node_modules, .git, build output and binary files. Use dry_run=true to see which files would change, and how many replacements, without writing anything.',
     {
@@ -497,6 +572,15 @@ export const TOOL_DEFINITIONS = [
       background: { type: 'boolean', description: 'Start it detached and return at once (servers, watchers).' },
     },
     ['command']
+  ),
+  fn(
+    'run_checks',
+    'Run this project\'s own checks — the ones listed under "How this project checks itself" (package.json scripts, tsconfig, Makefile, pytest, cargo, go). Use it instead of guessing the command: it picks the fastest meaningful checks, runs them in order, stops at the first real failure, and reports the exact error lines, not a wall of output. It also records the result, so the run can honestly say what was verified. `only` runs a subset (only: "tsc", only: "test"). Green checks come back in one line each; a failure comes back with its errors and the fix loop continues from there.',
+    {
+      only: { type: 'string', description: 'Substring of the command to run, e.g. "tsc" or "test". Default: all detected checks, fastest first.' },
+      timeout_seconds: { type: 'integer', description: 'Per check. Default 240, max 900.' },
+    },
+    []
   ),
   fn(
     'list_processes',
@@ -687,6 +771,9 @@ function editDistance(a, b) {
 export const READ_ONLY_TOOLS = new Set([
   'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'code_map', 'find_symbol', 'relevant_files',
   'list_processes', 'read_process_output', 'web_search', 'fetch_url', 'search_memory', 'image_search', 'delegate_task',
+  // Reading history changes nothing on disk; these belong with the reads so a
+  // model can look up a file's past in the same turn as its present.
+  'repo_status', 'repo_history',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -721,6 +808,9 @@ export function displayArgs(name, rawArgs) {
     case 'find_symbol': pick.pattern = s('name'); pick.path = s('path'); break;
     case 'relevant_files': pick.pattern = s('query'); break;
     case 'run_command': pick.command = s('command', 600); pick.cwd = s('cwd'); pick.background = asBool(a.background) || undefined; break;
+    case 'run_checks': pick.command = s('only', 120) ? `${s('only', 120)} (project checks)` : 'project checks'; break;
+    case 'repo_status': break;
+    case 'repo_history': pick.view = s('view'); pick.path = s('path'); pick.symbol = s('symbol'); break;
     case 'read_process_output':
     case 'stop_process': pick.id = s('id'); break;
     case 'get_preview_url': pick.port = a.port; break;
@@ -1812,6 +1902,247 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       };
     },
 
+    // --------------------------------------------------------------- history
+    async repo_status() {
+      const state = await readRepoState(ws);
+      if (!state) {
+        return {
+          output: 'This workspace is not a git repository, so there is no history to read. Nothing is wrong with that — work normally.',
+          ui: { kind: 'history', view: 'status', repo: false },
+        };
+      }
+      const lines = [];
+      lines.push(
+        `${state.root}${state.branch ? ` — branch ${state.branch}` : ''}${state.empty ? ' — no commits yet' : ` — HEAD ${state.head.sha} "${clip(state.head.subject, 80)}"`}`
+      );
+      if (state.clean) {
+        lines.push('Working tree: clean (nothing uncommitted).');
+      } else {
+        const bits = [];
+        if (state.dirty.modified) bits.push(`${state.dirty.modified} modified`);
+        if (state.dirty.staged) bits.push(`${state.dirty.staged} staged`);
+        if (state.dirty.untracked) bits.push(`${state.dirty.untracked} untracked`);
+        lines.push(`Working tree: ${bits.join(', ') || `${state.dirty.files.length} changed`}${state.dirty.upstream ? ` — vs ${state.dirty.upstream}${state.dirty.ahead ? `, ${state.dirty.ahead} ahead` : ''}${state.dirty.behind ? `, ${state.dirty.behind} behind` : ''}` : ''}`);
+        lines.push(...state.dirty.files.slice(0, 25).map((f) => `  ${f.code} ${f.path}`));
+        if (state.dirty.files.length > 25) lines.push(`  … and ${state.dirty.files.length - 25} more`);
+      }
+      if (state.recent.length) {
+        lines.push(`Recent commits (newest first):`);
+        lines.push(...state.recent.map((c) => `  ${c.sha} ${c.date} ${c.author} — ${clip(c.subject, 90)}`));
+      }
+      lines.push('Deeper: repo_history view="log" path=… for one file\'s past, view="blame" for who changed a symbol, view="diff" to see (or review) the uncommitted changes.');
+      return { output: lines.join('\n'), ui: { kind: 'history', view: 'status', repo: true, dirty: state.dirty.files.length, branch: state.branch } };
+    },
+
+    async repo_history(args) {
+      const view = (optStr(args, 'view') || 'log').toLowerCase();
+      const state = await readRepoState(ws, { recent: 0 });
+      if (!state) {
+        return { output: 'This workspace is not a git repository, so there is no history to read.', ui: { kind: 'history', view, repo: false } };
+      }
+      // git wants paths relative to the REPOSITORY root, which is not always the
+      // workspace root (a workspace can be a subfolder of a checkout).
+      const relToRepo = (abs) => {
+        const p = path.relative(state.root, abs).split(path.sep).join('/');
+        return p || '.';
+      };
+      const pathArg = optStr(args, 'path');
+      const abs = pathArg ? await target(pathArg) : null;
+
+      if (view === 'log') {
+        const limit = clampInt(args.limit, 1, 80, 12);
+        const res = await gitLog(ws, { path: abs ? relToRepo(abs) : undefined, limit });
+        if (!res.ok) throw new ToolError(`Could not read the history: ${res.reason}`);
+        const where = pathArg ? ` in ${pathArg}` : '';
+        if (!res.entries.length) {
+          return { output: `No commits touch ${pathArg || 'this repository'} yet${state.empty ? ' (the repository has no commits)' : ''}.`, ui: { kind: 'history', view: 'log', path: pathArg } };
+        }
+        return {
+          output:
+            `Commits touching ${pathArg || 'the repository'} (newest first, ${res.entries.length}${res.entries.length === limit ? '+' : ''}):\n` +
+            res.entries.map((e) => `  ${e.sha} ${e.date} ${e.author} — ${clip(e.subject, 95)}`).join('\n') +
+            `\nTo see one commit in detail: run_command "git show ${res.entries[0].sha}".`,
+          ui: { kind: 'history', view: 'log', path: pathArg, count: res.entries.length },
+        };
+      }
+
+      if (view === 'blame') {
+        if (!abs) throw new ToolError('view="blame" needs a path (and a symbol, or line_start/line_end).');
+        let start = clampInt(args.line_start, 1, 10_000_000, NaN);
+        let end = clampInt(args.line_end, 1, 10_000_000, NaN);
+        const symbol = optStr(args, 'symbol');
+        if (!Number.isFinite(start) && symbol) {
+          let text;
+          try {
+            text = await ws.readText(abs);
+          } catch {
+            throw new ToolError(`No such file: "${pathArg}".`);
+          }
+          if (text.binary) throw new ToolError(`${pathArg} is binary — nothing to blame.`);
+          const found = locateSymbol(text.text, rel(abs), symbol);
+          if (!found.found) {
+            throw new ToolError(`No definition of "${symbol}" in ${pathArg}.${found.candidates?.length ? ` Definitions there: ${found.candidates.join(', ')}.` : ' Run file_outline to see what is in it.'}`);
+          }
+          start = found.found.line;
+          end = found.found.endLine || found.found.line;
+        }
+        if (!Number.isFinite(start)) throw new ToolError('Give blame a symbol, or line_start and line_end.');
+        const res = await gitBlame(ws, { path: relToRepo(abs), start, end: Number.isFinite(end) ? end : start });
+        if (!res.ok) {
+          throw new ToolError(
+            res.reason === 'bad-range'
+              ? `git could not blame those lines of ${pathArg}${res.detail ? `: ${res.detail}` : ''}. Check the range with file_outline.`
+              : `Could not read the history: ${res.reason}`
+          );
+        }
+        const grouped = res.blocks
+          .slice(0, 14)
+          .map((b) => `  ${formatBlameBlock(b)}${b.sample?.length ? `\n      ${clip(b.sample[0], 110)}` : ''}`);
+        return {
+          output:
+            `Who last changed ${pathArg} lines ${start}-${Number.isFinite(end) ? end : start}${symbol ? ` (\`${symbol}\`)` : ''}:\n` +
+            (grouped.length ? grouped.join('\n') : '  (nothing to blame in that range)') +
+            (res.blocks.length > 14 ? `\n  … and ${res.blocks.length - 14} more blocks` : '') +
+            `\nFull commit: run_command "git show <sha>".`,
+          ui: { kind: 'history', view: 'blame', path: pathArg, symbol, blocks: res.blocks.length },
+        };
+      }
+
+      if (view === 'diff') {
+        const rev = optStr(args, 'rev') || 'HEAD';
+        const staged = asBool(args.staged);
+        const res = await gitDiff(ws, { path: abs ? relToRepo(abs) : undefined, rev, staged });
+        if (!res.ok) throw new ToolError(`Could not read the diff: ${res.reason}`);
+        if (res.empty) {
+          return {
+            output: staged ? 'Nothing staged right now.' : `Nothing uncommitted vs ${rev} in ${pathArg || 'the workspace'}.`,
+            ui: { kind: 'history', view: 'diff', path: pathArg, files: 0 },
+          };
+        }
+        const summary = res.files.map((f) => `  ${f.file} — ${f.binary ? 'binary' : `+${f.added ?? 0} −${f.removed ?? 0}`}`).join('\n');
+        const parts = [
+          `${staged ? 'Staged changes' : `Uncommitted changes vs ${rev}`}${pathArg ? ` in ${pathArg}` : ''}: ${res.files.length} file${res.files.length === 1 ? '' : 's'}, +${res.files.reduce((n, f) => n + (f.added || 0), 0)} −${res.files.reduce((n, f) => n + (f.removed || 0), 0)}`,
+          summary,
+        ];
+        if (res.untracked?.length && !abs) {
+          parts.push(`Untracked (not in the diff): ${res.untracked.slice(0, 10).join(', ')}${res.untracked.length > 10 ? ` … ${res.untracked.length - 10} more` : ''}`);
+        }
+        if (res.text) parts.push('', res.text.trimEnd());
+        else if (res.truncated) parts.push('', `The diff is large (${res.totalLines} changed lines) — ask for one path to read it in full.`);
+        return { output: parts.join('\n'), ui: { kind: 'history', view: 'diff', path: pathArg, files: res.files.length, added: res.files.reduce((n, f) => n + (f.added || 0), 0), removed: res.files.reduce((n, f) => n + (f.removed || 0), 0) } };
+      }
+
+      throw new ToolError(`view must be "log", "blame" or "diff" (got "${view}").`);
+    },
+
+    // --------------------------------------------------------------- checks
+    /**
+     * The project's own checks, in one call.
+     *
+     * Everything here exists to remove friction from the step that agents skip:
+     * knowing WHICH command to run (codebase detection, not a guess), getting the
+     * smallest failure first (ranked cheapest-first, stop at the first failure),
+     * and reading the failure (error lines extracted, not the whole transcript).
+     * The journal records what ran, so "verified" in a summary is a fact and not a
+     * claim.
+     */
+    async run_checks(args, ctx) {
+      const only = optStr(args, 'only');
+      const timeoutMs = clampInt(args.timeout_seconds, 5, 900, 240) * 1000;
+      const detected = await detectChecks(ws).catch(() => null);
+      const available = detected?.commands || [];
+      if (!available.length) {
+        return {
+          output:
+            'This workspace declares no checks of its own (no package.json scripts, tsconfig type-check, Makefile target, pytest, cargo or go module found). ' +
+            'So write the check you can actually run — the smallest test that proves the change, or the app started with its output read — and run that instead.',
+          ui: { kind: 'check', commands: 0 },
+        };
+      }
+      let commands = available;
+      if (only) {
+        const needle = only.toLowerCase();
+        const matched = available.filter((c) => c.toLowerCase().includes(needle));
+        if (!matched.length) {
+          throw new ToolError(`No detected check matches "${only}". This project's checks: ${available.join(' · ')}.`);
+        }
+        commands = matched;
+      }
+      commands = rankChecks(commands).slice(0, 4);
+
+      if (!ws.autoRun) {
+        const allowed = await ctx.approve({ tool: 'run_checks', command: commands.join(' && ') });
+        if (!allowed) {
+          return {
+            ok: false,
+            denied: true,
+            output: 'The user did not allow these checks to run. Do not retry them; say in your summary that the checks were not run.',
+            ui: { kind: 'check', command: commands.join(' && '), denied: true },
+          };
+        }
+      }
+
+      const seconds = (ms) => `${Math.max(0, Math.round((ms || 0) / 100) / 10)}s`;
+      const runs = [];
+      let failed = null;
+      for (const command of commands) {
+        const r = await ws.exec(command, { cwd: ws.root, timeoutMs });
+        const output = safe(String(r.output ?? ''));
+        const ok = r.exitCode === 0 && !r.timedOut && !r.aborted;
+        const run = { command, ok, exitCode: r.exitCode, durationMs: r.durationMs, timedOut: Boolean(r.timedOut), aborted: Boolean(r.aborted), output };
+        runs.push(run);
+        // Live progress in the row: each check reports the moment it finishes, so a
+        // two-check run is readable while it is still going.
+        ctx.emit?.({ outputAppend: `${run.ok ? '✓' : '✗'} ${command} — ${run.ok ? 'passed' : `failed (exit ${run.exitCode})`} (${seconds(run.durationMs)})\n` });
+        if (!ok) {
+          failed = run;
+          break; // the first real failure is the one to fix; the rest would only pile up
+        }
+      }
+
+      const lines = runs
+        .filter((r) => r.ok)
+        .map((r) => {
+          const note = checkSummaryLine(r.output);
+          return `✓ ${r.command} — passed (${seconds(r.durationMs)}${note ? `: ${clip(note, 120)}` : ''})`;
+        });
+      if (failed) {
+        lines.push(
+          failed.aborted
+            ? `✗ ${failed.command} — stopped by the user`
+            : failed.timedOut
+              ? `✗ ${failed.command} — timed out after ${timeoutMs / 1000}s (if this check really needs longer, raise timeout_seconds)`
+              : `✗ ${failed.command} — failed (exit ${failed.exitCode}, ${seconds(failed.durationMs)})`
+        );
+        lines.push('');
+        lines.push(pickFailureLines(failed.output, 45) || '(no output)');
+        if (runs.length < commands.length) {
+          lines.push('');
+          lines.push(`The remaining check${commands.length - runs.length === 1 ? '' : 's'} (${commands.slice(runs.length).join(', ')}) did not run — fix this failure first, then call run_checks again.`);
+        }
+      } else {
+        lines.push(`All ${runs.length} check${runs.length === 1 ? '' : 's'} passed.`);
+      }
+
+      const last = runs[runs.length - 1];
+      return {
+        ok: !failed,
+        failedSoft: Boolean(failed), // a failing check is information, not a tool failure
+        output: lines.join('\n'),
+        runs: runs.map((r) => ({ name: r.command, passed: r.ok, exitCode: r.exitCode, ...(r.timedOut ? { timedOut: true } : {}) })),
+        ui: {
+          kind: 'command',
+          command: clip(commands.join(' && '), 600),
+          exitCode: last.exitCode,
+          durationMs: runs.reduce((n, r) => n + (r.durationMs || 0), 0),
+          timedOut: Boolean(failed?.timedOut),
+          checks: runs.length,
+          passed: !failed,
+        },
+        uiOutput: truncateMiddle(String(failed?.output || runs.map((r) => r.output).join('\n')).trimEnd(), 4000, 'output'),
+      };
+    },
+
     // --------------------------------------------------------------- commands
     async run_command(args, ctx) {
       /**
@@ -1822,6 +2153,11 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
        */
       if (/\b(rm|mv|cp|mkdir|touch|git|npm|yarn|pnpm|npx|pip|make|cargo|sed|tee)\b/.test(String(args.command || ''))) {
         try { markIndexStale(ws.id); } catch { /* the cache is best effort */ }
+        // `git init` / `git clone` create a repository where there was none: the
+        // cached "not a repo" answer must not outlive the command that changed it.
+        if (/\bgit\s+(init|clone|worktree)\b/.test(String(args.command || ''))) {
+          try { forgetRepo(ws); } catch { /* best effort */ }
+        }
       }
       const command = reqStr(args, 'command').trim();
       const background = asBool(args.background);

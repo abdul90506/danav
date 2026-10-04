@@ -110,7 +110,7 @@ Providers differ in how the body arrives. Those that stream tool calls (OpenAI, 
 
 ### Tools
 
-`list_dir` · `file_outline` · `read_file` (line ranges, several in one call) · `write_file` · `append_file` · `edit_file` · `multi_edit` (several edits, in one file or across many, atomically) · `grep_search` · `file_search` · `replace_in_files` · `run_command` (foreground, or `background` for servers) · `list_processes` · `read_process_output` · `stop_process` · `get_preview_url` · `web_search` · `fetch_url` · `image_search` · `search_memory` · `remember` / `forget` · `update_plan`
+`list_dir` · `file_outline` · `read_file` (line ranges, several in one call) · `write_file` · `append_file` · `edit_file` · `multi_edit` (several edits, in one file or across many, atomically) · `grep_search` · `file_search` · `replace_in_files` · `run_command` (foreground, or `background` for servers) · `run_checks` · `repo_status` · `repo_history` · `list_processes` · `read_process_output` · `stop_process` · `get_preview_url` · `web_search` · `fetch_url` · `image_search` · `search_memory` · `remember` / `forget` · `update_plan`
 
 Housekeeping is not a tool of its own. `write_file` creates every missing parent on its way to the file; folders, moves, copies and removals are `run_command` (`mkdir -p`, `mv`, `cp`, `rm -rf`, or the platform equivalent). A model that still calls an old name such as `create_dir`, `move_file` or `delete_file` is told exactly what to do instead, in one line, rather than left to guess — and the look-before-you-leap rule those tools carried now guards the shell commands: a removal or a move whose targets were never inspected in the run is refused, moving onto a file the agent has never opened is refused, and a command that would take the workspace itself with it always is. What the shell does is fed back into the run's ledger, so a file moved with `mv` is still a file the run knows. The rule is enforced without getting in the way: when a command would remove or replace something the run has not looked at yet, the run looks at it there and then — the folder is listed, the file is read, bounded — and the tool result says in one line what was found, so the model still learns what it is about to touch. Only what cannot be looked at that way (a file over 2 MB, a listing that comes back incomplete) is refused, with the reason; removing or moving the workspace itself is refused, always.
 
@@ -207,6 +207,40 @@ implementation they test in a ranked search or in the project map.
 - **Hover is not the only way in.** Copy, Regenerate, a workspace's remove button and a movie's play overlay used to appear only when the pointer was over them, which left them invisible on a phone; where the device cannot hover, they stay on screen. Text makes do with four sizes (10 / 11 / 12 / 13px) instead of a dozen half-pixel steps, and the distance between two turns is set in one place rather than added up from two.
 - **Memory is ranked, not matched literally.** Notes are scored by how rare each word is among your notes, by curated tags, recency and category, and looked up against both the request and the files the workspace was last working on.
 - **Six calls deep with no plan** earns one reminder to call `update_plan` — the checklist is rendered in the chat and carried into the next run.
+
+### The project's history, read-only
+
+An agent that cannot see why code is the way it is writes changes that undo someone's
+reasoning. Workspaces that are git repositories now arrive with their state already in the
+prompt — branch, HEAD, what is uncommitted, the last few commits — and three questions are
+one call away: `repo_history view="log"` (the commits that touched a file, which is where
+the *why* usually lives), `view="blame"` (a symbol or line range, grouped into the commits
+that touched stretches of it — line-by-line blame is unreadable and costs context), and
+`view="diff"` (the uncommitted changes, its own edits included, which is how the agent
+reviews what it just did before it tells you it is finished). `repo_status` is the same
+state in more detail.
+
+Read-only is the point, not a limitation: nothing here can commit, reset, checkout or push.
+An agent that can rewrite the history it is asked to explain is worth less than one that
+cannot — commit and push stay the user's decision. A workspace that is not a repository says
+so in one line and everything else works unchanged.
+
+### Verification is a call, not a claim
+
+Every workspace that declares its own checks — package.json scripts, a tsconfig, a Makefile,
+pytest, cargo, go — has them listed in the prompt, and `run_checks` runs them in one call:
+cheapest and fastest first (a type error should cost three seconds, not a three-minute suite),
+stopping at the first real failure, and returning the error lines rather than the transcript.
+A failing check comes back as information — its errors, and the checks that did not run — so
+the fix loop continues from there; passing checks come back one line each with their own
+summary ("Tests 42 passed").
+
+Then the loop holds the model to it. If a run is about to finish having changed files and
+having run none of the project's checks, the model is handed the exact commands once — in
+the transcript only, so the chat shows nothing new — and told to run them or to say plainly
+in one line which check it could not run and why. One ask, only while there is real budget to
+act on it, and the journal records what actually ran, so "verified" in a summary is a fact
+the next run can see rather than a claim.
 
 ### Safety model
 

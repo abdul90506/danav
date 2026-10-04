@@ -159,6 +159,15 @@ export interface AgentActionResult {
   definitions?: number;
   references?: number;
   symbols?: number;
+  /** Repository history answers (repo_status / repo_history). */
+  repo?: boolean;
+  branch?: string;
+  dirty?: number;
+  view?: string;
+  blocks?: number;
+  /** The project's own checks, run as one call (run_checks). */
+  checks?: number;
+  passed?: boolean;
   command?: string;
   exitCode?: number | null;
   durationMs?: number;

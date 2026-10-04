@@ -232,6 +232,22 @@ export const scenarios = {
       : { text: 'Done.' },
 
   /** Runs a recognizable verification command for the private run-journal tests. */
+  /**
+   * Changes code and then tries to finish without checking anything. The loop is
+   * expected to hand it the project's own checks ONCE, in the transcript only; the
+   * scenario answers that by running them and then closing. A second ask would mean
+   * the gate is repeating itself.
+   */
+  verify: ({ roundIdx, messages }) => {
+    const asked = messages.some((m) => m.role === 'user' && String(m.content).includes('ran none of the project'));
+    const alreadyRan = messages.some(
+      (m) => m.role === 'assistant' && (m.tool_calls || []).some((c) => c.function?.name === 'run_checks')
+    );
+    if (asked && !alreadyRan) return { toolCalls: [{ name: 'run_checks', args: {} }] };
+    if (roundIdx === 0) return { text: 'Adding the value helper.', toolCalls: [{ name: 'write_file', args: { path: 'src/verify-me.ts', content: 'export const value = 1;\n' } }] };
+    return { text: 'That is the change done.' };
+  },
+
   check: ({ roundIdx }) => roundIdx === 0
     ? { text: 'Running the focused test suite now.', toolCalls: [{ name: 'run_command', args: { command: 'npm run test:agent' } }] }
     : { text: 'The focused test command completed.' },
@@ -441,6 +457,7 @@ const byModel = {
   'fake-truncate': scenarios.truncate,
   'fake-parallel': scenarios.parallel,
   'fake-check': scenarios.check,
+  'fake-verify': scenarios.verify,
   'fake-delegate': scenarios.delegate,
   'fake-gate': scenarios.gate,
   'fake-drop': scenarios.drop,

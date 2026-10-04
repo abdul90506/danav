@@ -91,6 +91,9 @@ const FAILED: Record<string, string> = {
   fetch_url: "Couldn't read",
   image_search: 'Image search failed:',
   update_plan: "Couldn't update plan",
+  repo_status: "Couldn't read the repository",
+  repo_history: "Couldn't read the history",
+  run_checks: 'Checks failed:',
 };
 
 export function actionLabel(a: AgentAction): ActionLabel {
@@ -120,7 +123,9 @@ function rawLabel(a: AgentAction): ActionLabel {
     a.status === 'error' &&
     a.error !== 'Stopped' &&
     a.error !== 'Interrupted' &&
-    !(a.tool === 'run_command' && r && typeof r.exitCode === 'number');
+    // A result carrying an exit code means the command ran and the process said no:
+    // that is a row ("Ran checks · exit 1"), not a failed tool with an error string.
+    !(r && typeof r.exitCode === 'number');
   const err = toolFailed ? firstLine(a.error) : undefined;
 
   const settled = a.status === 'error' && (a.error === 'Stopped' || a.error === 'Interrupted');
@@ -355,6 +360,44 @@ function rawLabel(a: AgentAction): ActionLabel {
       });
     }
 
+    case 'repo_status':
+      return base('Reading the repository', 'Read the repository', {
+        target: r?.branch || undefined,
+        targetKind: 'text',
+        meta: !live && r ? (r.repo === false ? 'not a repository' : r.dirty ? `${r.dirty} uncommitted` : 'clean') : undefined,
+        expandable: false,
+      });
+
+    case 'repo_history': {
+      const view = String(args.view || 'log');
+      const verb = view === 'blame' ? ['Tracing', 'Traced'] : view === 'diff' ? ['Reviewing', 'Reviewed'] : ['Reading history of', 'Read history of'];
+      const target = args.path || (view === 'diff' ? 'uncommitted changes' : 'the repository');
+      const meta =
+        !live && r
+          ? view === 'log'
+            ? plural(r.count ?? 0, 'commit')
+            : view === 'blame'
+              ? plural(r.blocks ?? 0, 'block')
+              : `${r.files ?? 0} file${r.files === 1 ? '' : 's'}${typeof r.added === 'number' ? ` +${r.added} −${r.removed}` : ''}`
+          : undefined;
+      return base(verb[0], verb[1], { target, targetKind: view === 'diff' ? 'text' : args.path ? 'file' : 'text', meta, expandable: false });
+    }
+
+    case 'run_checks': {
+      const names = String(r?.command || args.only || 'project checks');
+      const failed = r && r.passed === false;
+      const bits: string[] = [];
+      if (!live && r?.timedOut) bits.push('timed out');
+      else if (!live && failed) bits.push(`exit ${r?.exitCode ?? '?'}`);
+      return base('Running checks', failed ? 'Ran checks' : 'Checks passed', {
+        target: names,
+        targetKind: 'command',
+        meta: !live && r ? [r.checks ? plural(r.checks, 'check') : undefined, ...bits].filter(Boolean).join(' · ') || undefined : undefined,
+        exitFailed: Boolean(failed),
+        expandable: Boolean(a.output) || Boolean(failed),
+      });
+    }
+
     case 'list_processes':
       return base('Checking processes', 'Listed processes', {
         meta: !live && r ? (r.count ? `${plural(r.count, 'process')}${r.running ? `, ${r.running} running` : ', none running'}` : 'none') : undefined,
@@ -488,6 +531,15 @@ export function collectActivity(messages: Message[], max = 60): string[] {
         case 'run_command':
           lines.push(`ran \`${(r?.command || a.args?.command || '').slice(0, 160)}\` → ${r?.kind === 'background' ? `background ${r?.id || ''}` : `exit ${r?.exitCode ?? '?'}`}`);
           break;
+        case 'run_checks':
+          lines.push(`checked the project (\`${(r?.command || 'project checks').slice(0, 120)}\`) → ${r?.passed === false ? `exit ${r?.exitCode ?? '?'}` : 'passed'}`);
+          break;
+        case 'repo_status':
+          if (a.status === 'done') lines.push(`read the repository state${r?.branch ? ` (branch ${r.branch})` : ''}${typeof r?.dirty === 'number' && r.dirty ? `, ${r.dirty} uncommitted` : ''}`);
+          break;
+        case 'repo_history':
+          if (a.status === 'done') lines.push(`read ${r?.view || 'log'} history${a.args?.path ? ` of ${a.args.path}` : ''}`);
+          break;
         case 'get_preview_url':
           if (a.status === 'done') lines.push(`preview: ${r?.url}`);
           break;
@@ -533,6 +585,9 @@ const TRAIL_KINDS: Record<string, string> = {
   search_memory: 'memory',
   update_plan: 'plan',
   delegate_task: 'delegate',
+  repo_status: 'analyze',
+  repo_history: 'analyze',
+  run_checks: 'run',
 };
 
 export function trailKind(tool: string): string {

@@ -355,6 +355,36 @@ test('the index tools read as plain rows in the trail', async () => {
   assert.equal(fmt.trailGroupLabel('explore', 3), '3 places explored');
 });
 
+test('the history and check tools read as plain rows too', async () => {
+  const fmt = await load('src/agent/format.ts');
+
+  const status = fmt.actionLabel({ id: 'r1', tool: 'repo_status', status: 'done', args: {}, result: { kind: 'history', view: 'status', repo: true, dirty: 2, branch: 'main' } });
+  assert.deepEqual([status.verb, status.target, status.meta], ['Read the repository', 'main', '2 uncommitted']);
+
+  const clean = fmt.actionLabel({ id: 'r1b', tool: 'repo_status', status: 'done', args: {}, result: { kind: 'history', view: 'status', repo: true, dirty: 0, branch: 'main' } });
+  assert.equal(clean.meta, 'clean');
+
+  const log = fmt.actionLabel({ id: 'r2', tool: 'repo_history', status: 'done', args: { view: 'log', path: 'src/app.ts' }, result: { kind: 'history', view: 'log', count: 3 } });
+  assert.deepEqual([log.verb, log.target, log.meta], ['Read history of', 'src/app.ts', '3 commits']);
+
+  const blame = fmt.actionLabel({ id: 'r3', tool: 'repo_history', status: 'done', args: { view: 'blame', path: 'src/theme.ts', symbol: 'toggleTheme' }, result: { kind: 'history', view: 'blame', blocks: 2 } });
+  assert.deepEqual([blame.verb, blame.target, blame.meta], ['Traced', 'src/theme.ts', '2 blocks']);
+
+  const diff = fmt.actionLabel({ id: 'r4', tool: 'repo_history', status: 'done', args: { view: 'diff' }, result: { kind: 'history', view: 'diff', files: 2, added: 5, removed: 1 } });
+  assert.deepEqual([diff.verb, diff.target, diff.meta], ['Reviewed', 'uncommitted changes', '2 files +5 −1']);
+
+  // A failing check is a row with its exit code, the same shape as any command.
+  const failed = fmt.actionLabel({ id: 'c1', tool: 'run_checks', status: 'error', args: {}, error: 'checks failed', result: { kind: 'command', command: 'npm test', passed: false, exitCode: 1, checks: 1 } });
+  assert.deepEqual([failed.verb, failed.meta, failed.exitFailed], ['Ran checks', '1 check · exit 1', true]);
+
+  const ok = fmt.actionLabel({ id: 'c2', tool: 'run_checks', status: 'done', args: { only: 'tsc' }, result: { kind: 'command', command: 'npx tsc --noEmit', passed: true, exitCode: 0, checks: 1 } });
+  assert.deepEqual([ok.verb, ok.target, ok.meta], ['Checks passed', 'npx tsc --noEmit', '1 check']);
+
+  assert.equal(fmt.trailKind('repo_status'), 'analyze');
+  assert.equal(fmt.trailKind('repo_history'), 'analyze');
+  assert.equal(fmt.trailKind('run_checks'), 'run');
+});
+
 test('a live row carries no count until the count is a fact', async () => {
   const fmt = await load('src/agent/format.ts');
   const base = { id: 'a1', tool: 'edit_file', status: 'running', args: { path: 'a.js' } };

@@ -640,6 +640,34 @@ test('step limit: the run lands its work, then wraps up with a summary instead o
   }
 });
 
+test('a run that changed code and checked nothing is asked to run the project\'s checks — once', async () => {
+  /*
+    The habit that separates an agent that ships working code from one that ships
+    plausible code. The ask is silent (transcript only, the chat shows nothing new),
+    bounded to one, and only while there is budget to act on it: the model either
+    runs the project's checks or says plainly why it could not.
+  */
+  const root = tmp('danav-verify-');
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'v', version: '1.0.0', scripts: { test: 'node -e "console.log(\'Tests 1 passed\')"' } }));
+  const ws = new LocalWorkspace({ id: 'ws-verify', kind: 'local', name: 'verify', root, autoRun: true });
+  await ws.init();
+  const { events, requests, result } = await agentRun({ model: 'fake-verify', workspace: ws });
+
+  const finalMessages = requests.at(-1).messages.map((m) => String(m.content || ''));
+  const asks = finalMessages.filter((c) => c.includes('ran none of the project'));
+  assert.equal(asks.length, 1, 'the model was told to verify, exactly once');
+  assert.match(asks[0], /run_checks/, 'and told exactly how');
+  assert.match(finalMessages.filter((c) => c.includes('Tests 1 passed')).join('\n'), /Tests 1 passed/, 'the check result reached the transcript');
+
+  // The scenario only runs the checks when asked, so this row proves the gate worked.
+  const checkRow = agentEvents(events, 'action_end').find((a) => a.result?.checks);
+  assert.ok(checkRow, 'a check row was shown');
+  assert.equal(checkRow.result.passed, true);
+  assert.equal(checkRow.result.exitCode, 0);
+  assert.equal(result.stopReason, 'completed');
+});
+
 test('stopping mid-run aborts within seconds and kills the running command', async () => {
   if (isWin) return;
   const ac = new AbortController();

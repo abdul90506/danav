@@ -14,6 +14,7 @@ import { LlmError, streamCompletion } from './llm.js';
 import { buildSystemPrompt, formatSnapshot } from './prompt.js';
 import { getIndex, primeIndex, renderRelevantFiles, renderRepoMap } from './codeindex.js';
 import { detectChecks, formatChecksHint } from './verify.js';
+import { formatRepoState, readRepoState } from './githistory.js';
 import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun } from './journal.js';
 import { buildToolset, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint } from './tools.js';
@@ -845,13 +846,27 @@ export async function runAgent({
     // What this project can check, so "verify your work" is an instruction the
     // model can act on instead of one it has to guess at.
     let checksHint = '';
+    let detectedChecks = null;
     try {
-      checksHint = formatChecksHint(await detectChecks(workspace));
+      detectedChecks = await detectChecks(workspace);
+      checksHint = formatChecksHint(detectedChecks);
     } catch {
       /* detection is a courtesy; a workspace it cannot read is not a failure */
     }
+    /**
+     * Where this run is standing in the project's history: branch, HEAD, what is
+     * already uncommitted, and the last few commits. Cheap when the workspace is a
+     * repository and a single failed `git` call when it is not — and it turns "why
+     * is this code like this?" from a guess into a lookup the model knows it can do.
+     */
+    let repoBlock = '';
+    try {
+      repoBlock = formatRepoState(await readRepoState(workspace));
+    } catch {
+      /* no history is a normal state, not a failure */
+    }
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, activity, repoMap, relevantFiles, indexSummary, resume, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
+      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, repo: repoBlock, activity, repoMap, relevantFiles, indexSummary, resume, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
       ...priorMessages,
     ];
 
@@ -872,6 +887,8 @@ export async function runAgent({
     let wrapUpToolStepsUsed = 0;
     let continuations = 0; // answers that hit the output limit and were continued
     let planNudged = false;
+    /** Once per run: asked to verify code it changed, when nothing was checked. */
+    let verifyNudged = false;
 
     // ---- rounds -------------------------------------------------------------
     for (;;) {
@@ -1141,6 +1158,31 @@ export async function runAgent({
         // never worth burning the end of a run over.
         const open = (state.plan || []).filter((item) => item.status !== 'completed');
         const roomLeft = !wrapUp && Date.now() < deadline - 90_000 && stats.steps < maxSteps - 4;
+
+        /**
+         * Changed code, ran nothing.
+         *
+         * This is the one habit that separates an agent that ships working code from
+         * one that ships plausible code: the file parses, the model is happy, and
+         * the type error is discovered by the user. The prompt asks for verification,
+         * but a request is the weakest form of pressure — so when a run is about to
+         * end having changed files and having run none of the project's own checks,
+         * the model is handed the exact commands once, in the transcript only (the
+         * chat shows nothing new), and told to run them or say plainly why it could
+         * not. Silent, bounded, and only while there is real budget to act on it.
+         */
+        const checkList = detectedChecks?.commands || [];
+        if (said && !wrapUp && roomLeft && !verifyNudged && state.changed.size > 0 && state.checks.length === 0 && checkList.length) {
+          verifyNudged = true;
+          messages.push({
+            role: 'user',
+            content:
+              `[system notice] This run changed ${state.changed.size} file${state.changed.size === 1 ? '' : 's'} but ran none of the project's checks. Do not write the summary yet. ` +
+              `Call run_checks now — one call, it runs the project's own checks (${checkList.slice(0, 3).join(' · ')}${checkList.length > 3 ? ' · …' : ''}) fastest-first, stops at the first real failure and gives you the exact error lines to fix. ` +
+              `If a check genuinely cannot run here (no dependencies installed, service missing), run the closest thing you can, or say in one line in the summary which check you could not run and why. Never describe changed code as verified when nothing was checked.`,
+          });
+          continue;
+        }
         if (said && open.length && planFinishNudges < 1 && roomLeft) {
           planFinishNudges++;
           messages.push({
@@ -1468,6 +1510,13 @@ export async function runAgent({
               ...(res.ui.timedOut ? { timedOut: true } : {}),
               ...(res.ui.aborted ? { aborted: true } : {}),
             });
+          }
+        }
+        // run_checks reports every check it ran, pass or fail: the journal and the
+        // wrap-up gate both read this as the run's verification record.
+        if (name === 'run_checks' && !res.denied && Array.isArray(res.runs)) {
+          for (const r of res.runs) {
+            state.checks.push({ name: String(r.name || 'check').slice(0, 80), passed: Boolean(r.passed), ...(Number.isFinite(r.exitCode) ? { exitCode: r.exitCode } : {}), ...(r.timedOut ? { timedOut: true } : {}) });
           }
         }
         flushOut();
