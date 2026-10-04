@@ -12,6 +12,7 @@ import { isPreviewUrl, previewHost } from '../utils/previewUrl';
 import { AgentActionRow } from './AgentActionRow';
 import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from './thinkingAccordion';
 import { isLive, stopNotice, workedSummary } from '../agent/format';
+import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 import { useThrottledValue } from '../utils/throttledValue';
 import { useElapsedSeconds } from '../utils/useElapsedSeconds';
 
@@ -69,6 +70,13 @@ interface ThinkingSectionProps {
   thinkingDuration?: number;
   /** How many reasoning rounds this turn had, when more than one. */
   rounds?: number;
+  /**
+   * The turn is still running. Between two rounds of reasoning the model goes
+   * quiet for a moment while it decides what to do — the box must not close and
+   * reopen on every one of those gaps, which is what "the reasoning stopped"
+   * used to mean.
+   */
+  turnRunning?: boolean;
 }
 
 /**
@@ -87,7 +95,10 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   isStillThinking,
   thinkingDuration,
   rounds,
+  turnRunning,
 }) => {
+  /** The turn is running (so the box stays put) — not the same as a token arriving. */
+  const active = isStillThinking || Boolean(turnRunning);
   // One thought open at a time, chat-wide: opening this one closes the others.
   // The third argument is the server snapshot — without it React refuses to
   // render this anywhere that is not a live browser (the test renderer, and any
@@ -95,6 +106,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   const openId = useSyncExternalStore(subscribeThinkingAccordion, getOpenThinkingId, () => null);
   const isExpanded = openId === id;
 
+  const rootRef = useRef<HTMLDivElement>(null);
   const thinkBoxRef = useRef<HTMLDivElement>(null);
   /** The user scrolled this box themselves: stop following until they come back down. */
   const pausedRef = useRef(false);
@@ -105,11 +117,12 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   /** The user opened this box on purpose: leave it alone when the reasoning ends. */
   const userPinnedRef = useRef(false);
 
-  // While the model is reasoning, its box is the one on screen. When the reasoning
-  // stops the box closes itself, so the answer gets the room — unless the user
-  // opened it deliberately to read it.
+  // While the turn runs, its box is the one on screen — opened at the first sign
+  // of reasoning and left alone until the turn is over, gaps between rounds
+  // included. When the turn ends the box closes itself, so the answer gets the
+  // room — unless the user opened it deliberately to read it.
   React.useEffect(() => {
-    if (isStillThinking) {
+    if (active) {
       if (!autoOpenedRef.current) {
         autoOpenedRef.current = true;
         pausedRef.current = false;
@@ -121,25 +134,25 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
       autoOpenedRef.current = false;
       if (!userPinnedRef.current && getOpenThinkingId() === id) setOpenThinkingId(null);
     }
-  }, [id, isStillThinking]);
+  }, [id, active]);
 
-  // Live timer while thinking is actively running
-  const [liveSeconds, setLiveSeconds] = useState<number>(() => thinkingDuration || 1);
-  const startTimeRef = useRef<number>(Date.now());
-
+  /**
+   * Seconds from the round being written right now — added to the rounds already
+   * finished, so a turn that reasons three times shows one growing number rather
+   * than a number that stands still between rounds.
+   */
+  const [liveSeconds, setLiveSeconds] = useState(0);
   React.useEffect(() => {
     if (!isStillThinking) {
-      if (thinkingDuration) {
-        setLiveSeconds(thinkingDuration);
-      }
+      setLiveSeconds(0);
       return;
     }
-    startTimeRef.current = Date.now();
+    const started = Date.now();
     const timer = setInterval(() => {
-      setLiveSeconds(Math.max(1, Math.round((Date.now() - startTimeRef.current) / 1000)));
+      setLiveSeconds(Math.max(0, Math.round((Date.now() - started) / 1000)));
     }, 500);
     return () => clearInterval(timer);
-  }, [isStillThinking, thinkingDuration]);
+  }, [isStillThinking]);
 
   // Follow the newest reasoning — inside this box only, so the chat around it never moves.
   // The scroll is INSTANT on purpose: a smooth one fires a stream of scroll events that
@@ -171,6 +184,16 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
     }
   };
 
+  /**
+   * Clicking anywhere else — or Escape — puts the reasoning away. It used to be the
+   * one revealed thing in the chat that ignored this, so an opened thought stayed
+   * open over everything until it was clicked again or another panel took its place.
+   */
+  useDismissOnOutside(rootRef, isExpanded, () => {
+    userPinnedRef.current = false;
+    setOpenThinkingId(null);
+  });
+
   // While reasoning streams, render it line by line so each new line can fade
   // in (see `.stream-lines` in index.css). Long blocks fall back to one text
   // node — the fade is a nicety, not worth a thousand spans per frame.
@@ -180,10 +203,10 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
     return lines.length <= 400 ? lines : null;
   }, [thinkingContent, isStillThinking]);
 
-  const durationSec = thinkingDuration || liveSeconds || 1;
+  const durationSec = (thinkingDuration || 0) + (isStillThinking ? liveSeconds : 0) || 1;
 
   return (
-    <div className="mb-3.5 select-none">
+    <div ref={rootRef} className="mb-3.5 select-none">
       {/* Clean inline header: Brain icon on left, text in the middle, chevron on the right. No stat box! */}
       <button
         type="button"
@@ -198,7 +221,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
               : 'group-hover/think:text-zinc-700 dark:group-hover/think:text-zinc-200'
           }`}
         />
-        {isStillThinking ? (
+        {active ? (
           <span className="thinking-shimmer text-xs tracking-wide">Thinking…</span>
         ) : (
           <span className="text-xs tracking-wide text-zinc-500 dark:text-zinc-400 group-hover/think:text-zinc-800 dark:group-hover/think:text-zinc-200 transition-colors">
@@ -837,6 +860,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
             isStillThinking={thinkingAggregate.stillThinking}
             thinkingDuration={thinkingAggregate.duration || undefined}
             rounds={thinkingAggregate.rounds}
+            turnRunning={Boolean(message.isGenerating) && !message.error}
           />
         </div>
       );
@@ -909,6 +933,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
                     isStillThinking={stillThinking}
                     thinkingDuration={thinkingAggregate?.duration || block.duration}
                     rounds={thinkingAggregate?.rounds}
+                    turnRunning={Boolean(message.isGenerating) && !message.error}
                   />
                 );
               }

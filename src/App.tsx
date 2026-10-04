@@ -4,6 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { ChatArea } from './components/ChatArea';
 import { ChatInput } from './components/ChatInput';
 import { useStable } from './utils/stableCallback';
+import { hasOpenPopover } from './utils/useDismissOnOutside';
 import { SettingsModal } from './components/SettingsModal';
 import { MoviePlayerModal } from './components/MoviePlayerModal';
 import { AgentControls } from './components/AgentControls';
@@ -605,13 +606,20 @@ export const App: React.FC = () => {
     setIsLoading(false);
   };
 
-  // Keyboard shortcut: Esc to stop generation
+  // Keyboard shortcut: Esc to stop generation.
+  //
+  // Escape is shared with everything that can be revealed — a menu, an action
+  // row's detail, an open thought. Those come first: the panel closes and the run
+  // is left alone. Typing in a field owns Escape too, so renaming a chat or
+  // editing a message does not kill a run that is still working.
   useEffect(() => {
     if (!isLoading) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        handleStop();
-      }
+      if (e.key !== 'Escape') return;
+      if (hasOpenPopover()) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+      handleStop();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);

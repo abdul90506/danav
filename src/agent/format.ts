@@ -44,9 +44,13 @@ export function formatRanges(ranges?: Array<[number, number]>, max = 3): string 
   return ranges.length > max ? `${shown} +${ranges.length - max} more` : shown;
 }
 
+/**
+ * A stopwatch reading, in whole seconds — the same unit the running clock uses, so
+ * the number that ticks under a live turn is the number the finished line reports.
+ * Under a second there is nothing worth saying, and the caller gets nothing.
+ */
 export function formatDuration(ms?: number): string | undefined {
-  if (ms === undefined || !Number.isFinite(ms) || ms < 400) return undefined;
-  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms === undefined || !Number.isFinite(ms) || ms < 1000) return undefined;
   const s = Math.round(ms / 1000);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }

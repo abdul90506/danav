@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { X, Server, Maximize2, Minimize2, Tv, Layers, Check } from 'lucide-react';
+import { useEscapeToClose } from '../utils/useDismissOnOutside';
 
 export interface MoviePlayerModalProps {
   isOpen: boolean;
@@ -111,17 +112,15 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
   const [episode, setEpisode] = useState<number>(initialEpisode);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Close on Escape key
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  // Escape leaves fullscreen first, and closes the player from there. Registered
+  // through the shared rule so the key never also reaches the chat mid-run.
+  useEscapeToClose(() => {
+    if (isFullscreen) {
+      setIsFullscreen(false);
+      return;
+    }
+    onClose();
+  }, isOpen);
 
   if (!isOpen || !mediaId) return null;
 

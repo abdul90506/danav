@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useEscapeToClose } from '../utils/useDismissOnOutside';
 import {
   X,
   Sun,
@@ -56,6 +57,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onConversationsRestored,
 }) => {
   const [activeTab, setActiveTab] = useState<'appearance' | 'providers' | 'data'>('appearance');
+
+  // Escape closes Settings — through the shared rule, so the key never also stops
+  // a running agent turn.
+  useEscapeToClose(onClose);
 
   // Provider Form State
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
@@ -390,7 +395,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-900/40 backdrop-blur-sm animate-in fade-in duration-150">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-900/40 backdrop-blur-sm animate-in fade-in duration-150"
+      onClick={onClose}
+    >
       <div
         className="w-full max-w-2xl bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 flex flex-col overflow-hidden max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}

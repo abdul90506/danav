@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import type { AgentConfig, SandboxState, SandboxSummary, SandboxTotals } from '../types';
 import { killSandbox, listSandboxes, pauseSandbox, resumeSandbox, updateWorkspace } from '../services/agentApi';
+import { useEscapeToClose } from '../utils/useDismissOnOutside';
 
 interface SandboxManagerDialogProps {
   isOpen: boolean;
@@ -109,12 +110,11 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
     };
   }, [isOpen, load]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busyId && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, busyId, onClose]);
+  // Escape closes it — unless an action is in flight. Registered through the shared
+  // rule so the key does not also reach the chat and stop a running turn.
+  useEscapeToClose(() => {
+    if (!busyId) onClose();
+  }, isOpen);
 
   /** Run one action, then re-read the account so the list is never stale. */
   const act = async (sandboxId: string, fn: () => Promise<unknown>) => {

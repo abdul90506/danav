@@ -18,6 +18,20 @@ import { useEffect, useRef, type RefObject } from 'react';
 /** Broadcast on open; every other open popover closes when it sees an id that is not its own. */
 const OPEN_EVENT = 'danav:popover-open';
 let popoverSeq = 0;
+/** How many dismissible surfaces are open right now — see `hasOpenPopover`. */
+let openPopovers = 0;
+
+/**
+ * Is anything revealed at this moment (a menu, an action row's detail, an open
+ * thought, a web tool's output)?
+ *
+ * Escape belongs to whatever is open first. The app also uses Escape to stop a
+ * running agent turn, and without this the two fight: a user pressing Escape to
+ * put a panel away would stop their own run instead.
+ */
+export function hasOpenPopover(): boolean {
+  return openPopovers > 0;
+}
 
 export function useDismissOnOutside(
   ref: RefObject<HTMLElement | null>,
@@ -34,13 +48,17 @@ export function useDismissOnOutside(
 
   useEffect(() => {
     if (!open) return;
+    openPopovers += 1;
     // Tell the others, then listen for whichever of them opens next.
     window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: idRef.current }));
     const onOther = (event: Event) => {
       if ((event as CustomEvent).detail !== idRef.current) dismiss();
     };
     window.addEventListener(OPEN_EVENT, onOther);
-    return () => window.removeEventListener(OPEN_EVENT, onOther);
+    return () => {
+      openPopovers = Math.max(0, openPopovers - 1);
+      window.removeEventListener(OPEN_EVENT, onOther);
+    };
   }, [open]);
 
   useEffect(() => {
@@ -59,4 +77,30 @@ export function useDismissOnOutside(
       document.removeEventListener('keydown', onKey);
     };
   }, [ref, open]);
+}
+
+/**
+ * Escape closes this surface, and the app knows it is up.
+ *
+ * Menus use `useDismissOnOutside` above; a modal or a full panel does not want
+ * "clicking outside closes it" (it is the page while it is open), but it does
+ * want the same Escape — and it has to count as revealed, or the key would close
+ * the dialog and stop a running agent turn at the same time.
+ */
+export function useEscapeToClose(onClose: () => void, enabled = true): void {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
+  useEffect(() => {
+    if (!enabled) return;
+    openPopovers += 1;
+    const onKey = (event: Event) => {
+      if ((event as globalThis.KeyboardEvent).key === 'Escape') closeRef.current();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      openPopovers = Math.max(0, openPopovers - 1);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [enabled]);
 }

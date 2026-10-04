@@ -905,7 +905,8 @@ test('formatRanges / formatDuration / workedSummary / stopNotice', () => {
   assert.equal(fmt.formatRanges([[3, 9]]), 'L3–L9');
   assert.equal(fmt.formatRanges([]), undefined);
   assert.equal(fmt.formatDuration(100), undefined);
-  assert.equal(fmt.formatDuration(2345), '2.3s');
+  assert.equal(fmt.formatDuration(900), undefined, 'under a second is not worth a stopwatch');
+  assert.equal(fmt.formatDuration(2345), '2s', 'whole seconds, like the running clock');
   assert.equal(fmt.formatDuration(42_000), '42s');
   assert.equal(fmt.formatDuration(125_000), '2m 5s');
   assert.equal(

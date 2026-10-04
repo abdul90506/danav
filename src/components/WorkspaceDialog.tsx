@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Check, Cloud, ExternalLink, Laptop, Loader2, X } from 'lucide-react';
 import type { AgentConfig, AgentWorkspace } from '../types';
 import { createWorkspace, saveNovitaKey } from '../services/agentApi';
+import { useEscapeToClose } from '../utils/useDismissOnOutside';
 
 interface WorkspaceDialogProps {
   isOpen: boolean;
@@ -39,12 +40,10 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
     setAskFirst(kind === 'local');
   }, [kind]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, busy, onClose]);
+  // Escape closes it — unless the dialog is mid-save. Shared rule: see useEscapeToClose.
+  useEscapeToClose(() => {
+    if (!busy) onClose();
+  }, isOpen);
 
   if (!isOpen) return null;
 
