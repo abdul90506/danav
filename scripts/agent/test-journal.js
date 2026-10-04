@@ -74,3 +74,36 @@ test('journal caps history and never stores arbitrary shell arguments', async ()
     assert.equal(JSON.stringify(runs).includes('not-copied'), false);
   });
 });
+
+test('an unfinished run hands its plan to the next one', async () => {
+  await withDataDir(() => {
+    recordRun('ws-handoff', {
+      stopReason: 'step_limit',
+      changed: [{ path: 'src/api.ts', added: 12, removed: 3 }],
+      checks: [{ name: 'npm test', passed: false, exitCode: 1 }],
+      plan: [
+        { content: 'Explore the API layer', status: 'completed' },
+        { content: 'Add the retry helper', status: 'in_progress' },
+        { content: 'Run the tests', status: 'pending' },
+      ],
+    });
+
+    const prompt = recentRunsForPrompt('ws-handoff', 'add the retry helper', 3000, 6);
+    assert.match(prompt, /unfinished/, 'the hand-off is called out');
+    assert.match(prompt, /\[x\] Explore the API layer/);
+    assert.match(prompt, /\[~\] Add the retry helper/);
+    assert.match(prompt, /\[ \] Run the tests/);
+    assert.match(prompt, /Continue from this plan/, 'the next run is told what to do with it');
+    assert.ok(prompt.length <= 3200, `the hand-off stays within its budget (${prompt.length})`);
+
+    // A finished run says nothing about plans.
+    recordRun('ws-done', { stopReason: 'completed', changed: [{ path: 'a.ts', added: 1, removed: 0 }], plan: [{ content: 'x', status: 'pending' }] });
+    assert.doesNotMatch(recentRunsForPrompt('ws-done', '', 3000, 6), /unfinished/);
+
+    // Junk in a stored plan is dropped, not echoed.
+    recordRun('ws-junk', { stopReason: 'time_limit', plan: [{ content: 'ok', status: 'nonsense' }, { status: 'pending' }, 'nope'] });
+    const junk = recentRunsForPrompt('ws-junk', '', 3000, 6);
+    assert.match(junk, /\[ \] ok/);
+    assert.doesNotMatch(junk, /nonsense|nope/);
+  });
+});

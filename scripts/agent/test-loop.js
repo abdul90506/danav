@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { startFakeLlm, HTML, CSS } from '../fake-llm.js';
-import { runAgent, pruneMessages, revealPlan } from '../../server/agent/loop.js';
+import { runAgent, pruneMessages, revealPlan, worklogLines, verificationLabel } from '../../server/agent/loop.js';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
 import { registerAgentRoutes, _activeRuns } from '../../server/agent/routes.js';
 import { resolveApproval } from '../../server/agent/approvals.js';
@@ -767,8 +767,18 @@ test('context pruning: old tool output and file bodies are elided first; whole r
   const r2 = pruneMessages(b, 20_000);
   assert.ok(r2.droppedRounds > 0);
   assertConsistentTranscript(b);
+  // ...and what the dropped rounds found is not simply lost: one line each, in
+  // one small message right after the system prompt, before the conversation.
+  const log = b.find((m) => m.role === 'user' && m.content.startsWith('[work so far]'));
+  assert.ok(log, 'a work log was written');
+  assert.equal(b.indexOf(log), 1, 'the log sits at the top, where later passes cannot drop it');
   assert.equal(b[0].content, 'sys');
-  assert.equal(b[1].content, 'hi');
+  assert.equal(b[2].content, 'hi');
+  assert.ok(log.content.length < 4600, 'the log stays small');
+  const lines = worklogLines(b);
+  assert.ok(lines.length >= r2.droppedRounds, `one line per dropped call at least: ${JSON.stringify(lines.slice(0, 3))}`);
+  assert.ok(lines.some((l) => /write_file f\d+\.js/.test(l)), 'the files that were written are remembered');
+  assert.ok(!/elided/.test(lines.join('\n')), 'the log keeps what the tool said, not the placeholder');
   assert.ok(assistants(b).length >= 3);
   assert.equal(assistants(b).at(-1).tool_calls[0].id, 'c11');
   JSON.parse(assistants(b).at(-1).tool_calls[0].function.arguments);
@@ -782,7 +792,7 @@ test('context pruning: old tool output and file bodies are elided first; whole r
   const r3 = pruneMessages(d, 3000);
   assert.equal(r3.overBudget, false);
   assert.ok(r3.droppedRounds >= 1);
-  assert.match(d[1].content, /keep this current request/);
+  assert.ok(d.some((m) => /keep this current request/.test(String(m.content))), 'the current request survives');
   assertConsistentTranscript(d);
   const lastArgs = JSON.parse(d.find((m) => m.role === 'assistant' && m.tool_calls)?.tool_calls[0].function.arguments);
   assert.match(lastArgs.content, /omitted from history/);
@@ -1411,4 +1421,43 @@ test('each budget warning is said once, and the prompt states the budget', async
     if (previous === undefined) delete process.env.DANAV_AGENT_MAX_STEPS;
     else process.env.DANAV_AGENT_MAX_STEPS = previous;
   }
+});
+
+test('a check is recognized in a chained command, and never from raw shell text', () => {
+  // Labels come from a fixed vocabulary, so a remembered "check" can never carry
+  // an argument or a secret — and a run that really verified is not recorded as
+  // one that changed files and checked nothing.
+  assert.equal(verificationLabel('npm test'), 'npm test');
+  assert.equal(verificationLabel('cd app && npm test'), 'npm test');
+  assert.equal(verificationLabel('npm ci && npm run build'), 'npm run build');
+  assert.equal(verificationLabel('CI=1 npx vitest run --coverage'), 'npx vitest');
+  assert.equal(verificationLabel('node --test src/greet.test.js'), 'node --test');
+  assert.equal(verificationLabel('python3 -m unittest discover'), 'python -m unittest');
+  assert.equal(verificationLabel('go test ./...'), 'go test');
+  assert.equal(verificationLabel('cargo test --release'), 'cargo test');
+  assert.equal(verificationLabel('npm run test:unit'), 'npm run test:unit');
+  assert.equal(verificationLabel('npm test -- --token=sk-secret'), 'npm test');
+  assert.equal(verificationLabel('echo "npm test is good"'), null);
+  assert.equal(verificationLabel('node script.js'), null);
+  assert.equal(verificationLabel(''), null);
+});
+
+test('work that goes deep without a plan is reminded once, and the plan is kept', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-plan-'));
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'line one\nline two\n');
+  const ws = new LocalWorkspace({ id: 'ws-plan', kind: 'local', name: 'plan', root: dir, autoRun: true });
+  const { events, requests } = await agentRun({ model: 'fake-plan-late', history: [{ role: 'user', content: 'start the job' }], workspace: ws });
+
+  const withReminder = requests.findIndex((r) => JSON.stringify(r.messages).includes('no plan is recorded'));
+  assert.ok(withReminder >= 1, 'the model was reminded to plan');
+  const usedThen = requests[withReminder].messages.filter((m) => m.role === 'tool').length;
+  assert.ok(usedThen >= 5, `the reminder came once the run was really underway (${usedThen} calls)`);
+  // said once: the last request of the run still carries exactly one reminder
+  const occurrences = (JSON.stringify(requests.at(-1).messages).match(/no plan is recorded/g) || []).length;
+  assert.equal(occurrences, 1, 'the reminder is not repeated every round');
+
+  const plans = events.filter((e) => e.agent?.type === 'action_end' && e.agent.result?.kind === 'plan');
+  assert.equal(plans.length, 1, 'the plan reached the chat');
+  assert.equal(plans[0].agent.result.todos[1].status, 'in_progress');
+  assert.equal(plans[0].agent.result.done, 1);
 });

@@ -341,7 +341,80 @@ function toolRoundRanges(messages) {
 }
 
 function dropToolRound(messages, round) {
-  messages.splice(round.start, round.end - round.start);
+  return messages.splice(round.start, round.end - round.start);
+}
+
+/** The marker that identifies the compact record of trimmed work in a message. */
+export const WORKLOG_MARKER = '[work so far]';
+
+const digestLine = (s, n = 200) => {
+  const one = String(s ?? '').replace(/\s+/g, ' ').trim();
+  return one.length > n ? `${one.slice(0, n - 1)}…` : one;
+};
+
+/**
+ * What one dropped round is worth remembering.
+ *
+ * Dropping a round used to delete it outright, so a long run forgot the very
+ * evidence it had gathered — which files exist, what the test output said, which
+ * approach already failed. A line per call keeps the conclusion without the bulk.
+ */
+function roundDigest(dropped, original = null) {
+  const lines = [];
+  const results = new Map();
+  for (const m of dropped) {
+    if (m.role !== 'tool') continue;
+    const before = original?.get(m);
+    results.set(m.tool_call_id, String((before === undefined ? m.content : before) ?? ''));
+  }
+  for (const m of dropped) {
+    if (m.role === 'tool') continue; // recorded through its call, below
+    if (m.role !== 'assistant' || !m.tool_calls?.length) {
+      const said = typeof m.content === 'string' ? digestLine(m.content, 160) : '';
+      if (said) lines.push(`  I said: ${said}`);
+      continue;
+    }
+    for (const tc of m.tool_calls) {
+      const name = tc.function?.name || '?';
+      let args = {};
+      try { args = JSON.parse(tc.function?.arguments || '{}') || {}; } catch { /* keep {} */ }
+      const target = args.path || args.from || args.file_path || args.pattern || args.query || args.command || args.task || '';
+      const out = results.get(tc.id) ?? '';
+      const first = digestLine(out, 120);
+      lines.push(`  ${name}${target ? ` ${digestLine(String(target), 60)}` : ''}${first ? ` → ${first}` : ''}`);
+    }
+  }
+  return lines;
+}
+
+/**
+ * Remember, in one small message, what the trimmed rounds had established.
+ * The message lives right after the system prompt so it survives later passes.
+ */
+function recordWorklog(messages, lines) {
+  if (!lines.length) return;
+  const index = messages.findIndex((m) => m.role === 'user' && String(m.content || '').startsWith(WORKLOG_MARKER));
+  const existing = index >= 0 ? String(messages[index].content).split('\n').slice(1) : [];
+  const all = [...existing, ...lines.map((l) => l.trim())];
+  // Newest evidence matters most, but the earliest findings explain the project:
+  // keep the head as well once the list is long.
+  const kept = all.length > 44 ? [...all.slice(0, 8), '  …', ...all.slice(-35)] : all;
+  let content = `${WORKLOG_MARKER} ${kept.length} earlier steps were trimmed to fit the context window. What they found:\n${kept.join('\n')}`;
+  if (content.length > 4200) {
+    const room = 4200 - `${WORKLOG_MARKER} earlier steps were trimmed to fit the context window. What they found:\n`.length;
+    content = `${WORKLOG_MARKER} earlier steps were trimmed to fit the context window. What they found:\n${kept.join('\n').slice(-room)}`;
+  }
+  const message = { role: 'user', content };
+  if (index >= 0) messages[index] = message;
+  else messages.splice(Math.min(1, messages.length), 0, message);
+}
+
+const isWorklog = (m) => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith(WORKLOG_MARKER);
+
+/** Read back what was already recorded, so the limit is a real limit. */
+export function worklogLines(messages) {
+  const m = messages.find(isWorklog);
+  return m ? String(m.content).split('\n').slice(1) : [];
 }
 
 function shrinkToolOutputs(messages, limit) {
@@ -364,6 +437,12 @@ export function pruneMessages(messages, budgetChars) {
   const initial = totalSize(messages);
   if (initial <= budget) return { pruned: false, droppedRounds: 0, chars: initial, budget, overBudget: false };
 
+  // What a tool really produced, kept aside: if its round is dropped later, the
+  // one line worth remembering must not be the "output elided" placeholder that
+  // an earlier pass put there.
+  const original = new Map();
+  for (const m of messages) if (m.role === 'tool' && typeof m.content === 'string') original.set(m, m.content);
+
   elideOldToolArguments(messages);
 
   // Old output is cheap to recover: files can be re-read, and commands can be re-run.
@@ -378,11 +457,12 @@ export function pruneMessages(messages, budgetChars) {
   }
 
   let droppedRounds = 0;
+  const digest = [];
   // Preserve several recent tool cycles in normal compaction; the emergency path below can go further.
   while (totalSize(messages) > budget) {
     const rounds = toolRoundRanges(messages);
     if (rounds.length <= 3) break;
-    dropToolRound(messages, rounds[0]);
+    digest.push(...roundDigest(dropToolRound(messages, rounds[0]), original));
     droppedRounds++;
   }
 
@@ -400,11 +480,11 @@ export function pruneMessages(messages, budgetChars) {
     if (totalSize(messages) <= budget) break;
     // Only plain strings can be clipped; a multimodal array is left alone.
     if (typeof m.content !== 'string') continue;
-    if (protectedPlain.has(m) || m.content.length <= 1200) continue;
+    if (isWorklog(m) || protectedPlain.has(m) || m.content.length <= 1200) continue;
     m.content = clipWithin(m.content, 1000, 'older conversation');
   }
   while (totalSize(messages) > budget) {
-    const oldest = plain().find((m) => !protectedPlain.has(m));
+    const oldest = plain().find((m) => !protectedPlain.has(m) && !isWorklog(m));
     if (!oldest) break;
     const idx = messages.indexOf(oldest);
     if (idx >= 0) messages.splice(idx, 1);
@@ -418,7 +498,7 @@ export function pruneMessages(messages, budgetChars) {
   while (totalSize(messages) > budget) {
     const rounds = toolRoundRanges(messages);
     if (rounds.length <= 1) break;
-    dropToolRound(messages, rounds[0]);
+    digest.push(...roundDigest(dropToolRound(messages, rounds[0]), original));
     droppedRounds++;
   }
   if (totalSize(messages) > budget) shrinkToolOutputs(messages, 350);
@@ -450,6 +530,19 @@ export function pruneMessages(messages, budgetChars) {
     system.content = clipWithin(system.content, Math.max(0, budget - other), 'system context');
   }
 
+  if (digest.length) {
+    recordWorklog(messages, digest);
+    // The log is worth its space, but not more than the budget has left.
+    const log = messages.find(isWorklog);
+    if (log && totalSize(messages) > budget) {
+      const room = Math.max(240, budget - (totalSize(messages) - sizeOf(log)));
+      if (typeof log.content === 'string' && log.content.length > room) {
+        log.content = clipWithin(log.content, room, 'older work');
+      }
+    }
+    if (log && totalSize(messages) > budget) messages.splice(messages.indexOf(log), 1);
+  }
+
   const chars = totalSize(messages);
   return { pruned: true, droppedRounds, chars, budget, overBudget: chars > budget };
 }
@@ -479,17 +572,53 @@ const isContextLimitError = (err) =>
   err instanceof LlmError &&
   /(?:context.{0,40}(?:length|window|limit|exceed)|(?:maximum|max).{0,24}context|too many tokens|token limit|max(?:imum)?(?: number of)? tokens|tokens.{0,30}(?:maximum|max|limit)|exceeds? (?:the )?(?:token|input)|requested.{0,20}tokens|prompt.{0,24}(?:too (?:large|long)|exceed)|input.{0,24}too (?:large|long)|reduce (?:the )?(?:prompt|input|token))/i.test(String(err.message || ''));
 
-/** Store only recognizable check labels, never arbitrary shell text or arguments. */
-function verificationLabel(command) {
-  const text = String(command || '').trim();
-  if (!text || /[;&|`$<>]/.test(text)) return null;
-  const pkg = /^(npm|pnpm|yarn|bun)\s+(run\s+)?(test(?::[\w.-]+)?|build|lint|check|typecheck|type-check|check-types|verify)(?:\s|$)/i.exec(text);
-  if (pkg) return `${pkg[1].toLowerCase()} ${pkg[2] ? 'run ' : ''}${pkg[3].toLowerCase()}`;
-  const cli = /^(npx\s+)?(tsc|eslint|vitest|jest|prettier|ruff|mypy|pytest)(?:\s|$)/i.exec(text);
-  if (cli) return `${cli[1] ? 'npx ' : ''}${cli[2].toLowerCase()}`;
-  if (/^cargo\s+test(?:\s|$)/i.test(text)) return 'cargo test';
-  if (/^go\s+test(?:\s|$)/i.test(text)) return 'go test';
-  if (/^python(?:\d+(?:\.\d+)?)?\s+-m\s+pytest(?:\s|$)/i.test(text)) return 'python -m pytest';
+/**
+ * The label of a command that really checks something — or null.
+ *
+ * Only labels from this fixed vocabulary are ever stored, never the command text
+ * itself, so a remembered check can never leak an argument or a secret. A command
+ * may chain several steps (`npm ci && npm test`), so each segment is considered
+ * on its own: a real run that verified its work must not be recorded as one that
+ * changed files and checked nothing.
+ */
+export function verificationLabel(command) {
+  const segments = String(command || '')
+    .split(/&&|\|\||;|\||\n/)
+    .map((s) => s.trim().replace(/^(?:[A-Z_a-z]\w*=[^\s]*\s+)+/, '').trim())
+    .filter(Boolean);
+  const labelFor = (text) => {
+    const pkg = /^(npm|pnpm|yarn|bun)\s+(run\s+)?(test(?::[\w.:-]+)*|build|lint|check|typecheck|type-check|check-types|verify|validate)(?:\s|$)/i.exec(text);
+    if (pkg) return `${pkg[1].toLowerCase()} ${pkg[2] ? 'run ' : ''}${pkg[3].toLowerCase()}`;
+    const cli = /^(npx\s+)?(tsc|eslint|vitest|jest|prettier|ruff|mypy|pytest|playwright|cypress|mocha)(?:\s|$)/i.exec(text);
+    if (cli) return `${cli[1] ? 'npx ' : ''}${cli[2].toLowerCase()}`;
+    const node = /^node\s+--test(?:\s|$|=)/i.exec(text);
+    if (node) return 'node --test';
+    const py = /^python(?:\d+(?:\.\d+)?)?\s+-m\s+(pytest|unittest|mypy|tox)(?:\s|$)/i.exec(text);
+    if (py) return `python -m ${py[1].toLowerCase()}`;
+    const runners = [
+      [/^cargo\s+test(?:\s|$)/i, 'cargo test'],
+      [/^go\s+test(?:\s|$)/i, 'go test'],
+      [/^deno\s+test(?:\s|$)/i, 'deno test'],
+      [/^(?:bun\s+test|bun\s+run\s+test)(?:\s|$)/i, 'bun test'],
+      [/^dotnet\s+test(?:\s|$)/i, 'dotnet test'],
+      [/^mvn\s+(?:test|verify)(?:\s|$)/i, 'mvn test'],
+      [/^gradle\w*\s+test(?:\s|$)/i, 'gradle test'],
+      [/^(?:make|rake)\s+test(?:\s|$)/i, 'make test'],
+      [/^bundle\s+exec\s+rspec(?:\s|$)/i, 'rspec'],
+      [/^flutter\s+test(?:\s|$)/i, 'flutter test'],
+      [/^swift\s+test(?:\s|$)/i, 'swift test'],
+      [/^php\s+artisan\s+test(?:\s|$)/i, 'php artisan test'],
+      [/^composer\s+(?:test|run\s+test)(?:\s|$)/i, 'composer test'],
+      [/^mix\s+test(?:\s|$)/i, 'mix test'],
+      [/^sbt\s+test(?:\s|$)/i, 'sbt test'],
+    ];
+    for (const [re, label] of runners) if (re.test(text)) return label;
+    return null;
+  };
+  for (const segment of segments) {
+    const label = labelFor(segment);
+    if (label) return label;
+  }
   return null;
 }
 
@@ -642,6 +771,7 @@ export async function runAgent({
     let wrapUp = null; // set once a budget runs out or the model keeps failing
     let nudged = false;
     let verifyNudged = false;
+    let planNudged = false;
 
     // ---- rounds -------------------------------------------------------------
     for (;;) {
@@ -661,6 +791,18 @@ export async function runAgent({
         });
       }
       stopReason = wrapUp || stopReason;
+
+      // Work that is several steps deep and tracked nowhere is work the user
+      // cannot follow and the model itself can drift away from. One reminder,
+      // early enough to matter, and only when the run has become a real task.
+      if (!wrapUp && !state.plan?.length && !planNudged && (stats.toolCalls >= 6 || (state.changed.size >= 2 && stats.toolCalls >= 4))) {
+        planNudged = true;
+        messages.push({
+          role: 'user',
+          content:
+            '[system notice] This run has become a multi-step job and no plan is recorded. Call update_plan ONCE now, with the remaining steps and the one you are on (exactly one in_progress), then keep it current as you finish them. The user sees this checklist.',
+        });
+      }
 
       // How much of the run's budget is left, said out loud while there is still
       // time to act on it. A model that cannot see the end of its budget spends
@@ -1244,6 +1386,7 @@ export async function runAgent({
         changed: [...state.changed].map(([filePath, counts]) => ({ path: filePath, ...counts })),
         checks: state.checks,
         failures: state.toolFailures,
+        plan: state.plan || [],
       });
     } catch {
       /* continuity data is best effort and must never turn a finished run into an error */

@@ -170,6 +170,23 @@ export const scenarios = {
     return { text: 'All done — app.js is written.' };
   },
 
+  /** Works for a while without ever planning, then answers the reminder. */
+  planLate: ({ roundIdx, messages }) => {
+    const reminded = messages.some((m) => m.role === 'user' && String(m.content).includes('no plan is recorded'));
+    if (reminded && !messages.some((m) => m.role === 'tool' && String(m.content).includes('Plan updated'))) {
+      return {
+        text: 'Fair — here is the plan.',
+        toolCalls: [{ name: 'update_plan', args: { todos: [{ content: 'Survey the project', status: 'completed' }, { content: 'Add the feature', status: 'in_progress' }] } }],
+      };
+    }
+    if (roundIdx < 7) {
+      // A different range each round: the same call twice would (rightly) be
+      // reported as no progress before the reminder ever matters.
+      return { text: `Step ${roundIdx + 1}.`, toolCalls: [{ name: 'read_file', args: { path: 'notes.txt', start_line: roundIdx + 1, end_line: roundIdx + 1 } }] };
+    }
+    return { text: 'Done with what was asked.' };
+  },
+
   loop: ({ roundIdx }) => ({
     text: `step ${roundIdx + 1}`,
     toolCalls: [{ name: 'run_command', args: { command: `echo round-${roundIdx}` } }],
@@ -377,6 +394,7 @@ const byModel = {
   'fake-empty-first': scenarios.emptyFirst,
   'fake-empty-always': scenarios.emptyAlways,
   'fake-no-progress': scenarios.noProgress,
+  'fake-plan-late': scenarios.planLate,
   'fake-unverified': scenarios.unverified,
 };
 
