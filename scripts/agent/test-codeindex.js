@@ -423,6 +423,26 @@ test('grep_search groups hits, can ask for whole words, context and a page', asy
   }
 });
 
+test('grepping for a name the index knows comes back with the faster tool named', async () => {
+  const root = project();
+  try {
+    const ws = await workspaceFor(root);
+    const { run } = toolsetFor(ws);
+    await run('find_symbol', { name: 'toggleTheme' }); // loads the index
+
+    const named = await run('grep_search', { pattern: 'createPanelStore' });
+    assert.match(named.output, /Tip: `createPanelStore` is a known name in this project — find_symbol\("createPanelStore"\)/);
+
+    // Text that is not an identifier, or a name the index does not hold, stays clean.
+    const text = await run('grep_search', { pattern: 'theme toggle lives' });
+    assert.ok(!/Tip:/.test(text.output), 'prose is not a symbol');
+    const unknown = await run('grep_search', { pattern: 'zzNotANameHere' });
+    assert.ok(!/Tip:/.test(unknown.output), 'no tip for a name nothing defines');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('relevant_files and code_map answer "where does this live" without a file name', async () => {
   const root = project();
   try {

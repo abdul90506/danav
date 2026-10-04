@@ -171,6 +171,11 @@ Definitions there: deep (L601), deeper (L701)"* — a map instead of a cliff), a
 paths already described by the repo map is tokens and attention spent on repetition. A
 project with no code to index keeps the full listing, exactly as before.
 
+When the model still reaches for `grep_search` on a bare name the index already holds, the
+result ends with one line naming the tool that would have answered it in a single call —
+a nudge at the moment the choice was made, which is where tool-choice actually happens.
+It only ever fires for a real identifier with a real definition, so it cannot be noise.
+
 Three habits come with it, and the prompt states them as rules: find code with the
 index instead of by reading whole files, never read the same thing twice in one run
 (a repeat full read comes back as "unchanged since you read it" instead of burning

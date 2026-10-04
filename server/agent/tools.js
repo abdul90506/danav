@@ -1601,13 +1601,29 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         : '';
       const summary = [...byFile.entries()].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} (${n})`).join(', ');
       const shown = offset ? `matches ${offset + 1}–${offset + page.length} of ${matches.length}${truncated ? '+' : ''}` : `${page.length}${truncated ? '+' : ''} match${page.length === 1 ? '' : 'es'}`;
+      /**
+       * A grep for a bare name that the index already knows is the slow path being
+       * taken — the model reads every tool result, so one line here does what the
+       * prompt's rule often cannot: it says which tool would have answered this in
+       * one call, at the moment the choice was made. It only ever fires for a real
+       * identifier the index holds a definition for, so it can never be noise.
+       */
+      const nameTip = (() => {
+        if (!/^[A-Za-z_$][\w$.-]*$/.test(pattern)) return '';
+        const index = cachedIndex(ws.id);
+        if (!index) return '';
+        const known = findDefinitions(index, pattern, { limit: 1 });
+        if (!known.exact && !known.results.length) return '';
+        return `\n[Tip: \`${pattern}\` is a known name in this project — find_symbol("${pattern}") answers this from the code index with its definition, every use, and what depends on it, in one call.]`;
+      })();
       const found = page.length
         ? `${shown} in ${byFile.size} file${byFile.size === 1 ? '' : 's'}${summary ? `: ${summary}` : ''}\n` +
           lines.join('\n') +
           (truncated ? `\n… (more matches; narrow the pattern, path or glob${offset ? ', or ask for offset=' + (offset + max) : `, or page with offset=${page.length}`})` : '') +
           (wordFiltered ? `\n(${wordFiltered} partial-word hits were dropped by word=true)` : '') +
-          asLiteral
-        : `No matches for ${literal ? 'the literal text' : 'the pattern'} \`${pattern}\` in ${rel(abs)}.${raw.truncated ? ' (the search hit its own limit before finishing — try a narrower path or glob)' : ''}${asLiteral}`;
+          asLiteral +
+          nameTip
+        : `No matches for ${literal ? 'the literal text' : 'the pattern'} \`${pattern}\` in ${rel(abs)}.${raw.truncated ? ' (the search hit its own limit before finishing — try a narrower path or glob)' : ''}${asLiteral}${nameTip}`;
       return { output: safe(found), ui: { kind: 'grep', pattern: clip(pattern, 120), count: page.length, files: byFile.size, truncated } };
     },
 
