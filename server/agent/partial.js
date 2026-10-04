@@ -64,7 +64,9 @@ export function extractStringFields(text, keys) {
   while ((m = re.exec(text))) {
     const start = m.index + m[0].length;
     const { value, complete, consumed } = decodeJsonStringPartial(text.slice(start));
-    out.push({ key: m[1], value, complete });
+    // `end` is where the value stopped — the caller uses it to check whether the
+    // text right after this field still looks like the rest of the object.
+    out.push({ key: m[1], value, complete, end: start + consumed + (complete ? 1 : 0) });
     re.lastIndex = start + consumed + (complete ? 1 : 0);
     if (!complete) break; // nothing after an unfinished string is meaningful yet
   }
@@ -94,6 +96,174 @@ const num = (text, key) => {
   const m = new RegExp(`"${key}"\\s*:\\s*(\\d+)`).exec(text);
   return m ? Number(m[1]) : undefined;
 };
+
+// ---------------------------------------------------------------------------
+// Repairing arguments a model actually produced
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip what models wrap around a JSON object: a ```json fence, or a sentence
+ * before it ("Here are the arguments: {…}").
+ */
+export function stripWrappedJson(input) {
+  let text = String(input ?? '').trim();
+  const fenced = /^```(?:json|JSON)?\s*([\s\S]*?)\s*```$/.exec(text);
+  if (fenced) text = fenced[1].trim();
+  const first = text.indexOf('{');
+  const last = text.lastIndexOf('}');
+  if (first > 0 && last > first) text = text.slice(first, last + 1);
+  return text.trim();
+}
+
+/**
+ * `{path: 'a'}` — a model that quotes with `'` throughout, and no `"` anywhere,
+ * which makes the intent unambiguous. A `'` that is neither where a string opens
+ * nor where one closes is left alone, so an apostrophe inside a value survives.
+ */
+function convertSingleQuoted(text) {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c !== "'") { out += c; continue; }
+    const before = out.trimEnd().slice(-1);
+    const after = text.slice(i + 1).replace(/^\s+/, '').charAt(0);
+    const opens = before === '' || '{[,:'.includes(before);
+    const closes = '}]'.includes(after) || after === ',' || after === ':';
+    out += opens || closes ? '"' : c;
+  }
+  return out;
+}
+
+const KEY_START = /[A-Za-z_$]/;
+const KEY_CHAR = /[\w$.-]/;
+const QUOTED_KEY = /^\s*"[A-Za-z_$][\w$-]*"\s*:/;
+const STRUCTURAL = /^\s*[,}\]:]/;
+
+/**
+ * Make the argument text parseable, without inventing meaning.
+ *
+ * Weaker models mangle the JSON of a tool call in a few recognisable ways, and
+ * every one of them used to cost the user a failed step:
+ *   - literal newlines or tabs inside a string ("content": "a<newline>b")
+ *   - unescaped quotes inside a string (<div class="wrap">)
+ *   - a missing comma between members ({"path": "a" "content": "b"})
+ *   - a bare key, a trailing comma, a fence or a sentence around the object
+ *
+ * The walk is quote aware, so a brace or a colon inside a file body is never
+ * treated as structure. It returns `null` when the text cannot be repaired,
+ * rather than guessing at a different meaning.
+ *
+ * @returns {null | { text: string, changed: boolean }}
+ */
+export function repairJsonText(input) {
+  let source = stripWrappedJson(input);
+  if (!source) return null;
+  if (!source.includes('"') && source.includes("'")) source = convertSingleQuoted(source);
+  let out = '';
+  let i = 0;
+  let inString = false;
+  let changed = false;
+  let expectingKey = false;
+  let valueStart = 0; // where the string being read starts in `out` (for the drive-path guard)
+  while (i < source.length) {
+    const c = source[i];
+
+    if (!inString) {
+      // A comma that is about to be followed by a closing bracket is noise.
+      if (c === ',') {
+        const rest = source.slice(i + 1);
+        if (/^\s*[}\]]/.test(rest)) {
+          changed = true;
+          i += 1;
+          continue;
+        }
+      }
+      if (c === '"') {
+        inString = true;
+        expectingKey = false;
+        out += c;
+        valueStart = out.length;
+        i += 1;
+        continue;
+      }
+      if (c === '\n' || c === '\r' || c === '\t' || c === ' ') {
+        // Whitespace between tokens changes nothing — and a key may still follow.
+        out += c === ' ' ? c : (changed = true, ' ');
+        i += 1;
+        continue;
+      }
+      if (expectingKey && KEY_START.test(c)) {
+        // A bare key: `{path: …}` -> `{"path": …}`
+        let j = i + 1;
+        while (j < source.length && KEY_CHAR.test(source[j])) j += 1;
+        const key = source.slice(i, j);
+        if (/^\s*:/.test(source.slice(j))) {
+          out += `"${key}"`;
+          changed = true;
+          i = j;
+          expectingKey = false;
+          continue;
+        }
+      }
+      expectingKey = c === '{' || c === ',';
+      out += c;
+      i += 1;
+      continue;
+    }
+
+    // ---- inside a string literal ----
+    if (c === '\\') {
+      const next = source[i + 1];
+      if (next === undefined) { changed = true; out += '\\\\'; i += 1; continue; }
+      // A drive path the model wrote with single backslashes (`C:\new\file.txt`):
+      // JSON would read `\n` as a line break and quietly corrupt the path.
+      const inPath = 'nrtbf'.includes(next) && /^[A-Za-z]:[\\/]/.test(out.slice(valueStart));
+      if ('"\\/bfnrtu'.includes(next) && !inPath) {
+        out += source.slice(i, i + 2); // a real escape: keep it as it is
+      } else if (next === "'") {
+        out += "'"; // \' — the model escaped a quote that JSON does not need escaped
+        changed = true;
+      } else {
+        out += '\\\\' + next; // a backslash that is meant as text
+        changed = true;
+      }
+      i += 2;
+      continue;
+    }
+    if (c === '\n' || c === '\r' || c === '\t') {
+      changed = true;
+      out += c === '\n' ? '\\n' : c === '\r' ? '\\r' : '\\t';
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      const rest = source.slice(i + 1);
+      if (STRUCTURAL.test(rest) || !rest.trim()) {
+        inString = false; // the string really ends here
+        out += c;
+        i += 1;
+        continue;
+      }
+      if (QUOTED_KEY.test(rest)) {
+        // The model left out the comma between two members.
+        changed = true;
+        inString = false;
+        out += '",';
+        i += 1;
+        continue;
+      }
+      // Everything else is a quote that belongs to the text itself.
+      changed = true;
+      out += '\\"';
+      i += 1;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  if (!changed) return { text: source, changed: false };
+  return { text: out, changed: true };
+}
 
 /**
  * What can be known about a tool call from its (possibly unfinished) arguments.
@@ -169,13 +339,19 @@ export function salvageWrite(name, text) {
   const path = fields.find((f) => f.key === 'path' && f.complete)?.value;
   const content = fields.find((f) => f.key === 'content');
   if (!path || !content) return null;
+  // A value can look "complete" and still be wrong: an unescaped quote inside the
+  // file body ends the string early. What follows it then is neither a comma nor a
+  // closing brace — so the field is really cut off, and only its whole lines may be
+  // written. (Repair normally handles that case before we get here.)
+  const tail = typeof content.end === 'number' ? text.slice(content.end).trim() : '';
+  const complete = content.complete && (tail === '' || /^[,}\]]/.test(tail));
   let body = content.value;
-  if (!content.complete) {
+  if (!complete) {
     const cut = body.lastIndexOf('\n');
     if (cut === -1) return null;
     body = body.slice(0, cut + 1); // drop the half-written last line
   }
   const lines = startedLines(body);
   if (lines < 3) return null;
-  return { path, content: body, lines, truncated: !content.complete };
+  return { path, content: body, lines, truncated: !complete };
 }

@@ -187,6 +187,42 @@ export const scenarios = {
     return { text: 'Done with what was asked.' };
   },
 
+  /**
+   * The argument text a weak model really produces: a missing comma, literal
+   * newlines in the body, and unescaped quotes in the HTML.
+   */
+  mangleComma: ({ roundIdx }) => (roundIdx === 0
+    ? {
+        text: 'Writing the page.',
+        toolCalls: [{ name: 'write_file', rawArgs: `{"path": "index.html" "content": "${HTML}"}` }],
+      }
+    : { text: 'Created index.html.' }),
+
+  /** A write with a body but no path at all — the file must not be thrown away. */
+  mangleNoPath: ({ roundIdx, messages }) => {
+    if (roundIdx === 0) {
+      return { text: 'Writing the page.', toolCalls: [{ name: 'write_file', args: { content: HTML } }] };
+    }
+    const parked = /(\.danav-recovered\/[\w-]+\.[A-Za-z0-9]+)/.exec(messages.map((m) => String(m.content || '')).join('\n'))?.[1];
+    if (parked && !messages.some((m) => m.role === 'tool' && /Moved |moved /.test(String(m.content)))) {
+      return { text: 'Using the file I already wrote.', toolCalls: [{ name: 'move_file', args: { from: parked, to: 'index.html' } }] };
+    }
+    return { text: 'Recovered and moved into place.' };
+  },
+
+  /** A long file: the first part is cut off by the output limit, the rest follows. */
+  longParts: ({ roundIdx, messages }) => {
+    const body = (from, to) => `// part ${from}-${to}\n` + Array.from({ length: to - from }, (_, i) => `export const value${from + i} = ${from + i};`).join('\n') + '\n';
+    if (roundIdx === 0) {
+      const written = body(0, 60);
+      const truncated = written.slice(0, written.length - 25); // the stream stops mid-line
+      return { text: 'Writing the long file.', finishReason: 'length', toolCalls: [{ name: 'write_file', rawArgs: `{"path": "big.js", "content": ${JSON.stringify(truncated)}` }] };
+    }
+    const appended = messages.filter((m) => m.role === 'tool' && /Appended/.test(String(m.content))).length;
+    if (appended < 2) return { text: 'Continuing the same file.', toolCalls: [{ name: 'append_file', args: { path: 'big.js', content: body(60 + appended * 60, 120 + appended * 60) } }] };
+    return { text: 'The file is complete.' };
+  },
+
   loop: ({ roundIdx }) => ({
     text: `step ${roundIdx + 1}`,
     toolCalls: [{ name: 'run_command', args: { command: `echo round-${roundIdx}` } }],
@@ -395,6 +431,9 @@ const byModel = {
   'fake-empty-always': scenarios.emptyAlways,
   'fake-no-progress': scenarios.noProgress,
   'fake-plan-late': scenarios.planLate,
+  'fake-mangle-comma': scenarios.mangleComma,
+  'fake-mangle-nopath': scenarios.mangleNoPath,
+  'fake-long-parts': scenarios.longParts,
   'fake-unverified': scenarios.unverified,
 };
 

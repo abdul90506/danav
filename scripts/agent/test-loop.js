@@ -1496,3 +1496,58 @@ test('a plan survives the trimming of the round that produced it', () => {
   assert.match(log, /\[ \] Run the tests/);
   assert.ok(!messages.some((m) => m.role === 'assistant' && m.tool_calls?.some((tc) => tc.function.name === 'update_plan')), 'the round itself is gone');
 });
+
+// ===========================================================================
+// The arguments a weak model really sends: almost-JSON, and a body without a
+// destination. Both used to cost the user the whole step.
+// ===========================================================================
+
+test('a write whose JSON is almost-right is repaired, not rejected', async () => {
+  // A missing comma, literal newlines in the body and unescaped quotes in the
+  // HTML — the exact shape that used to answer "The arguments are not valid JSON".
+  const { events, result, ws } = await agentRun({ model: 'fake-mangle-comma', history: [{ role: 'user', content: 'make the page' }] });
+  assert.equal(result.stopReason, 'completed');
+  const written = fs.readFileSync(path.join(ws.root, 'index.html'), 'utf8');
+  assert.match(written, /^<!DOCTYPE html>/);
+  assert.match(written, /<h1>Hello, world<\/h1>/, 'the body survived in full');
+  assert.match(written, /class="lead"/, 'inner quotes are kept, not escaped away');
+  assert.match(written, /<\/html>\n?$/, 'nothing was dropped from the end');
+  const end = agentEvents(events, 'action_end').find((a) => a.result?.kind === 'write');
+  assert.equal(end.status, 'done', 'the write reported success');
+});
+
+test('a write with no path keeps its body and asks for the destination', async () => {
+  const { events, result, ws, requests } = await agentRun({ model: 'fake-mangle-nopath', history: [{ role: 'user', content: 'make the page' }] });
+  assert.equal(result.stopReason, 'completed');
+  assert.match(fs.readFileSync(path.join(ws.root, 'index.html'), 'utf8'), /Hello, world/, 'the file ended up where it belongs');
+
+  const text = (r) => r.messages.map((m) => String(m.content || '')).join('\n');
+  const modelView = requests.map(text).join('\n');
+  assert.match(modelView, /without a usable "path"/, 'the model was told what went wrong');
+  assert.match(modelView, /move_file with from="\.danav-recovered\//, 'and exactly how to fix it');
+  assert.match(modelView, /do NOT send the body again/, 'the body is not to be re-written');
+  // The body was written once: no assistant turn repeats it after the loss.
+  const resent = requests.filter((r) => r.messages.some((m) => m.role === 'assistant' && String(m.content || '').includes('<h1>Hello, world</h1>'))).length;
+  assert.equal(resent, 0, 'the model never had to retype the file');
+  assert.equal(fs.readFileSync(path.join(ws.root, 'index.html'), 'utf8'), HTML + '', 'the recovered file is the whole page');
+  assert.equal(fs.existsSync(path.join(ws.root, '.danav-recovered')), false, 'nothing is left behind');
+});
+
+test('a file longer than one output limit is written in parts and completed', async () => {
+  // 120+ lines: the first call is cut off mid-string by the provider, the model
+  // continues the SAME file with append_file. Long files are the point.
+  const { events, result, ws, requests } = await agentRun({ model: 'fake-long-parts', history: [{ role: 'user', content: 'write a long file' }] });
+  assert.equal(result.stopReason, 'completed');
+  const written = fs.readFileSync(path.join(ws.root, 'big.js'), 'utf8');
+  assert.match(written, /^\/\/ part 0-60/);
+  assert.match(written, /export const value119 = 119;/, 'the last line of the last part is there');
+  assert.ok(!/^\s*$/.test(written.trim()), 'no empty file');
+  const lines = written.trim().split('\n');
+  const parts = lines.filter((l) => l.startsWith('// part'));
+  assert.equal(parts.length, 3, `three parts: ${JSON.stringify(parts)}`);
+  assert.equal(new Set(lines).size, lines.length, 'no line was written twice while continuing');
+
+  const modelView = requests.map((r) => JSON.stringify(r.messages)).join('\n');
+  assert.match(modelView, /Continue WITHOUT repeating anything/, 'the cut-off part is explained');
+  assert.match(modelView, /append_file/, 'and the way forward is named');
+});

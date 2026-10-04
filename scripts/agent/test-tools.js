@@ -7,6 +7,7 @@ import path from 'node:path';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
 import { assertPublicUrl, buildToolset, displayArgs, isPrivateAddress, peekPartialArgs, portsInCommand, READ_ONLY_TOOLS, resolveSafeUrl, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
 import { createRedactor } from '../../server/agent/util.js';
+import { repairJsonText } from '../../server/agent/partial.js';
 
 const { test } = globalThis.__agentTest;
 const isWin = process.platform === 'win32';
@@ -1021,4 +1022,104 @@ test('get_preview_url tells the model what the page actually says (title, first 
     await new Promise((r) => server.close(r));
     await ws.dispose();
   }
+});
+
+// ===========================================================================
+// Tool-call arguments the way models really send them
+// ===========================================================================
+
+test('parseArgs: valid JSON passes through, almost-JSON is repaired, garbage is refused with a reason', async () => {
+  const { tools } = await setup();
+  const ok = tools.parseArgs('{"path": "a.txt", "content": "hi"}');
+  assert.deepEqual(ok, { ok: true, args: { path: 'a.txt', content: 'hi' }, repaired: false });
+
+  // a call with no arguments at all is not an error
+  assert.deepEqual(tools.parseArgs(''), { ok: true, args: {}, repaired: false });
+  assert.deepEqual(tools.parseArgs('   {}  '), { ok: true, args: {}, repaired: false });
+
+  const cases = {
+    'a missing comma between members': '{"path": "index.html" "content": "<h1>Hi</h1>\n<p>text</p>\n"}',
+    'raw newlines inside the body': '{"path": "a.md", "content": "# Title\n\n- one\n- two\n"}',
+    'unescaped quotes in HTML': '{"path": "p.html", "content": "<a href="x.html">go</a>\n<span class="y">z</span>\n"}',
+    'bare keys': '{path: "b.txt", content: "one\ntwo\nthree\n"}',
+    'a trailing comma': '{"path": "c.txt", "content": "x\ny\nz\n",}',
+    'a fenced code block': '```json\n{"path": "d.txt", "content": "1\n2\n3\n"}\n```',
+    'prose around the object': 'Here are the arguments:\n{"path": "e.txt", "content": "1\n2\n3\n"}\nDone.',
+    'single quotes': "{'path': 'f.txt', 'content': 'alpha\nbeta\ngamma\n'}",
+  };
+  for (const [what, text] of Object.entries(cases)) {
+    const r = tools.parseArgs(text);
+    assert.equal(r.ok, true, `${what}: ${JSON.stringify(r)}`);
+    assert.equal(r.repaired, true, `${what} was repaired`);
+    assert.equal(typeof r.args.path, 'string', `${what}: the path survived`);
+    assert.match(r.args.content, /\n|\<h1\>/, `${what}: the body survived`);
+  }
+  assert.equal(
+    tools.parseArgs("{'path': 'f.txt', 'content': 'alpha\nbeta\ngamma\n'}").args.content,
+    'alpha\nbeta\ngamma\n',
+    'single-quoted text is not mangled'
+  );
+
+  // the provider wrapped the whole object in a JSON string
+  const dr = tools.parseArgs(JSON.stringify(JSON.stringify({ path: 'g.txt', content: 'one\ntwo\n' })));
+  assert.equal(dr.ok, true);
+  assert.equal(dr.args.path, 'g.txt');
+
+  // what cannot be repaired says exactly why
+  const bad = tools.parseArgs('{"path": "a.txt", "content": ');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.reason, 'json');
+  assert.match(bad.message, /not valid JSON/);
+  assert.match(bad.message, /Send a single valid JSON object/);
+  assert.equal(tools.parseArgs('[1,2,3]').reason, 'not-object');
+  assert.equal(tools.parseArgs('"a string"').reason, 'not-object');
+});
+
+test('repairJsonText fixes structure only: the text inside the strings survives byte for byte', async () => {
+  const { tools } = await setup();
+  const body = 'const re = /\\d+/;\nconst s = "quoted";\nif (s) console.log(re);\n';
+  const good = JSON.stringify({ path: 'a.js', content: body });
+  const unchanged = repairJsonText(good);
+  assert.equal(unchanged.changed, false, 'valid JSON is left exactly as it is');
+  assert.equal(unchanged.text, good);
+
+  // the exact shape from the bug report: a missing comma between two members
+  const broken = good.replace('","content"', '" "content"');
+  assert.notEqual(broken, good);
+  const fixed = repairJsonText(broken);
+  assert.equal(fixed.changed, true);
+  assert.deepEqual(JSON.parse(fixed.text), { path: 'a.js', content: body }, 'backslashes and quotes are still the body');
+
+  // a template literal a model escaped by hand: \\' and \\n are not JSON escapes
+  const mangled = String.raw`{"path": "a.txt", "content": "Don\'t worry\nsecond line\n"}`;
+  const repaired = repairJsonText(mangled);
+  assert.equal(repaired.changed, true);
+  assert.equal(JSON.parse(repaired.text).content, "Don't worry\nsecond line\n");
+
+  // A body that IS a Windows path keeps its backslashes — JSON would otherwise
+  // read `\n` as a line break and silently corrupt `C:\new\file.txt`.
+  const win = String.raw`{"path": "w.txt", "content": "C:\Users\me\notes.txt"}`;
+  assert.equal(JSON.parse(repairJsonText(win).text).content, String.raw`C:\Users\me\notes.txt`);
+  // Anywhere else, \n is a line break and a lone backslash is kept as text.
+  const mixed = String.raw`{"path": "m.txt", "content": "line one\ntext with C:\Users\me in it\nend\n"}`;
+  assert.equal(
+    JSON.parse(repairJsonText(mixed).text).content,
+    'line one\ntext with ' + String.raw`C:\Users\me` + ' in it\nend\n'
+  );
+});
+
+test('recoverBody keeps a file body whose call lost its path', async () => {
+  const { tools } = await setup();
+  const body = 'line one\nline two\nline three\n';
+  const got = tools.recoverBody('write_file', JSON.stringify({ content: body, language: 'text' }));
+  assert.equal(got.content, body);
+  assert.equal(got.truncated, false);
+  assert.equal(tools.recoverBody('write_file', JSON.stringify({ file_content: body })).content, body, 'an alias key works');
+  assert.equal(tools.recoverBody('write_file', '{"content": "just one line"}'), null, 'one stray line is noise');
+  assert.equal(tools.recoverBody('run_command', '{"command": "ls"}'), null, 'not this tool');
+
+  const cut = JSON.stringify({ content: body + 'half' }).slice(0, -6);
+  const t = tools.recoverBody('write_file', cut);
+  assert.equal(t.truncated, true, 'a cut-off body is flagged');
+  assert.match(t.content, /line three/);
 });

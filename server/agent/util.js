@@ -8,6 +8,9 @@ import path from 'node:path';
 /** Directories that are never worth listing or searching unless asked for by name. */
 export const IGNORED_DIRS = new Set([
   '.git', 'node_modules', 'dist', 'build', '.next', '.nuxt', '.svelte-kit', '.cache',
+  // Bodies parked for a write whose path went missing (see loop.js): a hand-off
+  // buffer, never part of the project.
+  '.danav-recovered',
   '.turbo', '.vite', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache',
   'coverage', '.idea', '.vscode', 'target', '.gradle', '.parcel-cache',
 ]);

@@ -17,7 +17,7 @@ import { formatOutline, outline } from './outline.js';
 import { checkSyntax, syntaxWarning } from './check.js';
 import { addNote, readNotes, removeNotes, searchNotes } from './memory.js';
 import { observeFile, observeListing, observeOwned } from './policy.js';
-import { peekPartialArgs, salvageWrite, extractStringFields } from './partial.js';
+import { peekPartialArgs, salvageWrite, extractStringFields, repairJsonText } from './partial.js';
 import { limits } from './config.js';
 import { WorkspaceError } from './workspaces/base.js';
 import { formatBytes, truncateMiddle } from './util.js';
@@ -91,6 +91,11 @@ function isSensitiveAgentPath(value) {
 }
 
 const clip = (s, n) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
+
+/** The parser's own reason for rejecting something, for the message the model reads. */
+const lastJsonError = (text) => {
+  try { JSON.parse(String(text)); return 'unexpected value'; } catch (err) { return String(err?.message || 'invalid JSON').replace(/^JSON\.parse: /, ''); }
+};
 
 /** Hunks for the UI, with long lines cut so a minified file can't bloat the chat. */
 const trimHunks = (hunks) =>
@@ -1554,6 +1559,75 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
   }
 
   /**
+   * The file body out of a call whose path is missing or unusable: the work is
+   * there, only the destination is not. Used to hand the content back instead of
+   * throwing away hundreds of lines the model already wrote.
+   *
+   * @returns {null | { content: string, truncated: boolean }}
+   */
+  const recoverBody = (name, text) => {
+    const KEYS = {
+      write_file: ['content', 'contents', 'text', 'file_content'],
+      append_file: ['content', 'contents', 'text', 'file_content'],
+    }[name];
+    if (!KEYS || typeof text !== 'string' || !text.trim()) return null;
+    const field = extractStringFields(text, KEYS).find((f) => f.value.trim());
+    if (!field) return null;
+    if (splitLines(field.value).length < 3) return null; // not worth a detour
+    return { content: field.value, truncated: !field.complete || !fieldEndsCleanly(text, field) };
+  };
+
+  /**
+   * Did this string field really end where its closing quote was, or did an
+   * unescaped quote inside the body end it early? Only a comma, a closing
+   * bracket or the end of the text may follow it.
+   */
+  const fieldEndsCleanly = (text, field) =>
+    typeof field.end !== 'number' || /^[,}\]]/.test(text.slice(field.end).trim()) || text.slice(field.end).trim() === '';
+
+  /**
+   * Parse a tool call's arguments, repairing what can be repaired.
+   *
+   * A provider hands over whatever the model wrote, and weaker models write
+   * almost-JSON: literal newlines inside a string, unescaped quotes in an HTML
+   * body, a missing comma between members, a bare key, a code fence around the
+   * object. `repairJsonText` fixes those — it never invents meaning, it only
+   * makes the structure parseable — so the call runs instead of failing.
+   *
+   * @returns {{ ok: true, args: object, repaired: boolean } | { ok: false, reason: 'json' | 'not-object', message: string }}
+   */
+  const parseArgs = (text) => {
+    const raw = String(text ?? '').trim();
+    const asObject = (value) => {
+      if (typeof value === 'string' && value.trim().startsWith('{')) {
+        // Double-encoded: the provider wrapped the whole object in a JSON string.
+        try { value = JSON.parse(value); } catch { /* validated below */ }
+      }
+      return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+    };
+    if (!raw) return { ok: true, args: {}, repaired: false };
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch { /* repaired below */ }
+    const direct = asObject(parsed);
+    if (direct) return { ok: true, args: direct, repaired: false };
+    const fixed = repairJsonText(raw);
+    if (fixed?.changed) {
+      try {
+        const obj = asObject(JSON.parse(fixed.text));
+        if (obj) return { ok: true, args: obj, repaired: true };
+      } catch { /* fall through to the error */ }
+    }
+    if (parsed !== null || (fixed && fixed.changed)) {
+      return { ok: false, reason: 'not-object', message: 'Arguments must be a JSON object.' };
+    }
+    return {
+      ok: false,
+      reason: 'json',
+      message: `The arguments are not valid JSON (${lastJsonError(raw)}). Send a single valid JSON object.`,
+    };
+  };
+
+  /**
    * Recover usable arguments from tool-call JSON that did not parse — a call cut off by the output
    * limit, or a provider that mangled the quotes. The partial reader decodes each string field from
    * unfinished text, so the model's work is rescued instead of being thrown away with an error the
@@ -1562,25 +1636,33 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
    * @returns {null | { args: object, truncated: boolean }}
    */
   const recoverArgs = (name, text) => {
+    // Every name the tool itself accepts, so a call written as {"file_path": …,
+    // "contents": …} is recovered as readily as {"path": …, "content": …}.
     const KEYS = {
-      write_file: ['path', 'content'],
-      append_file: ['path', 'content'],
-      edit_file: ['path', 'old_string', 'new_string'],
+      write_file: { path: ['path', 'file_path', 'filepath', 'file', 'filename', 'target_file'], body: ['content', 'contents', 'text', 'file_content'] },
+      append_file: { path: ['path', 'file_path', 'filepath', 'file', 'filename', 'target_file'], body: ['content', 'contents', 'text', 'file_content'] },
+      edit_file: { path: ['path', 'file_path', 'filepath', 'file', 'filename', 'target_file'], body: ['old_string', 'new_string', 'old_str', 'new_str'] },
+    }[name];
+    if (!KEYS || typeof text !== 'string' || !text.trim()) return null;
+    const fields = extractStringFields(text, [...KEYS.path, ...KEYS.body]);
+    const find = (key) => fields.find((f) => f.key === key);
+    const pick = (names) => {
+      for (const n of names) {
+        const f = find(n);
+        if (f) return f;
+      }
+      return null;
     };
-    const keys = KEYS[name];
-    if (!keys || typeof text !== 'string' || !text.trim()) return null;
-    const fields = extractStringFields(text, keys);
-    const get = (k) => fields.find((f) => f.key === k);
-    const path = get('path');
+    const path = pick(KEYS.path);
     if (!path || !path.complete) return null;
     const out = { path: path.value };
     let complete = true;
-    for (const k of keys) {
-      if (k === 'path') continue;
-      const f = get(k);
-      if (!f) { complete = false; continue; }
-      out[k] = f.value;
-      complete = complete && f.complete;
+    for (const key of KEYS.body) {
+      const f = find(key);
+      if (!f) continue; // an alias that simply is not there is not an unfinished field
+      const canonical = key.startsWith('old_') ? 'old_string' : key.startsWith('new_') ? 'new_string' : 'content';
+      if (out[canonical] === undefined) out[canonical] = f.value;
+      complete = complete && f.complete && fieldEndsCleanly(text, f);
     }
     const hasBody =
       name === 'edit_file'
@@ -1598,6 +1680,8 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
 
   return {
     definitions: TOOL_DEFINITIONS,
+    parseArgs,
+    recoverBody,
     has: (name) => Object.prototype.hasOwnProperty.call(impl, name),
     displayArgs,
     peek: peekPartialArgs,

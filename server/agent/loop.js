@@ -15,7 +15,7 @@ import { buildSystemPrompt, formatSnapshot } from './prompt.js';
 import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun } from './journal.js';
 import { buildToolset, READ_ONLY_TOOLS } from './tools.js';
-import { checkAction, createLedger } from './policy.js';
+import { checkAction, createLedger, observeOwned } from './policy.js';
 import { splitLines } from './textops.js';
 import { memoryForPrompt } from './memory.js';
 import { createRedactor, genId, truncateMiddle } from './util.js';
@@ -681,6 +681,7 @@ export async function runAgent({
   const redact = createRedactor([provider.apiKey]);
   const state = {
     readFiles: new Set(), plan: [], changed: new Map(), singleEdits: new Map(), checks: [], toolFailures: 0,
+    parkedBodies: new Set(),
     subagentCalls: 0,
     /** Files being written straight to disk while the model writes them (see tools.liveWrite). */
     liveWriters: [], committedWrites: new Set(),
@@ -1112,6 +1113,37 @@ export async function runAgent({
         if (Object.keys(patch).length) send({ agent: { type: 'action_update', id: p.st.uiId, patch } });
       }
 
+      /** Where a body with no destination is parked until the model names its file. */
+      const RECOVERED_DIR = '.danav-recovered';
+
+      /**
+       * Keep a write whose destination is missing.
+       *
+       * Hundreds of lines the model already wrote are real work, and dropping them
+       * means watching the agent write the same file all over again. The body is
+       * written into the workspace instead, and the model is told to move it: one
+       * small call, no repeated tokens, nothing lost. The file is deleted at the end
+       * of the run if it was never claimed.
+       *
+       * @returns {Promise<null | { path: string, lines: number, body: string }>}
+       */
+      const parkBody = async (name, body) => {
+        try {
+          const dir = `${RECOVERED_DIR}`;
+          const absDir = typeof workspace.safePath === 'function' ? await workspace.safePath(dir) : await workspace.resolve(dir);
+          const file = `${absDir}/${String(name).replace(/[^a-z_]/gi, '')}-${stats.toolCalls}.txt`;
+          await workspace.writeText(file, body);
+          // The run wrote this file itself, so the policy gate must let the model
+          // move it into place without reading it back first.
+          observeOwned(state, file);
+          const rel = `${dir}/${String(name).replace(/[^a-z_]/gi, '')}-${stats.toolCalls}.txt`;
+          state.parkedBodies.add(rel);
+          return { path: rel, lines: splitLines(body).length, body };
+        } catch {
+          return null; // parking is a courtesy; it must never break the run
+        }
+      };
+
       /**
        * Run one tool call. The chat is told right away when it ends (action_end); the bookkeeping that must
        * happen in order — failure streaks, what the model reads back — is done afterwards, in `settle`.
@@ -1124,12 +1156,15 @@ export async function runAgent({
         let args = {};
         let argError = null;
         let argsTruncated = false;
-        try {
-          args = slot.args.trim() ? JSON.parse(slot.args) : {};
-          if (!args || typeof args !== 'object' || Array.isArray(args)) argError = 'Arguments must be a JSON object.';
-        } catch (err) {
-          // A provider can hand us mangled JSON; recover what the model actually wrote before
-          // declaring the call dead. A call cut off by the OUTPUT LIMIT is left to the salvage path
+        // The parser repairs what can be repaired (raw newlines in a body, an
+        // unescaped quote in HTML, a missing comma, a bare key, a code fence), so a
+        // call that is *almost* JSON runs instead of costing the user a step.
+        const parsedArgs = tools.parseArgs(slot.args);
+        if (parsedArgs.ok) {
+          args = parsedArgs.args;
+        } else {
+          // Still broken: recover what the model actually wrote before declaring the
+          // call dead. A call cut off by the OUTPUT LIMIT is left to the salvage path
           // below, which has its own, tested, carry-on-with-append_file flow.
           const recovered = round.finishReason === 'length' ? null : tools.recoverArgs(name, slot.args);
           if (recovered) {
@@ -1138,9 +1173,13 @@ export async function runAgent({
           } else {
             argError =
               round.finishReason === 'length'
-                ? 'Your tool call was cut off because the output limit was reached, so its JSON is incomplete. Send a smaller call — for big files, write them in several smaller files.'
-                : `The arguments are not valid JSON (${err.message}). Send a single valid JSON object.`;
+                ? 'Your tool call was cut off because the output limit was reached, so its JSON is incomplete. Do not send one huge call: write the first ~150 lines with write_file, then continue the SAME file with append_file, one call per part.'
+                : parsedArgs.message;
           }
+        }
+        if (!argError && (name === 'write_file' || name === 'append_file') && typeof args.path !== 'string') {
+          // A valid object with no path: keep the body, ask for the destination.
+          argError = `This ${name} call has no "path" (string). Send the path, and put it FIRST in the arguments.`;
         }
 
         const shownArgs = argError ? {} : tools.displayArgs(name, args);
@@ -1215,10 +1254,38 @@ export async function runAgent({
 
         const t0 = Date.now();
         let res;
+
+        // A write whose PATH is missing — the object parsed but had no path, or the
+        // JSON was mangled beyond repair — still carries the file body. Park it and
+        // ask for the destination rather than making the model write it again.
+        const isWriteCall = name === 'write_file' || name === 'append_file';
+        const rescued = !res && argError && round.finishReason === 'length' && isWriteCall ? tools.salvageWrite(name, slot.args) : null;
+        if (argError && !rescued && isWriteCall) {
+          const body = tools.recoverBody(name, slot.args) || (typeof args.content === 'string' && splitLines(args.content).length >= 3 ? { content: args.content, truncated: false } : null);
+          const parked = body ? await parkBody(name, body.content) : null;
+          if (parked) {
+            const lost = body.truncated ? ' It was cut off, so the half-written last line was dropped.' : '';
+            const message =
+              `This ${name} call arrived without a usable "path", so nothing was written where you meant.${lost}\n` +
+              `The body is NOT lost: ${parked.lines} complete lines are saved at ${parked.path}.\n` +
+              `Call move_file with from="${parked.path}" and to="<the path you meant>" to put it in place — do NOT send the body again. ` +
+              `Then continue from the file's last line.\n(Original error: ${argError})`;
+            res = {
+              ok: false,
+              failedSoft: true, // guidance, not a failure streak
+              recovered: true,
+              error: message,
+              output: `Error: ${message}`,
+              ui: { kind: 'write', ok: false, path: parked.path, recovered: true },
+            };
+          }
+        }
+
         // A big write_file that hits the output limit arrives as unfinished JSON. Throwing it away wastes
         // everything the model wrote: keep every complete line, and tell it to carry on with append_file.
-        const rescued = argError && round.finishReason === 'length' ? tools.salvageWrite(name, slot.args) : null;
-        if (rescued) {
+        if (res) {
+          // already answered by the parked-body path above
+        } else if (rescued) {
           const salvaged = { path: rescued.path, content: rescued.content, _partial: true };
           if (writer) Object.assign(salvaged, { _original: writer.original, _originalExisted: writer.existed });
           const saved = await tools.execute(name, salvaged, ctx);
@@ -1406,6 +1473,23 @@ export async function runAgent({
       send({ error: message });
     }
   } finally {
+    // Bodies parked for a missing path are a hand-off buffer: once the run is over,
+    // anything the model did not claim is deleted rather than left in the workspace.
+    if (state.parkedBodies.size) {
+      let dir = null;
+      for (const parked of state.parkedBodies) {
+        try {
+          const abs = typeof workspace.safePath === 'function' ? await workspace.safePath(parked) : await workspace.resolve(parked);
+          dir ||= abs.slice(0, Math.max(abs.lastIndexOf('/'), abs.lastIndexOf('\\')));
+          const st = await workspace.stat(abs);
+          if (st?.type === 'file') await workspace.remove(abs).catch(() => {});
+        } catch {
+          /* best effort: a leftover draft must never turn a finished run into an error */
+        }
+      }
+      if (dir) await workspace.remove(dir).catch(() => {}); // the folder too, if it is now empty
+    }
+
     // A run that stopped mid-write must not leave half a file behind: put back what was there.
     for (const w of state.liveWriters) {
       if (!state.committedWrites.has(w)) await w.rollback().catch(() => {});
