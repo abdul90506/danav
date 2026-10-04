@@ -223,6 +223,11 @@ export const scenarios = {
     return { text: 'The file is complete.' };
   },
 
+  /** The ANSWER hits the output limit (no tool call): the run must ask for the rest. */
+  lengthText: ({ roundIdx }) => (roundIdx === 0
+    ? { text: 'Here is the first half of the explanation, cut off mid-', finishReason: 'length' }
+    : { text: 'sentence — and here is the rest of it.' }),
+
   loop: ({ roundIdx }) => ({
     text: `step ${roundIdx + 1}`,
     toolCalls: [{ name: 'run_command', args: { command: `echo round-${roundIdx}` } }],
@@ -431,6 +436,7 @@ const byModel = {
   'fake-empty-always': scenarios.emptyAlways,
   'fake-no-progress': scenarios.noProgress,
   'fake-plan-late': scenarios.planLate,
+  'fake-length-text': scenarios.lengthText,
   'fake-mangle-comma': scenarios.mangleComma,
   'fake-mangle-nopath': scenarios.mangleNoPath,
   'fake-long-parts': scenarios.longParts,

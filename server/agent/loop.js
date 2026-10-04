@@ -802,6 +802,7 @@ export async function runAgent({
     let wrapUp = null; // set once a budget runs out or the model keeps failing
     let nudged = false;
     let verifyNudged = false;
+    let continuations = 0; // answers that hit the output limit and were continued
     let planNudged = false;
 
     // ---- rounds -------------------------------------------------------------
@@ -1012,6 +1013,22 @@ export async function runAgent({
       // ---- the model is done talking -----------------------------------------
       if (calls.length === 0) {
         const said = round.text.trim();
+
+        // The provider stopped because the ANSWER itself hit the output limit (not
+        // a tool call): the user is looking at a sentence that breaks off mid-word.
+        // Ask for the rest — once or twice — instead of shipping half a reply.
+        if (said && round.finishReason === 'length' && !wrapUp && continuations < 2) {
+          continuations++;
+          send({ agent: { type: 'notice', message: 'The answer hit the output limit — asking the model to continue where it stopped.' } });
+          messages.push({ role: 'assistant', content: round.text });
+          messages.push({
+            role: 'user',
+            content:
+              '[system notice] Your message was cut off by the output limit. Continue from exactly where it stopped: ' +
+              'no repetition of what you already wrote, no starting over, no second greeting.',
+          });
+          continue;
+        }
 
         // Nothing at all: no answer and no tool call. This happens with a
         // reasoning model that spent its whole turn thinking, or a provider that

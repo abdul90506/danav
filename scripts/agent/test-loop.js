@@ -1551,3 +1551,18 @@ test('a file longer than one output limit is written in parts and completed', as
   assert.match(modelView, /Continue WITHOUT repeating anything/, 'the cut-off part is explained');
   assert.match(modelView, /append_file/, 'and the way forward is named');
 });
+
+test('an answer cut off by the output limit is continued, not shipped half-written', async () => {
+  const { result, requests, events } = await agentRun({ model: 'fake-length-text', history: [{ role: 'user', content: 'explain the design' }] });
+  assert.equal(result.stopReason, 'completed');
+
+  const second = requests[1].messages;
+  const partialIdx = second.findIndex((m) => m.role === 'assistant' && String(m.content).includes('cut off mid-'));
+  assert.ok(partialIdx >= 0, 'the half-written answer was kept as the assistant turn');
+  const noticeIdx = second.findIndex((m) => m.role === 'user' && /cut off by the output limit/.test(String(m.content)));
+  assert.ok(noticeIdx > partialIdx, 'the continuation request follows it');
+  assert.match(String(second[noticeIdx].content), /no repetition of what you already wrote/);
+
+  const notices = events.filter((e) => e.agent?.type === 'notice').map((e) => String(e.agent.message || '')).join(' | ');
+  assert.match(notices, /answer hit the output limit/, 'the user is told why the answer paused');
+});
