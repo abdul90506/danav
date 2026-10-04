@@ -351,6 +351,28 @@ test('edit_file replaces a named definition without the model copying its body',
   }
 });
 
+test('a partial read says what is still below it, from the index', async () => {
+  const root = project();
+  try {
+    // A file with a real stretch between the top and its definitions, written
+    // before the index is built for this run.
+    const lines = [];
+    for (let i = 0; i < 80; i++) lines.push(`// line ${i + 1}`);
+    lines.push('export function deepThing() {', '  return 1;', '}');
+    fs.writeFileSync(path.join(root, 'src/long.ts'), lines.join('\n'));
+
+    const ws = await workspaceFor(root);
+    const { run } = toolsetFor(ws);
+    // Any index tool loads the index for this run.
+    await run('find_symbol', { name: 'toggleTheme' });
+
+    const ranged = await run('read_file', { path: 'src/long.ts', start_line: 1, end_line: 3 });
+    assert.match(ranged.output, /\d+ lines below this range\. Definitions there: deepThing \(L\d+\)\./, 'a skipped range is named, with what lives down there');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('an ambiguous edit answers with the candidates, and occurrence is the one-call fix', async () => {
   const root = project();
   try {

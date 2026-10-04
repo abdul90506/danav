@@ -164,6 +164,13 @@ of its file — one-line CSS rules included, which the CSS outline used not to s
 Near misses stay labelled as near misses, so a weak suggestion can never hide a real
 declaration behind it.
 
+Two smaller things the same work added: a **partial read says what is still below it**
+(`read_file` lines 1–300 of a 900-line file ends with *"600 lines below this range.
+Definitions there: deep (L601), deeper (L701)"* — a map instead of a cliff), and the
+**workspace listing shrinks when the index is rich**, because a second-level dump of
+paths already described by the repo map is tokens and attention spent on repetition. A
+project with no code to index keeps the full listing, exactly as before.
+
 Three habits come with it, and the prompt states them as rules: find code with the
 index instead of by reading whole files, never read the same thing twice in one run
 (a repeat full read comes back as "unchanged since you read it" instead of burning

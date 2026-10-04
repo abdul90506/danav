@@ -1311,7 +1311,26 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       }
       const truncated = !many && last < total && args.end_line === undefined;
       const header = many ? `${rel(abs)} — ${total} lines; ${shown.length} chunks: ${shown.map(([a0, b0]) => `${a0}-${b0}`).join(', ')}` : `${rel(abs)} — lines ${first}-${last} of ${total}`;
-      const footer = truncated ? `\n[${total - last} more lines. Continue with read_file start_line=${last + 1}, or call file_outline to jump straight to what you need.]` : '';
+      /**
+       * The part of a long file you have not read yet, named from the index when it
+       * is loaded: "still below: saveDraft (L412), renderFooter (L980)" is what
+       * turns a partial read into a map instead of a cliff — one line, no extra
+       * call, and only ever real definitions.
+       */
+      const stillBelow = (() => {
+        const remaining = total - last;
+        // Worth saying when there is a real stretch left — either the read was cut
+        // off, or a range was asked for that skips most of the file.
+        if (remaining <= 0 || (!truncated && remaining < 25)) return '';
+        const file = cachedIndex(ws.id)?.files?.[rel(abs).replace(/\\/g, '/')];
+        const next = (file?.symbols || []).filter((s) => s.line > last).slice(0, 3);
+        return next.length ? next.map((s) => `${s.name} (L${s.line})`).join(', ') : '';
+      })();
+      const footer = truncated
+        ? `\n[${total - last} more lines. Continue with read_file start_line=${last + 1}, or call file_outline to jump straight to what you need.${stillBelow ? ` Still below: ${stillBelow}.` : ''}]`
+        : stillBelow
+          ? `\n[${total - last} lines below this range. Definitions there: ${stillBelow}.]`
+          : '';
       return {
         output: `${header}\n${safe(body)}${footer}`,
         ui: { kind: 'read', path: rel(abs), startLine: first, endLine: last, totalLines: total, truncated, ...(many ? { ranges: shown } : {}) },

@@ -335,6 +335,26 @@ test('while a run works, none of its own words reach the transcript — and the 
   assert.match(finished, /line written|lines written/, 'and is still there in the trail');
 });
 
+test('the index tools read as plain rows in the trail', async () => {
+  const fmt = await load('src/agent/format.ts');
+  const base = { id: 'c1', tool: 'find_symbol', status: 'done', args: { name: 'createPanelStore' } };
+
+  const looked = fmt.actionLabel({ ...base, result: { kind: 'symbol', name: 'createPanelStore', definitions: 1, references: 4, files: 3 } });
+  assert.deepEqual([looked.verb, looked.target, looked.meta], ['Looked up', 'createPanelStore', '1 defined · 4 used in 3 files']);
+
+  const ranked = fmt.actionLabel({ id: 'c2', tool: 'relevant_files', status: 'done', args: { query: 'theme toggle' }, result: { kind: 'match', count: 4 } });
+  assert.deepEqual([ranked.verb, ranked.target, ranked.meta], ['Ranked files for', 'theme toggle', '4 files']);
+
+  const mapped = fmt.actionLabel({ id: 'c3', tool: 'code_map', status: 'done', args: {}, result: { kind: 'map', count: 150, symbols: 1400 } });
+  assert.deepEqual([mapped.verb, mapped.target, mapped.meta], ['Mapped', 'the project', '150 files · 1400 definitions']);
+
+  // ...and they group with the other reading tools, not as unknowns.
+  assert.equal(fmt.trailKind('find_symbol'), 'analyze');
+  assert.equal(fmt.trailKind('relevant_files'), 'explore');
+  assert.equal(fmt.trailKind('code_map'), 'explore');
+  assert.equal(fmt.trailGroupLabel('explore', 3), '3 places explored');
+});
+
 test('a live row carries no count until the count is a fact', async () => {
   const fmt = await load('src/agent/format.ts');
   const base = { id: 'a1', tool: 'edit_file', status: 'running', args: { path: 'a.js' } };
