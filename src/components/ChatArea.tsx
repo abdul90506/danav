@@ -20,6 +20,8 @@ interface ChatAreaProps {
   agentMode?: boolean;
   /** The sidebar is hidden on desktop, so the reveal button floats over the chat. */
   sidebarCollapsed?: boolean;
+  /** Which conversation this is. Changing it means a different chat is on screen. */
+  conversationId?: string | null;
 }
 
 const ChatAreaInner: React.FC<ChatAreaProps> = ({
@@ -34,6 +36,7 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
   onOpenPreview,
   agentMode,
   sidebarCollapsed,
+  conversationId,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -147,6 +150,20 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
   useEffect(() => {
     follow();
   }, [messages, follow]);
+
+  /**
+   * Opening another chat starts at its newest message.
+   *
+   * Without this, "paused" carried over from the previous conversation: you scroll
+   * up in one chat, switch, and the new one opens somewhere in the middle of its
+   * history with the newest answer out of sight. A conversation switch is not a
+   * scroll, so it resets the follow.
+   */
+  useEffect(() => {
+    scrollToBottom(false);
+    const frame = requestAnimationFrame(() => scrollToBottom(false));
+    return () => cancelAnimationFrame(frame);
+  }, [conversationId, scrollToBottom]);
 
   /**
    * Anything that changes the height of the transcript after the fact — an image

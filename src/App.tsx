@@ -1536,6 +1536,7 @@ export const App: React.FC = () => {
               onOpenPreview={openPreview}
               agentMode={agentOn}
               sidebarCollapsed={isSidebarCollapsed}
+              conversationId={activeConversation?.id}
               onWatchMedia={onWatchMediaStable}
             />
 
