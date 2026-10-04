@@ -37,6 +37,9 @@ const ALIASES = {
   from: ['source', 'src', 'old_path'],
   to: ['destination', 'dest', 'new_path', 'target'],
   pattern: ['regex', 'query', 'search', 'name'],
+  timeout_seconds: ['timeout', 'timeout_s', 'timeoutSec'],
+  start_line: ['start', 'from_line', 'line_start'],
+  end_line: ['end', 'to_line', 'line_end'],
 };
 
 /** Models drift on argument names; accept the common synonyms. */
@@ -594,6 +597,72 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
   /** resolve + (for local) symlink-safe */
   const target = async (p) => (typeof ws.safePath === 'function' ? ws.safePath(p) : ws.resolve(p));
 
+  /** Bounded edit distance: only used to point at a likely typo. */
+  const closeEnough = (a, b, max = 2) => {
+    if (Math.abs(a.length - b.length) > max) return false;
+    let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= a.length; i++) {
+      const row = [i];
+      for (let j = 1; j <= b.length; j++) {
+        row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+      if (Math.min(...row) > max) return false;
+      prev = row;
+    }
+    return prev[b.length] <= max;
+  };
+
+  /**
+   * The nearest things that DO exist next to a path that does not. A typo is the
+   * cheapest way for a run to waste a step — and the step after it, and the one
+   * after that — so "File not found" comes with the names that are actually there.
+   */
+  const nearNames = async (abs, limit = 3) => {
+    const dir = path.dirname(abs);
+    const base = String(path.basename(abs) || '').toLowerCase();
+    if (!base) return [];
+    let names = [];
+    try {
+      const { entries } = await ws.listTree(dir, { depth: 1, maxEntries: 300 });
+      names = entries.map((e) => `${e.path}${e.type === 'dir' ? '/' : ''}`);
+    } catch {
+      return []; // the folder is not there either: nothing useful to suggest
+    }
+    const stem = (s) => s.replace(/\/$/, '').replace(/\.[^.]+$/, '').toLowerCase();
+    const want = stem(base);
+    const score = (name) => {
+      const n = name.replace(/\/$/, '').toLowerCase();
+      const ns = stem(n);
+      if (n === base) return 0;
+      if (ns === want) return 1; // the same file with another extension
+      if (ns.startsWith(want) || want.startsWith(ns)) return 2; // src for "sr"
+      if (want.length >= 4 && (ns.includes(want) || want.includes(ns))) return 3;
+      return closeEnough(ns, want, 2) ? 4 : -1;
+    };
+    return names
+      .map((n) => ({ n, s: score(n) }))
+      .filter((x) => x.s >= 0)
+      .sort((a, b) => a.s - b.s)
+      .slice(0, limit)
+      .map((x) => x.n);
+  };
+
+  /** " Did you mean x or y?" — empty when nothing close exists. */
+  const hintFor = async (abs) => {
+    const near = await nearNames(abs);
+    return near.length ? ` Did you mean ${near.map((n) => `"${n}"`).join(' or ')}?` : '';
+  };
+
+  /** A not-found error, told with the names that are there. */
+  const explainMissing = async (err, abs) => {
+    // Only a missing path gets a suggestion: "src is a directory" needs no list.
+    if (err?.code && err.code !== 'not_found') return err;
+    const hint = await hintFor(abs);
+    if (!hint) return err;
+    const message = `${err?.message || String(err)}${hint}`;
+    return err instanceof WorkspaceError ? new WorkspaceError(message, err.code) : new ToolError(message);
+  };
+
   const noteChange = (ctx, path, added, removed) => {
     const cur = ctx.state.changed.get(path) || { added: 0, removed: 0 };
     ctx.state.changed.set(path, { added: cur.added + added, removed: cur.removed + removed });
@@ -800,7 +869,9 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
     async list_dir(args, ctx) {
       const abs = await target(optStr(args, 'path') || '.');
       const depth = clampInt(args.depth, 1, 4, 1);
-      const { entries, truncated } = await ws.listTree(abs, { depth, maxEntries: 300 });
+      let listing;
+      try { listing = await ws.listTree(abs, { depth, maxEntries: 300 }); } catch (err) { throw await explainMissing(err, abs); }
+      const { entries, truncated } = listing;
       // Everything the listing revealed is now something the agent has looked
       // at, and the folder itself is one whose contents it knows. The policy
       // gate reads this back before it lets a delete through.
@@ -815,7 +886,8 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
 
     async read_file(args, ctx) {
       const abs = await target(reqStr(args, 'path'));
-      const r = await ws.readText(abs);
+      let r;
+      try { r = await ws.readText(abs); } catch (err) { throw await explainMissing(err, abs); }
       if (r.binary) throw new ToolError(`${rel(abs)} is a binary file (${formatBytes(r.size)}); it cannot be shown as text.`);
       ctx.state.readFiles.add(abs);
       observeFile(ctx.state, abs);
@@ -863,7 +935,8 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
 
     async file_outline(args, ctx) {
       const abs = await target(reqStr(args, 'path'));
-      const r = await ws.readText(abs);
+      let r;
+      try { r = await ws.readText(abs); } catch (err) { throw await explainMissing(err, abs); }
       if (r.binary) throw new ToolError(`${rel(abs)} is a binary file; it has no outline.`);
       ctx.state.readFiles.add(abs);
       observeFile(ctx.state, abs);
@@ -879,7 +952,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       guardWrite(abs);
       if (typeof args.content !== 'string') throw new ToolError('Missing required argument "content" (string).');
       const { content, fixed } = fixDoubleEscaped(args.content);
-      if (content.length > limits.maxWriteChars) throw new ToolError(`content is ${content.length} characters; the limit is ${limits.maxWriteChars}. Split it across several files.`);
+      if (content.length > limits.maxWriteChars) throw new ToolError(`content is ${content.length} characters, and one file can hold at most ${limits.maxWriteChars} here. Generate the file with a script (run_command) or split it into several files.`);
 
       let old = '';
       let existed = false;
@@ -924,13 +997,17 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       // a file that was cut off mid-line (or never ended with a newline) must not glue the next part onto it
       const glue = exists && text !== '' && !text.endsWith('\n') && !content.startsWith('\n') ? '\n' : '';
       const next = text + glue + content;
-      if (next.length > limits.maxWriteChars) throw new ToolError(`The file would be ${next.length} characters; the limit is ${limits.maxWriteChars}.`);
+      if (next.length > limits.maxWriteChars) throw new ToolError(`Appending would make ${rel(abs)} ${next.length} characters, and one file can hold at most ${limits.maxWriteChars} here. Write the rest to another file, or generate the whole file with a script (run_command).`);
       await ws.writeText(abs, next);
       observeOwned(ctx.state, abs);
       const d = diffSummary(text, next, { maxPreviewLines: 30 });
       noteChange(ctx, rel(abs), d.added, d.removed);
+      // A file written in parts is continued by line: name the line the next part
+      // starts after, so a chunked write always knows where it stands.
+      const tail = splitLines(next).slice(-1)[0] || '';
+      const ending = d.totalLines > 1 && tail ? ` It now ends at line ${d.totalLines} with: ${tail.length > 120 ? `${tail.slice(0, 119)}…` : tail}` : '';
       const res = {
-        output: `Appended ${d.added} line${d.added === 1 ? '' : 's'} to ${rel(abs)}${exists ? '' : ' (new file)'} — it now has ${d.totalLines} lines.`,
+        output: `Appended ${d.added} line${d.added === 1 ? '' : 's'} to ${rel(abs)}${exists ? '' : ' (new file)'} — it now has ${d.totalLines} lines.${ending}`,
         ui: { kind: 'append', path: rel(abs), created: !exists, added: d.added, removed: d.removed, totalLines: d.totalLines, hunks: trimHunks(d.hunks) },
       };
       if (args._partial) res.ui.partial = true;
@@ -941,7 +1018,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const abs = await target(reqStr(args, 'path'));
       guardWrite(abs);
       const { exists, text } = await readExisting(abs);
-      if (!exists) throw new ToolError(`${rel(abs)} does not exist. Use write_file to create it.`);
+      if (!exists) throw new ToolError(`${rel(abs)} does not exist. Use write_file to create it.${await hintFor(abs)}`);
       // "  12\tcode" is how read_file displays lines; the prefix is not in the file
       let { old_string, new_string } = args;
       if (typeof old_string === 'string') {
@@ -1070,13 +1147,18 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const pattern = reqStr(args, 'pattern');
       const abs = await target(optStr(args, 'path') || '.');
       const max = clampInt(args.max_results, 1, 300, 100);
-      const { matches, truncated } = await ws.grep({ pattern, path: abs, glob: optStr(args, 'glob'), ignoreCase: asBool(args.case_insensitive), maxResults: max });
+      const { matches, truncated, literal } = await ws.grep({ pattern, path: abs, glob: optStr(args, 'glob'), ignoreCase: asBool(args.case_insensitive), maxResults: max });
       const files = new Set(matches.map((m) => m.path));
-      const out = matches.length
+      const asLiteral = literal
+        ? `\n(the pattern is not a valid regular expression, so its characters were matched literally — escape the special ones to search as a regex)`
+        : '';
+      const found = matches.length
         ? `${matches.length}${truncated ? '+' : ''} match${matches.length === 1 ? '' : 'es'} in ${files.size} file${files.size === 1 ? '' : 's'}:\n` +
           matches.map((m) => `${m.path}:${m.line}: ${m.text}`).join('\n') +
-          (truncated ? '\n… (limit reached; narrow the pattern, path or glob)' : '')
-        : `No matches for /${pattern}/ in ${rel(abs)}.`;
+          (truncated ? '\n… (limit reached; narrow the pattern, path or glob)' : '') +
+          asLiteral
+        : `No matches for ${literal ? 'the literal text' : 'the pattern'} \`${pattern}\` in ${rel(abs)}.${asLiteral}`;
+      const out = found;
       return { output: safe(out), ui: { kind: 'grep', pattern: clip(pattern, 120), count: matches.length, files: files.size, truncated } };
     },
 

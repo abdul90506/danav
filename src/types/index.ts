@@ -148,6 +148,11 @@ export interface AgentActionResult {
   dryRun?: boolean;
   /** A write rescued from a call that was cut off by the output limit. */
   partial?: boolean;
+  /**
+   * A write whose call lost its path: the body was saved (parked) and the run was
+   * told to move it into place. Nothing failed — the row says so.
+   */
+  recovered?: boolean;
   /** Result of the syntax check run right after a write. */
   check?: { lang: string; ok: boolean; message?: string; path?: string };
   command?: string;

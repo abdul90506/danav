@@ -375,9 +375,13 @@ export class SandboxWorkspace extends BaseWorkspace {
     const target = isFile ? posix.basename(abs) : '.';
     const excludes = isFile ? '' : [...IGNORED_DIRS].map((n) => `--exclude-dir=${shQuote(n)}`).join(' ');
     const include = glob && !glob.includes('/') ? `--include=${shQuote(glob)}` : '';
+    // Same rule as the local workspace: an invalid pattern is searched literally
+    // (grep -F) rather than failing, and the caller is told which one it was.
+    let literal = false;
+    try { new RegExp(pattern); } catch { literal = true; }
     // -H forces "path:line:text" whether the target is a file or a directory.
     const cmd =
-      `cd "$DANAV_D" && { grep -rnIHP ${ignoreCase ? '-i ' : ''}${include} ${excludes} --max-count=100 ` +
+      `cd "$DANAV_D" && { grep -rnIH${literal ? 'F' : 'P'} ${ignoreCase ? '-i ' : ''}${include} ${excludes} --max-count=100 ` +
       `-e "$DANAV_PAT" -- ${shQuote(target)} 2>&1 | head -n ${maxResults * 3 + 5}; exit \${PIPESTATUS[0]}; }`;
     const r = await this.execRaw(cmd, { envs: { DANAV_D: dir, DANAV_PAT: pattern } });
 
@@ -398,7 +402,7 @@ export class SandboxWorkspace extends BaseWorkspace {
     if (matches.length === 0 && errors.length > 0 && r.exitCode === 2) {
       throw new WorkspaceError(`grep failed: ${errors.slice(0, 2).join(' ').slice(0, 300)}`, 'bad_pattern');
     }
-    return { matches: matches.slice(0, maxResults), truncated };
+    return { matches: matches.slice(0, maxResults), truncated, literal };
   }
 
   async findFiles({ pattern, path: abs, maxResults = 200 }) {

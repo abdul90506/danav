@@ -132,6 +132,20 @@ function rawLabel(a: AgentAction): ActionLabel {
     if (a.status === 'denied') {
       return { verb: 'Skipped', ...extra, meta: 'not allowed', expandable: false, added: undefined, removed: undefined, lines: undefined };
     }
+    if (r?.recovered) {
+      // The call arrived without a usable path, so its body was parked instead of
+      // lost. Nothing failed: the file exists, it just has no destination yet.
+      return {
+        verb: 'Saved',
+        target: r.path,
+        targetKind: 'file',
+        meta: 'waiting for a path',
+        added: undefined,
+        removed: undefined,
+        lines: undefined,
+        expandable: false,
+      };
+    }
     if (a.status === 'blocked') {
       // Refused by the run, not by the user and not by a bug: the agent tried to
       // change something it had never looked at. It gets told what to read, so

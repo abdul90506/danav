@@ -830,6 +830,19 @@ test('wording: a tool that FAILED says so, with the first line of the reason', (
   assert.equal(s.verb, 'Search failed:');
 });
 
+test('wording: a write whose body was saved without a path reads "Saved", not "Couldn\'t"', () => {
+  // The tool-call JSON arrived with no usable path. The body was parked, so the
+  // row must not claim the file failed to be written — it waits for a move.
+  const a = fmt.actionLabel(act({
+    tool: 'write_file',
+    status: 'error',
+    args: {},
+    result: { kind: 'write', ok: false, path: '.danav-recovered/write_file-1.txt', recovered: true },
+    error: 'This write_file call arrived without a usable "path", so nothing was written where you meant.\nThe body is NOT lost: 16 complete lines are saved at .danav-recovered/write_file-1.txt.',
+  }));
+  assert.deepEqual([a.verb, a.target, a.meta, a.expandable], ['Saved', '.danav-recovered/write_file-1.txt', 'waiting for a path', false]);
+});
+
 test('wording: an action the run REFUSED reads "Refused", not "Couldn\'t"', () => {
   // The gate stops a delete the agent never inspected. That is a redirection,
   // not a crash, and it must not be dressed up as one.

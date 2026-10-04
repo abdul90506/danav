@@ -55,7 +55,10 @@ const Diff: React.FC<{ hunks: AgentDiffHunk[] }> = ({ hunks }) => (
 
 const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
   const r = action.result;
-  const showError = action.status === 'error' && action.error && action.error !== 'Stopped' && action.error !== 'Interrupted' && !(r && typeof r.exitCode === 'number');
+  const recovered = action.status === 'error' && r?.recovered === true;
+  const showError =
+    action.status === 'error' && action.error && action.error !== 'Stopped' && action.error !== 'Interrupted' &&
+    !recovered && !(r && typeof r.exitCode === 'number');
 
   return (
     <div className="mt-1 mb-1.5 ml-0.5 pl-3 border-l-2 border-zinc-200/80 dark:border-zinc-800 animate-in fade-in duration-150">
@@ -119,6 +122,12 @@ const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
         </pre>
       )}
 
+      {recovered && (
+        <pre className="panel-scroll max-h-56 overflow-auto whitespace-pre-wrap break-words text-[12px] leading-5 font-mono text-amber-600 dark:text-amber-400">
+          {action.error}
+        </pre>
+      )}
+
       {showError && (
         <pre className="panel-scroll max-h-56 overflow-auto whitespace-pre-wrap break-words text-[12px] leading-5 font-mono text-rose-600 dark:text-rose-400">
           {action.error}
@@ -139,8 +148,11 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
   // A refusal is neither a crash nor a success: the run stopped the agent so it
   // could look first. Amber, so it reads as a redirection.
   const refused = action.status === 'blocked';
+  const recovered = action.status === 'error' && action.result?.recovered === true;
 
-  const verbTone = refused
+  // A parked body is the same kind of news: nothing is lost, the run needs one
+  // more step. Amber, so it does not read as a crash.
+  const verbTone = refused || recovered
     ? 'text-amber-600 dark:text-amber-400'
     : failedTool
       ? 'text-rose-600 dark:text-rose-400'

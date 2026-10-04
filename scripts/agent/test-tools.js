@@ -1123,3 +1123,59 @@ test('recoverBody keeps a file body whose call lost its path', async () => {
   assert.equal(t.truncated, true, 'a cut-off body is flagged');
   assert.match(t.content, /line three/);
 });
+
+test('a path with a typo is answered with the names that exist', async () => {
+  const { run, ws } = await setup();
+  await ws.writeText(await ws.resolve('app.js'), 'x\n');
+  await ws.writeText(await ws.resolve('notes.txt'), 'x\n');
+  await ws.mkdirp(await ws.resolve('src'));
+
+  const miss = await run('read_file', { path: 'app.ts' });
+  assert.equal(miss.ok, false);
+  assert.match(miss.error, /File not found: app\.ts/);
+  assert.match(miss.error, /Did you mean "app\.js"\?/);
+
+  const dir = await run('list_dir', { path: 'sr' });
+  assert.equal(dir.ok, false);
+  assert.match(dir.error, /Did you mean "src\/"\?/);
+
+  const edit = await run('edit_file', { path: 'notes.tx', old_string: 'x', new_string: 'y' });
+  assert.match(edit.error, /Did you mean "notes\.txt"\?/);
+
+  // a path that exists but is the wrong kind gets no pointless suggestion
+  const isDir = await run('read_file', { path: 'src' });
+  assert.match(isDir.error, /is a directory, not a file/);
+  assert.ok(!/Did you mean/.test(isDir.error));
+
+  // nothing similar in the folder: the error stays plain
+  const far = await run('read_file', { path: 'zzzz-qwerty.txt' });
+  assert.ok(!/Did you mean/.test(far.error));
+});
+
+test('a broken regular expression is reported as such, not as "no matches"', async () => {
+  const { run, ws } = await setup();
+  await ws.writeText(await ws.resolve('a.txt'), 'value (x) here\nplain line\n');
+
+  const bad = await run('grep_search', { pattern: '([' });
+  assert.equal(bad.ok, true);
+  assert.match(bad.output, /not a valid regular expression/);
+  assert.match(bad.output, /literal/);
+
+  // a search for text that really contains those characters still finds it
+  const lit = await run('grep_search', { pattern: '(x)' });
+  assert.match(lit.output, /value \(x\) here/);
+
+  // a valid regex says nothing about literal matching
+  const ok = await run('grep_search', { pattern: 'va\\w+' });
+  assert.match(ok.output, /value \(x\) here/);
+  assert.ok(!/literal/.test(ok.output));
+});
+
+test('run_command understands "timeout" as timeout_seconds', async () => {
+  if (isWin) return;
+  const { run } = await setup();
+  const r = await run('run_command', { command: 'sleep 3', timeout: 1 });
+  assert.equal(r.ui.timedOut, true, 'the timeout was applied');
+  assert.match(r.output, /timed out after 1s/);
+  assert.equal(r.failedSoft, true, 'a killed command is information, not a failure streak');
+});

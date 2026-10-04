@@ -256,9 +256,14 @@ export class LocalWorkspace extends BaseWorkspace {
   async grep({ pattern, path: abs, glob, ignoreCase = false, maxResults = 100 }) {
     const flags = ignoreCase ? 'i' : '';
     let re;
+    // A pattern that is not a valid regular expression (a model searching for
+    // "foo(bar" or "a[0]") is matched literally instead of failing — but the
+    // caller is told, so "not a valid regex" is never reported as "no matches".
+    let literal = false;
     try {
       re = new RegExp(pattern, flags);
     } catch {
+      literal = true;
       re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
     }
     const matches = [];
@@ -274,11 +279,11 @@ export class LocalWorkspace extends BaseWorkspace {
         matches.push({ path: file.rel, line: i + 1, text: lines[i].replace(/\r$/, '').slice(0, 300).trimEnd() });
         if (matches.length >= maxResults) {
           truncated = true;
-          return { matches, truncated };
+          return { matches, truncated, literal };
         }
       }
     }
-    return { matches, truncated };
+    return { matches, truncated, literal };
   }
 
   async findFiles({ pattern, path: abs, maxResults = 200 }) {
