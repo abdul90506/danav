@@ -64,16 +64,26 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
   const active = workspaces.find((w) => w.id === activeWorkspaceId) || null;
   const dot = active?.kind === 'sandbox' && sandboxState ? SANDBOX_DOT[sandboxState] : null;
 
+  // The open workspace menu closes the moment the user clicks away from it, or
+  // presses Escape — it must never be something they have to click twice to hide.
   useEffect(() => {
     if (!menuOpen) return;
-    const close = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-        setConfirmDelete(null);
-      }
+    const dismiss = () => {
+      setMenuOpen(false);
+      setConfirmDelete(null);
     };
-    document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current || !ref.current.contains(e.target as Node)) dismiss();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') dismiss();
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
   }, [menuOpen]);
 
   const pill = enabled

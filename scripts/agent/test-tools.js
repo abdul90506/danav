@@ -234,14 +234,11 @@ test('delete / move, and writes inside .git are refused', async () => {
   const { run, dir } = await setup();
   await run('write_file', { path: 'd/f.txt', content: 'x\n' });
   await run('write_file', { path: 'd/nested/g.txt', content: 'x\n' });
-  assert.equal((await run('delete_file', { path: 'd' })).ok, false); // non-empty without recursive
-  const gone = await run('delete_file', { path: 'd', recursive: true });
+  // Removal is a shell job: the plain form refuses a non-empty folder, rm does not.
+  assert.equal((await run('run_command', { command: 'rmdir d' })).ok, false);
+  const gone = await run('run_command', { command: 'rm -rf d' });
   assert.equal(gone.ok, true);
-  // A recursive delete says how much it covered: that is the part a person
-  // cannot see for themselves.
-  assert.equal(gone.ui.files, 2);
-  assert.equal(gone.ui.isDir, true);
-  assert.match(gone.output, /2 files removed/);
+  assert.equal(fs.existsSync(path.join(dir, 'd')), false, 'the folder and its contents are gone');
   await run('write_file', { path: 'a.txt', content: 'x\n' });
   const mv = await run('move_file', { from: 'a.txt', to: 'sub/b.txt' });
   assert.equal(mv.ui.kind, 'move');

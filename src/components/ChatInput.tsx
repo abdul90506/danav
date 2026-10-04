@@ -364,7 +364,18 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     return () => document.removeEventListener('mousedown', onDown);
   }, [controlsPinned]);
 
-  // Close menus on outside click
+  // Close menus on an outside click or Escape — a revealed menu is never a trap.
+  useEffect(() => {
+    const onKey = (e: Event) => {
+      if ((e as globalThis.KeyboardEvent).key !== 'Escape') return;
+      setModelDropdownOpen(false);
+      setThinkingDropdownOpen(false);
+      setPlusMenuOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
+
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {

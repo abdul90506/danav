@@ -115,6 +115,13 @@ export function removalTargets(command) {
   return out.slice(0, 12);
 }
 
+/** The workspace root, or a filesystem root — the one removal nothing protects by itself. */
+const isRootPath = (ws, abs) => {
+  const a = toPosix(String(abs || '')).replace(/\/+$/, '');
+  const r = toPosix(String(ws.root || '')).replace(/\/+$/, '');
+  return !a || a === '/' || /^[a-z]:$/i.test(a) || a === r;
+};
+
 const resolveIn = async (ws, p) => {
   try {
     return typeof ws.safePath === 'function' ? await ws.safePath(p) : ws.resolve(p);
@@ -186,39 +193,6 @@ export async function checkAction({ workspace: ws, state, name, args }) {
   const led = ledgerOf(state);
   if (!led || !ws || !args) return null;
 
-  if (name === 'delete_file') {
-    const abs = await resolveIn(ws, String(args.path || ''));
-    if (!abs) return null; // the tool's own error explains a path it cannot resolve
-    const st = await ws.stat(abs).catch(() => null);
-    if (!st?.type) return null; // nothing there — deleting it is not the agent's problem
-    const shown = ws.displayPath(abs);
-    if (st.type === 'file') {
-      if (known(led, abs)) return null;
-      return refusal(
-        `Refused: nothing was deleted. \`${shown}\` has not been opened in this run, so there is no way to tell a file you meant to remove from one you are about to lose. ` +
-          `Read it with read_file (or list its folder with list_dir) first, then delete it.`,
-        { kind: 'delete', path: shown, blocked: true }
-      );
-    }
-    if (!led.listed.has(abs)) {
-      return refusal(
-        `Refused: nothing was deleted. \`${shown}/\` is a folder and you have not looked inside it in this run. ` +
-          `Call list_dir on it (use depth to reach nested folders) and check the listing, then delete it.`,
-        { kind: 'delete', path: shown, isDir: true, blocked: true }
-      );
-    }
-    if (disposable(ws, abs)) return null; // node_modules & co: one look is the whole story
-    const { unknown, paths } = await uninspected(ws, abs, led, { n: MAX_WALK });
-    if (!unknown && paths.length) {
-      return refusal(
-        `Refused: nothing was deleted. A recursive delete of \`${shown}/\` would also remove ${missing(paths)}, which you have not looked at in this run. ` +
-          `List \`${shown}\` again with a deeper depth (list_dir depth=3 or more) until the whole tree has been seen, then delete it.`,
-        { kind: 'delete', path: shown, isDir: true, blocked: true }
-      );
-    }
-    return null;
-  }
-
   if (name === 'move_file') {
     const abs = await resolveIn(ws, String(args.from || ''));
     if (!abs) return null;
@@ -235,9 +209,14 @@ export async function checkAction({ workspace: ws, state, name, args }) {
     const targets = removalTargets(args.command);
     if (!targets.length) return null;
     const unseen = [];
+    const roots = [];
     for (const t of targets) {
       const abs = await resolveIn(ws, t);
       if (!abs) continue;
+      if (isRootPath(ws, abs)) {
+        roots.push(t);
+        continue;
+      }
       const st = await ws.stat(abs).catch(() => null);
       if (!st?.type) continue; // nothing there to lose
       if (st.type === 'dir') {
@@ -251,6 +230,13 @@ export async function checkAction({ workspace: ws, state, name, args }) {
         continue;
       }
       if (!known(led, abs)) unseen.push(ws.displayPath(abs));
+    }
+    if (roots.length) {
+      return refusal(
+        `Refused: the command was not run. \`${roots[0]}\` is the workspace itself — not a folder inside it — and removing it would take everything in it with it. ` +
+          `Remove the specific files or folders you mean instead, or, if the whole workspace is finished with, say so to the user and let them delete it.`,
+        { kind: 'command', command: String(args.command || ''), blocked: true }
+      );
     }
     if (!unseen.length) return null;
     const list = [...new Set(unseen)];

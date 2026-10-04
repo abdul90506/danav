@@ -103,16 +103,16 @@ if (args.includes('--sandbox')) {
       assert.match(bin.output, /binary file/);
     });
 
-    test('sandbox: delete, move, mkdir', async () => {
+    test('sandbox: remove, move, mkdir', async () => {
       // No create_dir tool: the parents come from writing the file.
       assert.equal((await run('write_file', { path: 'tmpdir/a/b/f.txt', content: 'x\n' })).ok, true);
       assert.equal((await ws.stat(ws.resolve('tmpdir/a/b'))).type, 'dir');
-      assert.equal((await run('delete_file', { path: 'tmpdir' })).ok, false, 'needs recursive');
       assert.equal((await run('move_file', { from: 'tmpdir/a/b/f.txt', to: 'moved/f.txt' })).ok, true);
       assert.equal((await ws.stat(ws.resolve('moved/f.txt'))).type, 'file');
-      assert.equal((await run('delete_file', { path: 'tmpdir', recursive: true })).ok, true);
+      // Deleting is a shell command now; the loop's gate is what refuses a target
+      // nobody has looked at, and test-policy pins that down.
+      assert.equal((await run('run_command', { command: 'rm -rf tmpdir' })).ok, true);
       assert.equal((await ws.stat(ws.resolve('tmpdir'))).type, null);
-      assert.match((await run('delete_file', { path: '.' })).output, /workspace root/);
     });
 
     test('sandbox: run_command — output, exit codes, cwd, env, no leaked app secrets', async () => {

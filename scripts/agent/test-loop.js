@@ -1015,17 +1015,17 @@ test('the run refuses to delete what it has never looked at, and says what to lo
   assert.equal(ends[0].status, 'blocked', `expected a refusal, got ${ends[0].status}: ${ends[0].error}`);
   assert.equal(ends[0].ok, false);
   assert.equal(ends[0].result.blocked, true);
-  assert.match(ends[0].error, /not looked inside/);
-  assert.match(ends[0].error, /list_dir/, 'and it names the call that would fix it');
+  assert.match(ends[0].error, /has not been inspected/, 'the refusal says why');
+  assert.match(ends[0].error, /list `legacy\//, 'and it names the call that would fix it');
   assert.equal(atRefusal[0].legacy, true, 'the folder was still there when it was refused');
   const refusal = requests.flatMap((r) => r.messages).find((m) => m.role === 'tool' && /Refused/.test(m.content));
   assert.ok(refusal, 'the model reads the refusal back as the tool result');
-  assert.match(refusal.content, /list_dir/);
+  assert.match(refusal.content, /list|read/);
 
   // 2. after listing it, the same delete goes through
   assert.equal(starts[1].tool, 'list_dir');
   assert.equal(ends[1].status, 'done');
-  assert.equal(starts[2].tool, 'delete_file');
+  assert.equal(starts[2].tool, 'run_command', 'removal goes through the shell now');
   assert.equal(ends[2].status, 'done');
   assert.equal(fs.existsSync(path.join(root, 'legacy')), false, 'and now it is really gone');
 
@@ -1556,28 +1556,31 @@ test('a run that goes quiet is asked to narrate, and a talkative one is left alo
   // The system prompt carries the contract...
   const silent = await agentRun({ model: 'fake-quiet', history: [{ role: 'user', content: 'write the two files' }] });
   const system = String(silent.requests[0].messages[0].content);
-  assert.match(system, /BEFORE you create or change files, one line/, 'the prompt asks for a line before a change');
-  assert.match(system, /AFTER something important/, 'and one after it');
-  assert.match(system, /End with a short summary/, 'and a short closing summary');
-  assert.match(system, /2–5 plain sentences, 500 characters is plenty/, 'the length is stated');
-  assert.match(system, /NO headings, NO bold section labels, NO bullet/, 'and so is the shape');
+  assert.match(system, /Most turns need no message at all/, 'the prompt says the rows already do the talking');
+  assert.match(system, /Never write progress-formula lines/, 'and bans the "I am going to…" filler');
+  assert.match(system, /I am going to check X/, 'naming the phrasings to avoid');
+  assert.match(system, /about 0–3 short lines for a whole run/, 'the budget for narration is explicit');
+  assert.match(system, /End with a short summary/, 'and a short closing summary is still required');
+  assert.match(system, /2–5 plain sentences, 500 characters is plenty/, 'its length is stated');
+  assert.match(system, /NO headings, NO bold section labels, NO bullet/, 'and so is its shape');
+  assert.match(system, /never describe work you did not do/i, 'the prompt forbids claiming work that never happened');
 
-  // ...and a run that ignores it is asked out loud, exactly once. The notices stay
-  // in the transcript, so the last request shows every one this run got.
-  const asked = silent.requests.at(-1).messages.filter((m) => /without saying anything to the user/.test(String(m.content)));
+  // ...and a run that ignores it is asked, exactly once. The notices stay in the
+  // transcript, so the last request shows every one this run got.
+  const asked = silent.requests.at(-1).messages.filter((m) => /without a word to the user/.test(String(m.content)));
   assert.equal(asked.length, 1, `one request for a spoken line, not a stream of them (${asked.length})`);
   assert.match(String(asked[0].content), /ONE short, plain sentence/, 'the ask is specific');
-  assert.match(String(asked[0].content), /no heading, no list, no repetition/, 'and bounded, so the chat stays clean');
+  assert.match(String(asked[0].content), /not an announcement of the tool call/, 'and asks for progress, not filler');
 
   // The reminder is for the model: the user never sees it as a message.
   const spoken = silent.events.filter((e) => typeof e.content === 'string').map((e) => e.content).join('');
-  assert.ok(!spoken.includes('without saying anything'), 'the reminder is not shown to the user');
+  assert.ok(!spoken.includes('without a word to the user'), 'the reminder is not shown to the user');
   assert.match(spoken, /Both files are written/, 'the run still ends with the summary');
 
   // A run that narrates every step never hears about it.
   const chatty = await agentRun({ model: 'fake-batch', history: [{ role: 'user', content: 'set the project up' }] });
   const chattyView = chatty.requests.map((r) => JSON.stringify(r.messages)).join('\n');
-  assert.ok(!/without saying anything to the user/.test(chattyView), 'no nagging when the model already explains itself');
+  assert.ok(!/without a word to the user/.test(chattyView), 'no nagging when the model already explains itself');
 });
 
 test('a run that would end without a word is asked for the closing summary', async () => {

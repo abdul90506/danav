@@ -397,7 +397,6 @@ export const TOOL_DEFINITIONS = [
     },
     ['edits']
   ),
-  fn('delete_file', 'Delete a file or folder. A non-empty folder needs recursive=true.', { path: P.path, recursive: { type: 'boolean' } }, ['path']),
   fn('move_file', 'Move or rename a file or folder.', { from: { type: 'string' }, to: { type: 'string' } }, ['from', 'to']),
   fn(
     'grep_search',
@@ -538,6 +537,10 @@ export const RETIRED_TOOLS = new Map([
     'create_dir',
     'write_file already creates every missing folder on its way to the file, so just write the file where you want it (or use run_command with "mkdir -p <path>" for an empty folder).',
   ],
+  [
+    'delete_file',
+    'removing things is a shell job now. Use run_command: "rm -f <file>", "rm -rf <folder>", or the platform equivalent ("del" / "rmdir /s" on Windows). The same look-before-you-leap rule guards it, so list or read what you are removing first. Never remove the workspace itself.',
+  ],
 ]);
 
 export const READ_ONLY_TOOLS = new Set([
@@ -571,7 +574,6 @@ export function displayArgs(name, rawArgs) {
     case 'file_outline':
     case 'write_file':
     case 'edit_file':
-    case 'delete_file': pick.path = s('path'); break;
     case 'move_file': pick.from = s('from'); pick.to = s('to'); break;
     case 'grep_search': pick.pattern = s('pattern'); pick.path = s('path'); pick.glob = s('glob'); break;
     case 'file_search': pick.pattern = s('pattern'); pick.path = s('path'); break;
@@ -1100,44 +1102,6 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         if (before && before.ok === false) res.ui.check = before; // keep the first failure
       }
       return res;
-    },
-
-    async delete_file(args, ctx) {
-      const abs = await target(reqStr(args, 'path'));
-      guardWrite(abs);
-      // Count what is about to go BEFORE it goes. A recursive delete is the one
-      // action whose scope a person cannot see from the outside, so the result
-      // says how much it covered instead of just "Deleted folder x".
-      let files = 0;
-      let counted = false;
-      let truncated = false;
-      const before = await ws.stat(abs).catch(() => null);
-      if (before?.type === 'dir') {
-        try {
-          const tree = await ws.listTree(abs, { depth: 4, maxEntries: 4000 });
-          truncated = tree.truncated;
-          counted = !truncated;
-          files = tree.entries.filter((e) => e.type !== 'dir').length;
-        } catch {
-          /* the count is a courtesy; the delete is the job */
-        }
-      }
-      const { type } = await ws.remove(abs, { recursive: asBool(args.recursive) });
-      // It is gone; nothing about it is worth remembering.
-      ctx.state.ledger?.seen.delete(abs);
-      ctx.state.ledger?.owned.delete(abs);
-      ctx.state.ledger?.listed.delete(abs);
-      const scope = type === 'dir' && counted && files > 0 ? ` — ${files} file${files === 1 ? '' : 's'} removed` : '';
-      return {
-        output: `Deleted ${type === 'dir' ? 'folder' : 'file'} ${rel(abs)}${scope}.`,
-        ui: {
-          kind: 'delete',
-          path: rel(abs),
-          isDir: type === 'dir',
-          ...(counted ? { files } : {}),
-          ...(truncated ? { truncated: true } : {}),
-        },
-      };
     },
 
     async move_file(args, ctx) {

@@ -1458,22 +1458,21 @@ export async function runAgent({
         if (!answered.has(modelId)) messages.push({ role: 'tool', tool_call_id: modelId, content: 'Skipped.' });
       }
 
-      // Narration, enforced rather than hoped for. The prompt asks for a short
-      // line before and after real work, but a weak or rushed model just calls
-      // tools turn after turn and leaves the user staring at action rows with no
-      // idea where any of it is going. Two silent turns in a row is the point to
-      // ask — once, twice at the very most, so the transcript stays clean.
+      // The chat belongs to the user, so a run that works quietly is left alone for a
+      // long stretch — three whole turns with no words at all — and then asked, once,
+      // for a line about where the work stands. The line has to be progress or a
+      // result, never an announcement of the next tool call: that is the noise the
+      // prompt bans and the user asked to stop seeing.
       const wantsNarration =
-        (silentSteps >= 2 && narrationNotices === 0) || (silentSteps >= 5 && narrationNotices === 1);
+        (silentSteps >= 3 && narrationNotices === 0) || (silentSteps >= 8 && narrationNotices === 1);
       if (!wrapUp && wantsNarration && Date.now() < deadline) {
         narrationNotices++;
         messages.push({
           role: 'user',
           content:
-            `[system notice] You have run ${silentSteps} steps without saying anything to the user. ` +
-            'Before your next action, write ONE short, plain sentence telling them what you are doing now and why — ' +
-            'the same way you would if a colleague were watching over your shoulder. Plain prose, no heading, no list, ' +
-            'no repetition of anything you already said. Then keep going with the task.',
+            `[system notice] ${silentSteps} turns have gone by without a word to the user. ` +
+            'Say where the work stands in ONE short, plain sentence — what has changed so far, or what you found — ' +
+            'not an announcement of the tool call you are about to make. Then carry straight on with the task.',
         });
       }
 
@@ -1507,8 +1506,18 @@ export async function runAgent({
     }
 
     // A run that stopped mid-write must not leave half a file behind: put back what was there.
+    // The next run has to know this happened — "continue" that resumes against a file
+    // which was never actually written is how a stopped run turns into a broken one.
+    const interrupted = [];
     for (const w of state.liveWriters) {
-      if (!state.committedWrites.has(w)) await w.rollback().catch(() => {});
+      if (state.committedWrites.has(w)) continue;
+      try {
+        const shown = typeof workspace.displayPath === 'function' ? workspace.displayPath(w.abs) : null;
+        if (shown) interrupted.push(shown);
+      } catch {
+        /* a path we cannot name is not worth failing the run over */
+      }
+      await w.rollback().catch(() => {});
     }
     try {
       recordRun(workspace.id, {
@@ -1517,6 +1526,7 @@ export async function runAgent({
         checks: state.checks,
         failures: state.toolFailures,
         plan: state.plan || [],
+        interrupted: [...new Set(interrupted)].slice(0, 8),
       });
     } catch {
       /* continuity data is best effort and must never turn a finished run into an error */

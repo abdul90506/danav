@@ -40,39 +40,71 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
   /** Following the bottom. Only the user can turn this off — see handleScroll. */
   const [pinned, setPinned] = useState(true);
   const pinnedRef = useRef(true);
-  /** Scroll events before this moment are ours (we moved the container), not the user's. */
-  const ignoreScrollUntilRef = useRef(0);
+  /**
+   * Where our own last scroll landed. A scroll event that arrives at (or below)
+   * that position was caused by us, so it says nothing about what the user wants.
+   * Comparing positions — instead of ignoring scroll events for a moment after
+   * every scroll — is what lets the user stop the follow mid-stream: the old
+   * time window swallowed their scroll while an answer was still arriving.
+   */
+  const ownScrollTopRef = useRef(-1);
+  /** A smooth scroll animates; the events during it are ours too. */
+  const smoothUntilRef = useRef(0);
+  const lastTopRef = useRef(0);
   const prevMessagesCountRef = useRef<number>(messages.length);
 
+  // Re-rendering on every scroll event would be worse than the thing it fixes.
   const setPinnedBoth = useCallback((value: boolean) => {
+    if (pinnedRef.current === value) return;
     pinnedRef.current = value;
     setPinned(value);
   }, []);
 
-  // Move the container ourselves, and remember that the scroll events which follow are ours.
+  // Move the container ourselves, and remember exactly where it landed.
   const scrollToBottom = useCallback(
     (smooth = false) => {
       const container = scrollContainerRef.current;
       if (!container) return;
-      ignoreScrollUntilRef.current = performance.now() + (smooth ? 700 : 120);
+      const top = container.scrollHeight - container.clientHeight;
       if (smooth) {
-        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+        smoothUntilRef.current = performance.now() + 700;
+        container.scrollTo({ top, behavior: 'smooth' });
       } else {
-        container.scrollTop = container.scrollHeight;
+        container.scrollTop = top;
       }
+      ownScrollTopRef.current = top;
+      lastTopRef.current = container.scrollTop;
       setPinnedBoth(true);
     },
     [setPinnedBoth]
   );
 
-  // The user is the only one who can stop the chat following: our own scrolls are ignored
-  // above, so streaming can never be mistaken for someone scrolling up to read.
+  /**
+   * The user is the only one who can stop the chat following.
+   *
+   * Our own scrolls land at the position we set, so they are recognisable and
+   * ignored; anything above that came from a wheel, a drag or the keyboard, and
+   * an upward move — however small — means "hold still, I am reading". Coming
+   * back to the bottom starts the follow again.
+   */
   const handleScroll = () => {
     const container = scrollContainerRef.current;
     if (!container) return;
-    if (performance.now() < ignoreScrollUntilRef.current) return;
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    setPinnedBoth(distanceFromBottom <= 64);
+    const top = container.scrollTop;
+    if (performance.now() < smoothUntilRef.current) {
+      lastTopRef.current = top;
+      return;
+    }
+    if (ownScrollTopRef.current >= 0 && top >= ownScrollTopRef.current - 2) {
+      ownScrollTopRef.current = -1;
+      lastTopRef.current = top;
+      return;
+    }
+    ownScrollTopRef.current = -1;
+    const distanceFromBottom = container.scrollHeight - top - container.clientHeight;
+    const wentUp = top < lastTopRef.current - 6;
+    lastTopRef.current = top;
+    setPinnedBoth(wentUp ? false : distanceFromBottom <= 48);
   };
 
   // Sending a message always comes back to the bottom, even after reading back through history.
@@ -182,9 +214,9 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
               e.stopPropagation();
               scrollToBottom(true);
             }}
-            title="Scroll to bottom"
-            aria-label="Scroll to bottom"
-            className="flex items-center justify-center w-8 h-8 rounded-full bg-white dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white border border-zinc-200/90 dark:border-zinc-700 shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer opacity-0 group-hover:opacity-100 scale-90 group-hover:scale-100"
+            title="Back to the latest"
+            aria-label="Scroll to the latest message"
+            className="flex items-center justify-center w-8 h-8 rounded-full bg-white/95 dark:bg-zinc-800/95 text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white border border-zinc-200/90 dark:border-zinc-700 shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer opacity-90 group-hover:opacity-100"
           >
             <ArrowDown className="w-3.5 h-3.5 stroke-[2.2]" />
           </button>

@@ -410,11 +410,11 @@ export const scenarios = {
     const remove = process.platform === 'win32' ? 'Remove-Item -Recurse -Force' : 'rm -rf';
     switch (roundIdx) {
       case 0:
-        return { text: 'Removing the old folder.', toolCalls: [{ name: 'delete_file', args: { path: 'legacy', recursive: true } }] };
+        return { text: 'Removing the old folder.', toolCalls: [{ name: 'run_command', args: { command: `${remove} legacy` } }] };
       case 1:
         return { text: 'Looking at it first.', toolCalls: [{ name: 'list_dir', args: { path: 'legacy', depth: 3 } }] };
       case 2:
-        return { toolCalls: [{ name: 'delete_file', args: { path: 'legacy', recursive: true } }] };
+        return { toolCalls: [{ name: 'run_command', args: { command: `${remove} legacy` } }] };
       case 3:
         return { text: 'Clearing src with a command.', toolCalls: [{ name: 'run_command', args: { command: `${remove} src` } }] };
       case 4:

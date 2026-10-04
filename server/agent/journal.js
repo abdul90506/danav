@@ -31,6 +31,11 @@ function cleanRun(raw) {
     : [];
   // The checklist the run was working from. It is task state written by the
   // model itself, and it is what makes "continue" continue instead of restart.
+  // Files whose write was still in flight when the run stopped. They were rolled
+  // back, so the next run must not assume the half-written content is on disk.
+  const interrupted = Array.isArray(raw.interrupted)
+    ? raw.interrupted.filter((p) => typeof p === 'string' && p).slice(0, 8).map((p) => p.slice(0, 240))
+    : [];
   const plan = Array.isArray(raw.plan)
     ? raw.plan
         .filter((t) => t && typeof t.content === 'string')
@@ -48,6 +53,7 @@ function cleanRun(raw) {
     checks,
     failures: Number.isFinite(raw.failures) ? Math.max(0, Math.min(100, Math.floor(raw.failures))) : 0,
     plan,
+    interrupted,
   };
 }
 
@@ -68,7 +74,7 @@ export function recordRun(workspaceId, raw) {
   const run = cleanRun({ ...raw, id: genId('jr'), at: Date.now() });
   if (!run) return null;
   const unfinished = run.stopReason !== 'completed' && run.stopReason !== 'aborted';
-  if (!run.changed.length && !run.checks.length && !run.failures && !unfinished && !run.plan.length) return null;
+  if (!run.changed.length && !run.checks.length && !run.failures && !unfinished && !run.plan.length && !run.interrupted.length) return null;
   ensureDataDir();
   const journalDir = dir();
   fs.mkdirSync(journalDir, { recursive: true, mode: 0o700 });
@@ -109,19 +115,29 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   }
   const entries = [...selected.values()].sort((a, b) => b.at - a.at);
 
-  // A plan that was left unfinished is the most useful thing the previous run can
-  // hand over: it says what was done and what was still to do.
+  // A plan with open items is the most useful thing one run can hand the next: it
+  // says what was done and what is still to do, which is what makes "continue"
+  // continue instead of restart. That holds even when the run reported itself
+  // finished — a closing message is not evidence that its checklist is done.
   const newest = entries[0];
-  const leftover = newest?.plan?.length && newest.stopReason !== 'completed' ? newest.plan : null;
-  const planLines = leftover
+  const plan = newest?.plan || [];
+  const open = plan.filter((t) => t.status !== 'completed');
+  const how = newest?.stopReason === 'aborted' ? 'the user stopped it' : `it ended with ${String(newest?.stopReason || '').replace(/_/g, ' ')}`;
+  const planLines = open.length
     ? [
-        `- the previous run stopped (${newest.stopReason === 'aborted' ? 'the user stopped it' : newest.stopReason.replace(/_/g, ' ')}) with this plan unfinished:`,
-        ...leftover.map((t) => `  ${t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]'} ${t.content}`),
-        '  Continue from this plan rather than starting over, unless the user asks for something else.',
+        `- the previous run left this checklist unfinished (${newest.stopReason === 'completed' ? 'it reported itself finished anyway' : how}):`,
+        ...plan.map((t) => `  ${t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]'} ${t.content}`),
+        '  If the user asks to continue, resume from the first open step rather than starting over; anything marked [x] is already done and must not be redone.',
+      ]
+    : [];
+  const rolled = newest?.interrupted || [];
+  const interruptedLines = rolled.length
+    ? [
+        `- when that run stopped, a write to ${rolled.map((p) => `\`${p}\``).join(', ')} was still in flight and was rolled back: ${rolled.length === 1 ? 'that file is' : 'those files are'} exactly as ${rolled.length === 1 ? 'it was' : 'they were'} before — nothing from that write is on disk.`,
       ]
     : [];
 
-  const lines = [...planLines];
+  const lines = [...planLines, ...interruptedLines];
   let used = lines.reduce((n, l) => n + l.length + 1, 0);
   const cap = Math.max(0, Math.floor(Number(maxChars) || 0));
   for (const run of entries) {

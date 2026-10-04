@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useCallback } from 'react';
 import {
   SquarePen,
   Search,
@@ -14,6 +14,7 @@ import {
   Check,
 } from 'lucide-react';
 import { Conversation } from '../types';
+import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -50,6 +51,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [editingChatId, setEditingChatId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  /** The row whose "more" menu is open — the menu closes when you click away from it. */
+  const menuWrapRef = useRef<HTMLDivElement>(null);
+  const closeMenu = useCallback(() => setMenuOpenId(null), []);
+  useDismissOnOutside(menuWrapRef, menuOpenId !== null, closeMenu);
 
   // Filter conversations by search query
   const filteredConversations = useMemo(() => {
@@ -188,7 +193,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </button>
 
               {/* More menu trigger button */}
-              <div className="relative" onClick={(e) => e.stopPropagation()}>
+              <div
+                className="relative"
+                ref={menuOpenId === chat.id ? menuWrapRef : undefined}
+                onClick={(e) => e.stopPropagation()}
+              >
                 <button
                   onClick={() =>
                     setMenuOpenId(menuOpenId === chat.id ? null : chat.id)

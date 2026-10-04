@@ -45,6 +45,16 @@ async function setup(files) {
 
 const exists = (p) => fs.existsSync(p);
 
+/**
+ * Removal is a shell job now (`delete_file` was retired), so the gate is
+ * exercised through the command the agent actually runs.
+ */
+const remove = (target, recursive = true) => ({
+  command: isWin
+    ? `${recursive ? 'Remove-Item -Recurse -Force' : 'Remove-Item -Force'} ${target}`
+    : `rm ${recursive ? '-rf' : '-f'} ${target}`,
+});
+
 // ---------------------------------------------------------------------------
 
 test('removalTargets only claims paths it can actually resolve', () => {
@@ -66,41 +76,41 @@ test('removalTargets only claims paths it can actually resolve', () => {
 
 test('a file that was never opened cannot be deleted', async () => {
   const { gate, root, read } = await setup({ 'notes.txt': 'secret\n' });
-  const blocked = await gate('delete_file', { path: 'notes.txt' });
+  const blocked = await gate('run_command', remove('notes.txt', false));
   assert.ok(blocked, 'the delete is refused');
-  assert.match(blocked.message, /has not been opened in this run/);
-  assert.match(blocked.message, /read_file/, 'and it says what to do about it');
+  assert.match(blocked.message, /has not been inspected in this run/);
+  assert.match(blocked.message, /read `notes.txt`/, 'and it says what to do about it');
   assert.equal(blocked.ui.blocked, true);
   assert.ok(exists(path.join(root, 'notes.txt')), 'and nothing was touched');
 
   // Having read it is enough.
   await read('notes.txt');
-  assert.equal(await gate('delete_file', { path: 'notes.txt' }), null);
+  assert.equal(await gate('run_command', remove('notes.txt', false)), null);
 });
 
 test('a folder the agent never listed cannot be deleted recursively', async () => {
   const { gate, root, list } = await setup({ 'legacy/a.js': 'a\n', 'legacy/b.js': 'b\n' });
-  const blocked = await gate('delete_file', { path: 'legacy', recursive: true });
+  const blocked = await gate('run_command', remove('legacy'));
   assert.ok(blocked);
-  assert.match(blocked.message, /not looked inside/);
-  assert.match(blocked.message, /list_dir/);
+  assert.match(blocked.message, /has not been inspected in this run/);
+  assert.match(blocked.message, /list `legacy\/`/);
   assert.ok(exists(path.join(root, 'legacy', 'a.js')));
 
   // Listing it is enough — but only once the WHOLE tree has been seen.
   await list('legacy');
-  assert.equal(await gate('delete_file', { path: 'legacy', recursive: true }), null);
+  assert.equal(await gate('run_command', remove('legacy')), null);
 });
 
 test('a nested folder is still un-inspected after only the top level was listed', async () => {
   const { gate, list } = await setup({ 'app/index.js': 'x\n', 'app/deep/inner.js': 'y\n' });
   await list('app'); // depth 1: `deep/` is a name, not a contents
-  const blocked = await gate('delete_file', { path: 'app', recursive: true });
+  const blocked = await gate('run_command', remove('app'));
   assert.ok(blocked, 'listing a folder is not listing what is inside its folders');
   assert.match(blocked.message, /app\/deep/);
-  assert.match(blocked.message, /deeper depth/);
+  assert.match(blocked.message, /list `app\/deep\/`/);
 
   await list('app', 3);
-  assert.equal(await gate('delete_file', { path: 'app', recursive: true }), null);
+  assert.equal(await gate('run_command', remove('app')), null);
 });
 
 test('folders the listing itself skips are not demanded of the agent', async () => {
@@ -112,7 +122,7 @@ test('folders the listing itself skips are not demanded of the agent', async () 
   // list_dir never descends into node_modules / dist, so neither does the gate:
   // asking for a listing the tool refuses to produce would loop forever.
   await list('proj', 4);
-  assert.equal(await gate('delete_file', { path: 'proj', recursive: true }), null);
+  assert.equal(await gate('run_command', remove('proj')), null);
 });
 
 test('a generated folder needs one look, not a tour of every package', async () => {
@@ -121,10 +131,10 @@ test('a generated folder needs one look, not a tour of every package', async () 
     'node_modules/b/nested/index.js': 'b\n',
   });
   // Even the target itself: nobody reads every package to delete node_modules.
-  const blocked = await gate('delete_file', { path: 'node_modules', recursive: true });
+  const blocked = await gate('run_command', remove('node_modules'));
   assert.ok(blocked, 'but it still has to look at what it is removing');
   await list('node_modules');
-  assert.equal(await gate('delete_file', { path: 'node_modules', recursive: true }), null);
+  assert.equal(await gate('run_command', remove('node_modules')), null);
   assert.equal(await gate('run_command', { command: 'rm -rf node_modules' }), null);
 });
 
@@ -138,7 +148,7 @@ test('a truncated listing proves nothing about the folders it cut off', async ()
   observeListing(ws, state, abs, entries, { truncated, depth: 1 });
   // The folder is marked as listed (its own entries were read), but the file the
   // listing never got to is not — so the delete is still refused.
-  const blocked = await gate('delete_file', { path: 'big', recursive: true });
+  const blocked = await gate('run_command', remove('big'));
   assert.ok(blocked, 'an incomplete listing is not an inspection');
   assert.match(blocked.message, /big\/f\d+\.js/);
 });
@@ -147,11 +157,11 @@ test('the agent may remove what it created itself', async () => {
   const { gate, state, ws } = await setup({});
   const abs = await ws.safePath('scratch.txt');
   observeOwned(state, abs);
-  assert.equal(await gate('delete_file', { path: 'scratch.txt' }), null, 'it does not have to read back its own file');
+  assert.equal(await gate('run_command', remove('scratch.txt', false)), null, 'it does not have to read back its own file');
   // A folder it made is known to be empty.
   const dir = await ws.safePath('scratch');
   observeListing(ws, state, dir, [], { depth: 1 });
-  assert.equal(await gate('delete_file', { path: 'scratch', recursive: true }), null);
+  assert.equal(await gate('run_command', remove('scratch')), null);
 });
 
 test('moving a file it has never seen is refused too', async () => {
@@ -184,6 +194,18 @@ test('a shell command that removes un-inspected files is refused', async () => {
   assert.equal(await gate('run_command', { command: 'rm -rf src' }), null);
 });
 
+test('a command that would remove the workspace itself is refused', async () => {
+  const { gate, list, root } = await setup({ 'a.txt': 'a\n' });
+  // Listing everything does not make the workspace itself a legal target.
+  await list('.', 2);
+  for (const command of ['rm -rf .', 'rm -rf ./', `rm -rf ${root}`]) {
+    const blocked = await gate('run_command', { command });
+    assert.ok(blocked, `${command} is refused`);
+    assert.match(blocked.message, /workspace itself/);
+  }
+  assert.ok(exists(path.join(root, 'a.txt')), 'and nothing was touched');
+});
+
 test('a non-destructive call is never in the gate’s way', async () => {
   const { gate } = await setup({ 'a.txt': 'a\n' });
   for (const [name, args] of [
@@ -196,13 +218,13 @@ test('a non-destructive call is never in the gate’s way', async () => {
     assert.equal(await gate(name, args), null, `${name} is allowed through`);
   }
   // A missing target is the tool's business, not the gate's.
-  assert.equal(await gate('delete_file', { path: 'never-existed.txt' }), null);
-  assert.equal(await gate('delete_file', { path: '../outside.txt' }), null);
+  assert.equal(await gate('run_command', remove('never-existed.txt')), null);
+  assert.equal(await gate('run_command', remove('../outside.txt')), null);
 });
 
 test('the ledger survives a path spelled the Windows way', async () => {
   if (!isWin) return;
   const { gate, read } = await setup({ 'dir/file.txt': 'x\n' });
   await read('dir\\file.txt');
-  assert.equal(await gate('delete_file', { path: 'dir/file.txt' }), null);
+  assert.equal(await gate('run_command', remove('dir/file.txt', false)), null);
 });
