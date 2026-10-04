@@ -203,8 +203,13 @@ function rawLabel(a: AgentAction): ActionLabel {
       return base('Creating', r?.created === false ? 'Rewrote' : 'Created', {
         target: r?.path || args.path,
         targetKind: 'file',
-        added: live ? a.progress?.added : r?.added,
-        removed: live ? a.progress?.removed : (r?.removed ?? 0) > 0 ? r?.removed : undefined,
+        /*
+          The count comes from the finished write, never from the live buffer: a
+          number that is still growing is an estimate, and an estimate that later
+          changes is a number the reader watched lie to them.
+        */
+        added: r?.added,
+        removed: (r?.removed ?? 0) > 0 ? r?.removed : undefined,
         expandable: !live && Boolean(r?.hunks?.length),
       });
     }
@@ -213,7 +218,7 @@ function rawLabel(a: AgentAction): ActionLabel {
       return base('Appending', 'Appended', {
         target: r?.path || args.path,
         targetKind: 'file',
-        added: live ? a.progress?.added : r?.added,
+        added: r?.added,
         expandable: !live && Boolean(r?.hunks?.length),
       });
     }
@@ -243,8 +248,8 @@ function rawLabel(a: AgentAction): ActionLabel {
         target: r?.path || args.path,
         targetKind: 'file',
         lines: live || manyFiles ? undefined : formatRanges(r?.ranges),
-        added: live ? a.progress?.added : r?.added,
-        removed: live ? a.progress?.removed : r?.removed,
+        added: r?.added,
+        removed: r?.removed,
         meta: live
           ? liveEdits
           : manyFiles

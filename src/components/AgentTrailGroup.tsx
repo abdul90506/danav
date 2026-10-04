@@ -55,18 +55,18 @@ const GroupRow: React.FC<{
         aria-expanded={open}
         className="group/group inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 max-w-full text-left cursor-pointer rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
-        <span className="text-[12px] leading-5 text-zinc-500 dark:text-zinc-400 group-hover/group:text-zinc-700 dark:group-hover/group:text-zinc-200 transition-colors">
+        <span className="text-[13px] leading-6 text-zinc-500 dark:text-zinc-400 group-hover/group:text-zinc-700 dark:group-hover/group:text-zinc-200 transition-colors">
           {label}
         </span>
         <ChevronRight
-          className={`w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/group:text-zinc-600 dark:group-hover/group:text-zinc-300 ${
+          className={`w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/group:text-zinc-600 dark:group-hover/group:text-zinc-300 ${
             open ? 'rotate-90' : ''
           }`}
         />
       </button>
 
       {open && (
-        <div className="mt-0.5 ml-1.5 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 animate-in fade-in duration-150">
+        <div className="mt-0.5 ml-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 animate-in fade-in duration-150">
           {actions.map((a) => (
             <AgentActionRow key={a.id} action={a} onApproval={onApproval} onOpenPreview={onOpenPreview} />
           ))}
@@ -154,20 +154,20 @@ export const TrailNotes: React.FC<{ id: string; notes: string[] }> = ({ id, note
         aria-expanded={open}
         className="group/note inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 max-w-full text-left cursor-pointer rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
-        <span className="text-[12px] leading-5 text-zinc-500 dark:text-zinc-400 group-hover/note:text-zinc-700 dark:group-hover/note:text-zinc-200 transition-colors">
+        <span className="text-[13px] leading-6 text-zinc-500 dark:text-zinc-400 group-hover/note:text-zinc-700 dark:group-hover/note:text-zinc-200 transition-colors">
           {label}
         </span>
         <ChevronRight
-          className={`w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/note:text-zinc-600 dark:group-hover/note:text-zinc-300 ${
+          className={`w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/note:text-zinc-600 dark:group-hover/note:text-zinc-300 ${
             open ? 'rotate-90' : ''
           }`}
         />
       </button>
 
       {open && (
-        <div className="mt-0.5 ml-1.5 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 space-y-1 animate-in fade-in duration-150">
+        <div className="mt-0.5 ml-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 space-y-1 animate-in fade-in duration-150">
           {notes.map((note, i) => (
-            <p key={i} className="text-[12px] leading-5 text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap select-text">
+            <p key={i} className="text-[12.5px] leading-[1.4rem] text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap select-text">
               {note}
             </p>
           ))}

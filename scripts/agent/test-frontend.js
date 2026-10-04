@@ -294,6 +294,56 @@ test('every preview load asks for a URL the browser has never cached', async () 
   assert.equal(a.replace(/\?.*$/, ''), 'https://x.sandbox.novita.ai');
 });
 
+test('while a run works, none of its own words reach the transcript — and the line it is writing sits under the rows', async () => {
+  const ui = await loadComponent('src/components/ChatMessage.tsx');
+  const NARRATION =
+    'Ab sab files banata hoon. Pehle index.html ko trim kar raha hoon (sirf hero + footer), phir 5 subpages create kar raha hoon.';
+  const blocks = [
+    { id: 't0', type: 'thinking', content: 'Let me look.', duration: 1500 },
+    { id: 'a1', type: 'action', action: { id: 'a1', tool: 'list_dir', status: 'done', args: {}, result: { kind: 'list', entries: [], path: '.' } } },
+    { id: 'x1', type: 'text', content: NARRATION },
+  ];
+  const render = (message) => renderToStaticMarkup(React.createElement(ui.ChatMessage, { message }));
+
+  const live = render({ id: 'm1', role: 'assistant', content: '', createdAt: 1, agent: true, isGenerating: true, blocks });
+  const text = live.replace(/<[^>]*>/g, '\u0000').split('\u0000').join(' ').replace(/\s+/g, ' ');
+
+  /*
+    The bug this locks down: a line written after the last action looked exactly
+    like the closing answer — so it appeared in the transcript — and then vanished
+    when the run carried on with the next tool call. Nothing the run says while it
+    works is shown as prose any more.
+  */
+  assert.ok(!text.includes('subpages'), 'no part of the line beyond the pair on screen');
+  assert.ok(!text.includes('trim kar raha'), 'no mid-run narration in the transcript');
+
+  // The line lives under the rows, two words at a time, not under the label.
+  const line = live.match(/data-testid="narration-line"[\s\S]*?<\/div>/);
+  assert.ok(line, 'the line is on screen while the run works');
+  assert.match(line[0], /narration-step[^>]*>Ab sab</, 'the first pair of words');
+  assert.ok(live.indexOf('data-testid="narration-line"') > live.indexOf('Thought for'), 'below the reasoning');
+
+  // A finished turn: the answer shows, the narration stays in the trail — and a
+  // trailing notice never swallows the answer.
+  const finished = render({
+    id: 'm3', role: 'assistant', content: '', createdAt: 1, agent: true,
+    agentRun: { stopReason: 'completed', durationMs: 9000, toolCalls: 2, changed: [{ path: 'index.html', added: 77, removed: 65 }] },
+    blocks: [...blocks, { id: 'x2', type: 'text', content: 'All five pages are done and the build passes.' }],
+  });
+  assert.match(finished, /All five pages are done and the build passes\./);
+  assert.ok(!finished.includes('subpages create kar raha hoon'), 'narration stayed out of the answer');
+  assert.match(finished, /line written|lines written/, 'and is still there in the trail');
+});
+
+test('a live row carries no count until the count is a fact', async () => {
+  const fmt = await load('src/agent/format.ts');
+  const base = { id: 'a1', tool: 'edit_file', status: 'running', args: { path: 'a.js' } };
+  const live = fmt.actionLabel({ ...base, progress: { added: 40, removed: 12 } });
+  assert.deepEqual([live.added, live.removed], [undefined, undefined], 'an estimate is not shown as a number');
+  const done = fmt.actionLabel({ ...base, status: 'done', result: { kind: 'edit', path: 'a.js', added: 77, removed: 65, edits: 1 } });
+  assert.deepEqual([done.added, done.removed], [77, 65], 'and the finished edit reports its own');
+});
+
 test('a markdown link to the running app opens the panel instead of a new tab', async () => {
   const ui = await loadComponent('src/components/ChatMessage.tsx');
   const OPEN = { onOpenPreview: () => {} };
@@ -778,9 +828,15 @@ test('file icons: a light-theme variant is offered where the theme has one, and 
   assert.ok(fs.existsSync(path.join(dir, 'LICENSE')), 'the icon theme license ships with the icons');
 });
 
-test('wording: "Creating index.html +37" while streaming, "Created … +77" / "Rewrote … +77 −98" after', () => {
+test('wording: "Creating index.html" while streaming, "Created … +77" / "Rewrote … +77 −98" after', () => {
+  /*
+    While a file is still being written there is no count on the row: the live
+    buffer holds an estimate that keeps growing, and a number that changes under
+    the reader is worse than no number. The count appears once, from the finished
+    write.
+  */
   const live = fmt.actionLabel(act({ status: 'pending', args: { path: 'index.html' }, progress: { added: 37, removed: 12 } }));
-  assert.deepEqual([live.verb, live.target, live.added, live.removed, live.expandable], ['Creating', 'index.html', 37, 12, false]);
+  assert.deepEqual([live.verb, live.target, live.added, live.removed, live.expandable], ['Creating', 'index.html', undefined, undefined, false]);
   const created = fmt.actionLabel(act({ result: { kind: 'write', path: 'index.html', created: true, added: 77, removed: 0, hunks: [{ newStart: 1, lines: [] }] } }));
   assert.deepEqual([created.verb, created.added, created.removed, created.expandable], ['Created', 77, undefined, true]);
   const rewrote = fmt.actionLabel(act({ result: { kind: 'write', path: 'index.html', created: false, added: 77, removed: 98 } }));
@@ -797,7 +853,9 @@ test('wording: Analyzed with line ranges, Edited with ranges and counts', () => 
   const edit = fmt.actionLabel(act({ tool: 'multi_edit', result: { kind: 'edit', path: 'style.css', ranges: [[12, 18], [40, 44], [80, 80], [90, 91]], added: 9, removed: 4, edits: 4 } }));
   assert.deepEqual([edit.verb, edit.lines, edit.added, edit.removed, edit.meta], ['Edited', 'L12–L18, L40–L44, L80 +1 more', 9, 4, '4 edits']);
   const editing = fmt.actionLabel(act({ tool: 'edit_file', status: 'pending', args: { path: 'a.js' }, progress: { added: 6, removed: 2 } }));
-  assert.deepEqual([editing.verb, editing.added, editing.removed], ['Editing', 6, 2]);
+  assert.deepEqual([editing.verb, editing.added, editing.removed], ['Editing', undefined, undefined], 'an edit in flight has no counts yet');
+  const edited = fmt.actionLabel(act({ tool: 'edit_file', result: { kind: 'edit', path: 'a.js', added: 77, removed: 65, edits: 1 } }));
+  assert.deepEqual([edited.added, edited.removed], [77, 65], 'the finished edit reports its own numbers');
 });
 
 test('wording: commands — running, success, non-zero exit, timeout, background, approval, denied', () => {
@@ -874,7 +932,7 @@ test('wording: several chunks, a multi-file edit, an outline', () => {
   const many = fmt.actionLabel(act({ tool: 'multi_edit', result: { kind: 'edit', path: 'a.js', added: 5, removed: 2, edits: 4, ranges: [[1, 1]], changes: [{ path: 'a.js', added: 3, removed: 1, edits: 2 }, { path: 'b.css', added: 2, removed: 1, edits: 2 }] } }));
   assert.deepEqual([many.verb, many.target, many.lines, many.added, many.removed, many.meta], ['Edited', 'a.js', undefined, 5, 2, '2 files · 4 edits']);
   const live = fmt.actionLabel(act({ tool: 'multi_edit', status: 'running', args: { edits: 6 }, progress: { added: 3, removed: 2 } }));
-  assert.deepEqual([live.verb, live.meta, live.added, live.removed], ['Editing', '6 edits', 3, 2]);
+  assert.deepEqual([live.verb, live.meta, live.added, live.removed], ['Editing', '6 edits', undefined, undefined]);
   const one = fmt.actionLabel(act({ tool: 'multi_edit', result: { kind: 'edit', path: 'a.js', added: 1, removed: 1, edits: 3, ranges: [[4, 4], [9, 9], [20, 22]], hunks: [{ newStart: 4, lines: [] }] } }));
   assert.deepEqual([one.lines, one.meta, one.expandable], ['L4, L9, L20–L22', '3 edits', true]);
   const outline = fmt.actionLabel(act({ tool: 'file_outline', result: { kind: 'outline', path: 'src/App.tsx', count: 18 } }));

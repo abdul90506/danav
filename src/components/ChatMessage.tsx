@@ -48,6 +48,62 @@ const SummaryText: React.FC<{ text?: string }> = ({ text }) => (
 const workStore = createPanelStore();
 
 /**
+ * How long one pair of words stays on screen. Kept in step with the
+ * `narrationStep` animation in index.css.
+ */
+const NARRATION_STEP_MS = 1700;
+
+/**
+ * The newest line the agent said, two words at a time.
+ *
+ * It sits under the trail's rows — down where the work is happening — and never as
+ * a sentence: two words appear, fade out, and the next two take their place,
+ * looping for as long as this is the newest line. A fresh line starts over at its
+ * own first words. Nothing here is text to keep: the trail holds the lines in its
+ * "N line(s) written" rows, and the answer arrives on its own when the run ends.
+ */
+const NarrationLine: React.FC<{ text: string; lineId?: string }> = ({ text, lineId }) => {
+  /** The line in twos: "Ab sab files banata hoon" → ["Ab sab", "files banata", "hoon"]. */
+  const steps = React.useMemo(() => {
+    const words = text.trim().split(/\s+/).filter(Boolean);
+    const out: string[] = [];
+    for (let i = 0; i < words.length; i += 2) out.push(words.slice(i, i + 2).join(' '));
+    return out;
+  }, [text]);
+  const [step, setStep] = React.useState(0);
+
+  /** A new line is a new start. */
+  React.useEffect(() => {
+    setStep(0);
+  }, [lineId]);
+
+  /**
+   * The pairs walk forward for as long as the line is the live one, wrapping at
+   * the end rather than stopping — the line is still being written, so the loop
+   * says "still going" without inventing a progress bar out of word count.
+   */
+  const cycling = steps.length > 1;
+  React.useEffect(() => {
+    if (!cycling) return;
+    const timer = window.setInterval(() => setStep((s) => s + 1), NARRATION_STEP_MS);
+    return () => window.clearInterval(timer);
+  }, [lineId, cycling]);
+
+  if (!steps.length) return null;
+  const at = cycling ? step % steps.length : 0;
+  return (
+    <div className="mt-1 max-w-full overflow-hidden" title={text} data-testid="narration-line">
+      <span
+        key={at}
+        className="narration-step block truncate text-[12.5px] leading-5 text-zinc-500 dark:text-zinc-400"
+      >
+        {steps[at]}
+      </span>
+    </div>
+  );
+};
+
+/**
  * The one line a turn ends with: what it did, and everything it did behind it.
  *
  * A run reads as a dozen rows — reads, edits, commands, searches, notes to
@@ -64,7 +120,7 @@ const AgentWorkRow: React.FC<{
   messageId: string;
   live: boolean;
   liveLabel: string;
-  /** The newest line the agent said while working, shown as a shimmer under the label. */
+  /** The newest line the agent is writing, shown two words at a time under the rows. */
   narration?: string;
   narrationId?: string;
   elapsedSeconds: number;
@@ -154,25 +210,18 @@ const AgentWorkRow: React.FC<{
         it — a fresh element, so it fades in again — and with no narration the row is
         just the label, which is how it was.
       */}
-      {live && narration ? (
-        <div className="mt-0.5 pl-1 max-w-full overflow-hidden">
-          <span
-            key={narrationId}
-            title={narration}
-            className="narration-shimmer block truncate text-[12px] leading-5 animate-in fade-in duration-300"
-          >
-            {narration}
-          </span>
-        </div>
-      ) : null}
-
       {/*
         Kept mounted and hidden rather than unmounted: the rows inside keep their
         state (an opened diff stays opened), and a trail that is opened mid-run is
         already up to date instead of rebuilding itself from the start.
+
+        The line the run is writing sits at the end of it, under the rows: that is
+        where the work is, and a line under the label read as a caption for the
+        whole turn instead of the thing being written right now.
       */}
-      <div hidden={!open} className="mt-2 ml-1 pl-3.5 border-l border-zinc-200 dark:border-zinc-800">
+      <div hidden={!open} className="mt-2 ml-0.5 pl-3 border-l border-zinc-200 dark:border-zinc-800">
         {children}
+        {live && narration ? <NarrationLine text={narration} lineId={narrationId} /> : null}
       </div>
     </div>
   );
@@ -264,7 +313,7 @@ const TrailThinkingEntry: React.FC<{
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        className="group/think inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 rounded text-[12px] leading-5 text-left cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
+        className="group/think inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 rounded text-[13px] leading-6 text-left cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
         {/* No brain here: inside the trail every row is a plain line, and the
             indent already says whose reasoning this is. */}
@@ -276,7 +325,7 @@ const TrailThinkingEntry: React.FC<{
           </span>
         )}
         <ChevronRight
-          className={`w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/think:text-zinc-600 dark:group-hover/think:text-zinc-300 ${
+          className={`w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/think:text-zinc-600 dark:group-hover/think:text-zinc-300 ${
             open ? 'rotate-90' : ''
           }`}
         />
@@ -989,9 +1038,9 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
    *
    * Every action of the run — every read, edit, command, search, note — folds
    * into the work row, along with the reasoning and the lines the agent said
-   * along the way. What stays on screen is the answer the run ended with. While
-   * the turn is still running nothing is folded yet: the lines it is writing stay
-   * in front of the reader, and they move into the row when it is done.
+   * along the way. What stays on screen is the answer the run ended with — and
+   * nothing else, at any point: while the run is still going, the answer has not
+   * been written yet, and everything arriving in the meantime is work in progress.
    */
   const textBlocks = blocks.filter((b) => b.type === 'text');
   /**
@@ -1008,27 +1057,25 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
   })();
   const inFold = (block: MessageBlock) => !(previewAction && block.type === 'action' && block.action.id === previewAction.id);
   /**
-   * Lines the agent says *while* it is working are narration, and narration does
-   * not belong in the transcript: "Building a modern, fully responsive portfolio
-   * website…" used to sit above the work as a paragraph of its own, and then vanish
-   * into the trail when the run ended — text that was written and then taken away
-   * again. It now goes straight into the working row, as one shimmering line under
-   * the label (see AgentWorkRow).
+   * A run that is still going shows none of its own words in the transcript.
    *
-   * The one exception is text that arrives AFTER the last action: that is the
-   * closing answer being written, and the reader should watch it arrive.
+   * The text between two actions is narration, and narration that appears for a
+   * moment and then vanishes under the next tool call is the flicker this removes:
+   * a line written after the last action looks exactly like the answer until the
+   * run carries on, and a working run usually does. Every line the run writes while
+   * it works now goes to the working row instead (see NarrationLine), where the work
+   * is, and the answer appears the moment the run ends — which is when it is one.
    */
-  const lastActionAt = blocks.reduce((at, b, i) => (b.type === 'action' ? i : at), -1);
-  const closingText = textBlocks.find((b) => blocks.indexOf(b) > lastActionAt);
+  const spokenText = textBlocks.filter((b) => !b.notice);
   const visibleText = liveTurn
-    ? closingText
-      ? [closingText]
-      : textBlocks.filter((b) => b.notice)
-    : textBlocks.slice(-1);
+    ? textBlocks.filter((b) => b.notice)
+    : spokenText.length
+      ? spokenText.slice(-1)
+      : /* a turn that never spoke: whatever it has is what it has */ textBlocks.slice(-1);
   const visibleTextIds = new Set(visibleText.map((b) => b.id));
   const foldedText = textBlocks.filter((b) => !visibleTextIds.has(b.id));
 
-  /** The newest line the agent said while working — the shimmer under the label. */
+  /** The newest line the agent said while working — the line under the trail rows. */
   const liveNarration = (() => {
     if (!liveTurn) return null;
     const spoken = textBlocks.filter((b) => !visibleTextIds.has(b.id) && !b.notice && b.content.trim());
@@ -1112,8 +1159,8 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
         continue;
       }
       if (block.type === 'text' && visibleTextIds.has(block.id)) continue;
-      // The newest line is on screen as the shimmer under the working label; the
-      // trail picks it up once the next one replaces it.
+      // The newest line is on screen as the live pair of words under the rows; the
+      // trail keeps it — with the rest of what it said — from the next line on.
       if (block.type === 'text' && liveNarration && block.id === liveNarration.id) continue;
       if (block.type === 'text' && !block.notice) {
         if (notes.length === 0) notesFrom = block.id;

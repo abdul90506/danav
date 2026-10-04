@@ -2,7 +2,6 @@ import React, { useCallback, useRef } from 'react';
 import { ChevronRight, Circle, CircleCheck, CircleDot, ExternalLink, PanelRight } from 'lucide-react';
 import type { AgentAction, AgentDiffHunk } from '../types';
 import { actionLabel, formatRanges, isWorking } from '../agent/format';
-import { AnimatedCount } from './AnimatedCount';
 import { FileTypeIcon } from './FileTypeIcon';
 import { createPanelStore, usePanelOpen } from './panels';
 import { useDismissOnOutside } from '../utils/useDismissOnOutside';
@@ -199,13 +198,13 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
       <span className={`shrink-0 ${live ? '' : verbTone}`}>{label.verb}</span>
 
       {label.target && label.targetKind === 'command' && (
-        <span className={`font-mono text-[12px] truncate ${live ? '' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={label.target}>
+        <span className={`font-mono text-[12.5px] truncate ${live ? '' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={label.target}>
           <span className={live ? '' : 'text-zinc-400'}>$ </span>
           {label.target}
         </span>
       )}
       {label.target && label.targetKind === 'pattern' && (
-        <span className={`font-mono text-[12px] truncate ${live ? '' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={label.target}>
+        <span className={`font-mono text-[12.5px] truncate ${live ? '' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={label.target}>
           “{label.target}”
         </span>
       )}
@@ -229,7 +228,7 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
 
   return (
     <div className="agent-row" ref={rowRef}>
-      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-h-[26px] text-[13px] leading-6 select-none">
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-h-[27px] text-[13.5px] leading-6 select-none">
         <button
           type="button"
           onClick={() => clickable && setOpen((v) => !v)}
@@ -239,40 +238,40 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
         >
           {labelContent}
 
-          {label.lines && <span className="shrink-0 font-mono text-[12px] text-zinc-400 dark:text-zinc-500">{label.lines}</span>}
+          {label.lines && <span className="shrink-0 font-mono text-[12.5px] text-zinc-400 dark:text-zinc-500">{label.lines}</span>}
           {/*
             Line counts and small facts stay plain: the same grey as the rest of
             the row, no pills, no green-and-red counters. A failure is the one
             thing that earns a colour (below), because that is information rather
             than decoration.
           */}
+          {/*
+            The counts are the file's real totals, written once and left alone. They
+            used to be read from the live write buffer while a file was still being
+            written and then rolled to the final number — which meant the reader saw
+            a running estimate (+45 −23), watched it change under them, and could
+            catch the minus showing a number that was really the plus. A count that
+            is not a fact yet is simply not shown.
+          */}
           {label.added !== undefined && (
-            <AnimatedCount
-              value={label.added}
-              sign="+"
-              className="shrink-0 font-mono text-[12px] tabular-nums text-emerald-600 dark:text-emerald-400"
-            />
+            <span className="shrink-0 font-mono text-[12.5px] tabular-nums text-emerald-600 dark:text-emerald-400">+{label.added}</span>
           )}
           {label.removed !== undefined && label.removed > 0 && (
-            <AnimatedCount
-              value={label.removed}
-              sign="−"
-              className="shrink-0 font-mono text-[12px] tabular-nums text-rose-500 dark:text-rose-400"
-            />
+            <span className="shrink-0 font-mono text-[12.5px] tabular-nums text-rose-500 dark:text-rose-400">−{label.removed}</span>
           )}
           {label.chips?.map((c) => (
-            <span key={c} className="shrink-0 font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
+            <span key={c} className="shrink-0 font-mono text-[12px] text-zinc-400 dark:text-zinc-500">
               {c}
             </span>
           ))}
           {label.meta && (
-            <span className={`shrink-0 max-w-[28rem] truncate text-[12px] ${label.exitFailed ? 'text-rose-500 dark:text-rose-400' : 'text-zinc-400 dark:text-zinc-500'}`}>
+            <span className={`shrink-0 max-w-[28rem] truncate text-[12.5px] ${label.exitFailed ? 'text-rose-500 dark:text-rose-400' : 'text-zinc-400 dark:text-zinc-500'}`}>
               · {label.meta}
             </span>
           )}
           {clickable && (
             <ChevronRight
-              className={`w-3 h-3 shrink-0 text-zinc-400 transition-transform duration-150 group-hover:text-zinc-600 dark:group-hover:text-zinc-300 ${open ? 'rotate-90' : ''}`}
+              className={`w-3.5 h-3.5 shrink-0 text-zinc-400 transition-transform duration-150 group-hover:text-zinc-600 dark:group-hover:text-zinc-300 ${open ? 'rotate-90' : ''}`}
             />
           )}
         </button>

@@ -471,37 +471,39 @@
  * newer line arrives (the element is re-keyed), so it never grows into a paragraph
  * of narration sitting above the work.
  */
-.narration-shimmer {
-  background: linear-gradient(
-    90deg,
-    rgba(140, 140, 150, 0.5) 0%,
-    rgba(63, 63, 70, 0.95) 35%,
-    rgba(140, 140, 150, 0.5) 70%
-  );
-  background-size: 220% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: shimmerText 3.4s infinite linear;
+/*
+  The line the agent is writing right now, two words at a time: a pair fades in,
+  holds, fades out, and the next pair takes its place — so the line reads as
+  something being written rather than a sentence to keep. The duration matches
+  NARRATION_STEP_MS in ChatMessage.tsx, so each pair leaves exactly as the next
+  one is swapped in.
+*/
+@keyframes narrationStep {
+  0% {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  14% {
+    opacity: 1;
+    transform: none;
+  }
+  76% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+  }
 }
 
-.dark .narration-shimmer {
-  background: linear-gradient(
-    90deg,
-    rgba(161, 161, 170, 0.5) 0%,
-    rgba(244, 244, 245, 0.95) 35%,
-    rgba(161, 161, 170, 0.5) 70%
-  );
-  background-size: 220% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+.narration-step {
+  animation: narrationStep 1700ms both ease-in-out;
+  will-change: opacity;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .narration-shimmer {
+  .narration-step {
     animation: none;
-    -webkit-text-fill-color: currentColor;
   }
 }
 
