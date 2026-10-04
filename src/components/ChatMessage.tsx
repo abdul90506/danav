@@ -184,51 +184,58 @@ interface ThinkingSectionProps {
   rounds?: number;
 }
 
+/** One thought open at a time inside the trails, chat-wide — like everything else. */
+const trailThoughtStore = createPanelStore();
+
 /**
- * One small row for the whole turn's reasoning.
+ * A round of the turn's reasoning, in the trail at the exact place it happened.
  *
- * The model reasons in several rounds between tool calls, and each round used to
- * render its own "Thought for 5s" row: a long run turned into a column of them,
- * each one saying almost nothing. What the user wants to see is one quiet line
- * that says the turn thought for a while, and the detail behind it if they ask.
- * The rows are merged here: the durations add up, the rounds are kept in order
- * inside one box, and only one of these is ever open in the whole chat.
+ * Not merged and not lifted to the top: round one sits above the first burst of
+ * tool calls, round two between those and the next, each with its own seconds —
+ * which is what the run actually looked like. Every round is closed when the
+ * trail opens, opens on a click, and opening one puts the others away, so the
+ * trail never becomes a column of open reasoning.
  */
-/**
- * The turn's reasoning inside the work trail: one small entry, in the place the
- * thinking actually happened.
- *
- * The rounds are merged exactly as before — durations added up, every round kept
- * in order in one block — but the entry is not lifted above the turn any more,
- * and it needs no disclosure of its own: by the time it can be read, the trail it
- * lives in is already open.
- */
-const ThinkingEntry: React.FC<{
+const TrailThinkingEntry: React.FC<{
+  id: string;
   content: string;
   duration?: number;
-  rounds?: number;
   /** A round is streaming right now. */
   active?: boolean;
-}> = ({ content, duration, rounds, active }) => (
-  <div className="my-1.5">
-    <div className="flex items-center gap-1.5 text-[12px] select-none">
-      <Brain className={`w-3.5 h-3.5 shrink-0 text-zinc-500 dark:text-zinc-400 ${active ? 'thinking-brain-shimmer' : ''}`} />
-      {active ? (
-        <span className="thinking-shimmer tracking-wide">Thinking…</span>
-      ) : (
-        <span className="tracking-wide text-zinc-500 dark:text-zinc-400">
-          Thought for {duration || 1}s
-          {rounds && rounds > 1 ? <span className="text-zinc-400 dark:text-zinc-500"> · {rounds} rounds</span> : null}
-        </span>
-      )}
+}> = ({ id, content, duration, active }) => {
+  const open = usePanelOpen(trailThoughtStore, id);
+  const toggle = () => (open ? trailThoughtStore.close() : trailThoughtStore.set(id));
+
+  return (
+    <div className="my-1">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="group/think inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 rounded text-[12px] leading-5 text-left cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
+      >
+        <Brain className={`w-3.5 h-3.5 shrink-0 text-zinc-500 dark:text-zinc-400 ${active ? 'thinking-brain-shimmer' : ''}`} />
+        {active ? (
+          <span className="thinking-shimmer tracking-wide">Thinking…</span>
+        ) : (
+          <span className="tracking-wide text-zinc-500 dark:text-zinc-400 group-hover/think:text-zinc-700 dark:group-hover/think:text-zinc-200 transition-colors">
+            Thought for {duration || 1}s
+          </span>
+        )}
+        <ChevronRight
+          className={`w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/think:text-zinc-600 dark:group-hover/think:text-zinc-300 ${
+            open ? 'rotate-90' : ''
+          }`}
+        />
+      </button>
+      {open && content.trim() ? (
+        <div className="panel-scroll mt-1 max-h-56 overflow-y-auto overscroll-y-contain pl-3 py-0.5 border-l border-zinc-200 dark:border-zinc-800 text-[13px] leading-[1.65] text-zinc-500 dark:text-zinc-400 font-sans whitespace-pre-wrap select-text">
+          {content}
+        </div>
+      ) : null}
     </div>
-    {content.trim() ? (
-      <div className="panel-scroll mt-1 max-h-56 overflow-y-auto overscroll-y-contain pl-3 py-0.5 border-l border-zinc-200 dark:border-zinc-800 text-[13px] leading-[1.65] text-zinc-500 dark:text-zinc-400 font-sans whitespace-pre-wrap select-text">
-        {content}
-      </div>
-    ) : null}
-  </div>
-);
+  );
+};
 
 const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   id,
@@ -973,13 +980,12 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
   };
 
   /**
-   * Everything the run did, in the order it did it: the reasoning where it
-   * happened, the lines it said, and the actions in tight groups.
+   * Everything the run did, in the order it did it: each round of reasoning where
+   * it happened, the lines it said along the way, and the actions themselves.
    */
   const renderTrail = () => {
     const out: React.ReactNode[] = [];
     let group: AgentAction[] = [];
-    let thinkingShown = false;
     const flush = () => {
       if (group.length === 0) return;
       const first = group[0].id;
@@ -1005,15 +1011,16 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
       if (block.type === 'text' && visibleTextIds.has(block.id)) continue;
       flush();
       if (block.type === 'thinking') {
-        if (!thinkingAggregate || thinkingShown) continue; // one entry for the whole turn
-        thinkingShown = true;
+        // Every round in the place it happened, with its own seconds. The merged
+        // "3 rounds" line belongs to the simple case (a turn with no work to fold),
+        // not here — in the trail the run should look like the run.
         out.push(
-          <ThinkingEntry
-            key={thinkingAggregate.id}
-            content={thinkingAggregate.content}
-            duration={thinkingAggregate.duration || undefined}
-            rounds={thinkingAggregate.rounds}
-            active={liveTurn && thinkingAggregate.stillThinking}
+          <TrailThinkingEntry
+            key={block.id}
+            id={`trail-think-${message.id}-${block.id}`}
+            content={block.content}
+            duration={block.duration}
+            active={liveTurn && Boolean(block.isStillThinking)}
           />
         );
       } else if (block.type === 'text') {
