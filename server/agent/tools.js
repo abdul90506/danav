@@ -1549,12 +1549,47 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
     async update_plan(args, ctx) {
       if (!Array.isArray(args.todos)) throw new ToolError('todos must be an array of { content, status }.');
       const todos = args.todos
-        .filter((t) => t && typeof t.content === 'string')
+        .filter((t) => t && typeof t.content === 'string' && t.content.trim())
         .slice(0, 25)
-        .map((t) => ({ content: clip(t.content, 200), status: ['pending', 'in_progress', 'completed'].includes(t.status) ? t.status : 'pending' }));
+        .map((t) => ({ content: clip(t.content.trim(), 200), status: ['pending', 'in_progress', 'completed'].includes(t.status) ? t.status : 'pending' }));
+
+      // An empty list would silently wipe the checklist that the user is reading
+      // and that a later "continue" resumes from, so it is refused rather than obeyed.
+      if (!todos.length) {
+        const kept = ctx.state.plan?.length || 0;
+        return {
+          ok: false,
+          failedSoft: true,
+          output:
+            `Error: no plan was sent. Keep the checklist going instead: ${kept ? `the current one has ${kept} item(s) and it is still on screen` : 'send the steps you are working through'}. ` +
+            'Send todos as a non-empty array of { content, status }.',
+          ui: { kind: 'plan', todos: ctx.state.plan || [], done: (ctx.state.plan || []).filter((t) => t.status === 'completed').length, total: kept },
+        };
+      }
+
+      /**
+       * Exactly one step is in progress — the checklist the user sees, the journal
+       * hand-off and "continue" all read the plan that way, and a model that sends
+       * two (or none) would leave the run pointing at nowhere. The fix is made here
+       * and said out loud, so the model can see what its list became.
+       */
+      const notes = [];
+      const inProgress = todos.filter((t) => t.status === 'in_progress');
+      if (inProgress.length > 1) {
+        for (const extra of inProgress.slice(1)) extra.status = 'pending';
+        notes.push(`only the first ${JSON.stringify(clip(inProgress[0].content, 60))} was kept in progress; the rest are pending again`);
+      } else if (!inProgress.length) {
+        const next = todos.find((t) => t.status === 'pending');
+        if (next) {
+          next.status = 'in_progress';
+          notes.push(`nothing was in progress, so ${JSON.stringify(clip(next.content, 60))} is now`);
+        }
+      }
+
       ctx.state.plan = todos;
       const done = todos.filter((t) => t.status === 'completed').length;
-      return { output: `Plan updated: ${done}/${todos.length} done.`, ui: { kind: 'plan', todos, done, total: todos.length } };
+      const suffix = notes.length ? ` (${notes.join('; ')})` : '';
+      return { output: `Plan updated: ${done}/${todos.length} done.${suffix}`, ui: { kind: 'plan', todos, done, total: todos.length } };
     },
   };
 

@@ -648,6 +648,28 @@ test('update_plan stores a sanitised checklist', async () => {
   assert.equal(r.ui.total, 3);
   assert.equal(r.ui.done, 1);
   assert.equal(ctx.state.plan[2].status, 'pending');
+
+  // Exactly one step is in progress, whatever the model sent.
+  const two = await run('update_plan', {
+    todos: [
+      { content: 'A', status: 'in_progress' },
+      { content: 'B', status: 'in_progress' },
+    ],
+  });
+  assert.equal(two.ui.todos.filter((t) => t.status === 'in_progress').length, 1);
+  assert.equal(two.ui.todos[1].status, 'pending');
+  assert.match(two.output, /only the first/);
+
+  const none = await run('update_plan', { todos: [{ content: 'A', status: 'pending' }, { content: 'B', status: 'pending' }] });
+  assert.equal(none.ui.todos[0].status, 'in_progress');
+  assert.match(none.output, /nothing was in progress/);
+
+  // An empty list would wipe the checklist the user is reading: refused.
+  const before = ctx.state.plan;
+  const empty = await run('update_plan', { todos: [] });
+  assert.equal(empty.ok, false);
+  assert.match(empty.output, /no plan was sent/);
+  assert.deepEqual(ctx.state.plan, before);
 });
 
 test('missing / wrong arguments become readable tool errors, not crashes', async () => {
