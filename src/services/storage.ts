@@ -229,6 +229,42 @@ export function stripImagePayloads(
   }));
 }
 
+/**
+ * Saving used to run on every conversations change — which, during a streaming
+ * answer, means every token. That stringifies the entire history, synchronously,
+ * hundreds of times per answer: the main thread is blocked while the agent works
+ * and the UI stutters. The write is now coalesced, and it is flushed before the
+ * page can go away, so nothing is lost.
+ */
+const STORAGE_DEBOUNCE_MS = 400;
+let pendingConversations: Conversation[] | null = null;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushStoredConversations(): void {
+  if (saveTimer !== null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const pending = pendingConversations;
+  pendingConversations = null;
+  if (pending) saveStoredConversations(pending);
+}
+
+/** Queue a save. The write happens once the stream (or the typing) pauses. */
+export function scheduleStoredConversations(conversations: Conversation[]): void {
+  pendingConversations = conversations;
+  if (saveTimer !== null) return;
+  saveTimer = setTimeout(flushStoredConversations, STORAGE_DEBOUNCE_MS);
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', flushStoredConversations);
+  window.addEventListener('beforeunload', flushStoredConversations);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushStoredConversations();
+  });
+}
+
 export function saveStoredConversations(conversations: Conversation[]): void {
   const sanitized = sanitizeConversations(conversations);
   try {

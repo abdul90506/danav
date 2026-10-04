@@ -3,6 +3,7 @@ import { PanelLeft, X } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { ChatArea } from './components/ChatArea';
 import { ChatInput } from './components/ChatInput';
+import { useStable } from './utils/stableCallback';
 import { SettingsModal } from './components/SettingsModal';
 import { MoviePlayerModal } from './components/MoviePlayerModal';
 import { AgentControls } from './components/AgentControls';
@@ -35,6 +36,7 @@ import {
   getStoredTheme,
   saveStoredActiveChatId,
   saveStoredConversations,
+  scheduleStoredConversations,
   saveStoredPreviewWidth,
   saveStoredProviders,
   saveStoredTheme,
@@ -296,7 +298,15 @@ export const App: React.FC = () => {
   });
 
   // Chat Input & Streaming state
-  const [input, setInput] = useState('');
+  /**
+   * The draft itself lives in ChatInput. Keeping it here meant a re-render of the
+   * whole app — sidebar, both panels and every message — on each keystroke, which
+   * is what makes typing lag in a long conversation. The app only needs to say
+   * "the draft is gone now", which is what this counter does: bumping it clears
+   * the box and puts the caret back.
+   */
+  const [composerReset, setComposerReset] = useState(0);
+  const resetComposer = useCallback(() => setComposerReset((n) => n + 1), []);
   const [isLoading, setIsLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const contentStreamerRef = useRef<SmoothStreamer | null>(null);
@@ -331,7 +341,8 @@ export const App: React.FC = () => {
 
   // Persist conversations to both LocalStorage and Backend Disk
   useEffect(() => {
-    saveStoredConversations(conversations);
+    // Coalesced, not immediate: this effect fires on every token of a stream.
+    scheduleStoredConversations(conversations);
     // Not before the server's own copy has been read (see backendHydrated above).
     if (!backendHydrated) return;
     if (backendSaveTimerRef.current) clearTimeout(backendSaveTimerRef.current);
@@ -476,7 +487,7 @@ export const App: React.FC = () => {
 
     setConversations((prev) => [newChat, ...prev]);
     setActiveChatId(newChat.id);
-    setInput('');
+    resetComposer();
     setIsLoading(false);
   };
 
@@ -486,7 +497,7 @@ export const App: React.FC = () => {
       abortControllerRef.current.abort();
     }
     setActiveChatId(id);
-    setInput('');
+    resetComposer();
     setIsLoading(false);
   };
 
@@ -736,7 +747,7 @@ export const App: React.FC = () => {
      */
     baseMessages?: Message[]
   ) => {
-    const rawText = (textToSend !== undefined ? textToSend : input).trim();
+    const rawText = String(textToSend ?? '').trim();
     const currentAttachments = attachmentsToSend || [];
 
     if (!rawText && currentAttachments.length === 0) return;
@@ -821,7 +832,7 @@ export const App: React.FC = () => {
       )
     );
 
-    setInput('');
+    resetComposer();
     setIsLoading(true);
 
     // The web tools are handed to the MODEL, not run here. It decides what to
@@ -1351,22 +1362,60 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  const agentControlsNode = (
-    <AgentControls
-      enabled={agentOn}
-      onToggle={handleToggleAgent}
-      workspaces={workspaces}
-      activeWorkspaceId={activeConversation?.agentWorkspaceId ?? null}
-      onSelectWorkspace={(id) => patchActive({ agentWorkspaceId: id })}
-      onCreate={() => setWorkspaceDialogOpen(true)}
-      onDelete={handleDeleteWorkspace}
-      onToggleAutoRun={handleToggleAutoRun}
-      filesOpen={filesOpen}
-      onToggleFiles={toggleFiles}
-      onOpenSandboxes={() => setSandboxesOpen(true)}
-      sandboxState={sandboxStatus?.state ?? null}
-      busy={isLoading}
-    />
+  // ---------------------------------------------------------------------------
+  // One identity for everything the memoised chat and composer receive.
+  //
+  // Every token of a streaming answer re-renders this component. Anything passed
+  // down as a fresh inline arrow makes React.memo on the other side useless: the
+  // message list and the composer would rebuild on every token. The `...Stable`
+  // wrappers below never change identity, and always call the newest handler.
+  // ---------------------------------------------------------------------------
+  const onToggleAgentStable = useStable(handleToggleAgent);
+  const onSelectWorkspaceStable = useStable((id: string) => patchActive({ agentWorkspaceId: id }));
+  const onCreateWorkspaceStable = useStable(() => setWorkspaceDialogOpen(true));
+  const onDeleteWorkspaceStable = useStable(handleDeleteWorkspace);
+  const onToggleAutoRunStable = useStable(handleToggleAutoRun);
+  const onToggleFilesStable = useStable(toggleFiles);
+  const onOpenSandboxesStable = useStable(() => setSandboxesOpen(true));
+
+  const agentControlsNode = useMemo(
+    () => (
+      <AgentControls
+        enabled={agentOn}
+        onToggle={onToggleAgentStable}
+        workspaces={workspaces}
+        activeWorkspaceId={activeConversation?.agentWorkspaceId ?? null}
+        onSelectWorkspace={onSelectWorkspaceStable}
+        onCreate={onCreateWorkspaceStable}
+        onDelete={onDeleteWorkspaceStable}
+        onToggleAutoRun={onToggleAutoRunStable}
+        filesOpen={filesOpen}
+        onToggleFiles={onToggleFilesStable}
+        onOpenSandboxes={onOpenSandboxesStable}
+        sandboxState={sandboxStatus?.state ?? null}
+        busy={isLoading}
+      />
+    ),
+    // The stable callbacks are deliberately absent: they never change identity.
+    [agentOn, workspaces, activeConversation?.agentWorkspaceId, filesOpen, sandboxStatus?.state, isLoading]
+  );
+
+  const onSendFromComposer = useStable((atts: Attachment[] | undefined, text: string) => {
+    void handleSendMessage(text, atts, true);
+  });
+  const onStopStable = useStable(handleStop);
+  const onSelectModelStable = useStable(handleSelectModel);
+  const onSelectThinkingLevelStable = useStable(handleSelectThinkingLevel);
+
+  const onRetryStable = useStable(() => void handleRetry());
+  const onEditUserMessageStable = useStable((id: string, text: string) => void handleEditUserMessage(id, text));
+  const onRegenerateResponseStable = useStable((id: string) => void handleRegenerateResponse(id));
+  const onContinueResponseStable = useStable(() => handleContinueResponse());
+  const onAgentApprovalStable = useStable((action: AgentAction, allow: boolean, always: boolean) =>
+    void handleAgentApproval(action, allow, always)
+  );
+  const onWatchMediaStable = useStable((id: string, type: string, title?: string) =>
+    setActiveMoviePlayer({ isOpen: true, mediaId: id, mediaType: type, title: title || 'Now Playing' })
   );
 
   return (
@@ -1432,18 +1481,17 @@ export const App: React.FC = () => {
 
             <ChatInput
               isCentered={true}
-              input={input}
-              setInput={setInput}
-              onSend={(atts) => handleSendMessage(undefined, atts, true)}
+              draftResetKey={composerReset}
+              onSend={onSendFromComposer}
               isLoading={isLoading}
-              onStop={handleStop}
+              onStop={onStopStable}
               placeholder={agentOn ? 'Describe what to build or change…' : 'Ask anything...'}
               providers={providers}
               selectedProviderId={activeConversation?.selectedProviderId || providers[0]?.id}
               selectedModelId={activeModelId}
               thinkingLevel={activeConversation?.thinkingLevel || 'Auto'}
-              onSelectModel={handleSelectModel}
-              onSelectThinkingLevel={handleSelectThinkingLevel}
+              onSelectModel={onSelectModelStable}
+              onSelectThinkingLevel={onSelectThinkingLevelStable}
               agentControls={agentControlsNode}
             />
           </div>
@@ -1453,22 +1501,15 @@ export const App: React.FC = () => {
             <ChatArea
               messages={activeConversation.messages}
               isLoading={isLoading}
-              onRetry={handleRetry}
-              onEditUserMessage={handleEditUserMessage}
-              onRegenerateResponse={handleRegenerateResponse}
-              onContinueResponse={handleContinueResponse}
-              onAgentApproval={handleAgentApproval}
+              onRetry={onRetryStable}
+              onEditUserMessage={onEditUserMessageStable}
+              onRegenerateResponse={onRegenerateResponseStable}
+              onContinueResponse={onContinueResponseStable}
+              onAgentApproval={onAgentApprovalStable}
               onOpenPreview={openPreview}
               agentMode={agentOn}
               sidebarCollapsed={isSidebarCollapsed}
-              onWatchMedia={(id, type, title) => {
-                setActiveMoviePlayer({
-                  isOpen: true,
-                  mediaId: id,
-                  mediaType: type,
-                  title: title || 'Now Playing',
-                });
-              }}
+              onWatchMedia={onWatchMediaStable}
             />
 
             {/* Floating Compact Chat Input at Bottom with subtle bottom fade */}
@@ -1476,18 +1517,17 @@ export const App: React.FC = () => {
               <div className="pointer-events-auto">
                 <ChatInput
                   isCentered={false}
-                  input={input}
-                  setInput={setInput}
-                  onSend={(atts) => handleSendMessage(undefined, atts, true)}
+                  draftResetKey={composerReset}
+                  onSend={onSendFromComposer}
                   isLoading={isLoading}
-                  onStop={handleStop}
+                  onStop={onStopStable}
                   placeholder={agentOn ? 'Describe what to build or change…' : 'Ask anything...'}
                   providers={providers}
                   selectedProviderId={activeConversation.selectedProviderId || providers[0]?.id}
                   selectedModelId={activeModelId}
                   thinkingLevel={activeConversation.thinkingLevel || 'Auto'}
-                  onSelectModel={handleSelectModel}
-                  onSelectThinkingLevel={handleSelectThinkingLevel}
+                  onSelectModel={onSelectModelStable}
+                  onSelectThinkingLevel={onSelectThinkingLevelStable}
                   agentControls={agentControlsNode}
                 />
               </div>

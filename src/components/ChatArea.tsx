@@ -22,7 +22,7 @@ interface ChatAreaProps {
   sidebarCollapsed?: boolean;
 }
 
-export const ChatArea: React.FC<ChatAreaProps> = ({
+const ChatAreaInner: React.FC<ChatAreaProps> = ({
   messages,
   isLoading,
   onRetry,
@@ -86,10 +86,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     prevMessagesCountRef.current = messages.length;
   }, [messages.length, scrollToBottom]);
 
-  // While an answer streams, follow it — but only while the user is still at the bottom.
+  /**
+   * While an answer streams, follow it — but only while the user is still at the
+   * bottom.
+   *
+   * This runs on every token, and `scrollHeight` forces the browser to lay the
+   * whole chat out again. Asking for at most one scroll per animation frame keeps
+   * the list pinned without doing the same work several times inside one frame.
+   */
+  const followFrameRef = useRef(0);
   useEffect(() => {
-    if (pinnedRef.current) scrollToBottom(false);
+    if (!pinnedRef.current || followFrameRef.current) return;
+    followFrameRef.current = requestAnimationFrame(() => {
+      followFrameRef.current = 0;
+      scrollToBottom(false);
+    });
   }, [messages, scrollToBottom]);
+  useEffect(() => () => cancelAnimationFrame(followFrameRef.current), []);
 
   const lastMessage = messages[messages.length - 1];
   const hasError = lastMessage?.role === 'assistant' && Boolean(lastMessage.error);
@@ -180,3 +193,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     </div>
   );
 };
+
+/**
+ * Memoised: the props the app passes are stable, so the list only re-renders when
+ * the message list itself changes — not when the sidebar, a dialog or the preview
+ * panel updates.
+ */
+export const ChatArea = React.memo(ChatAreaInner);
+ChatArea.displayName = 'ChatArea';

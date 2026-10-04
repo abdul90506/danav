@@ -86,7 +86,7 @@ function useIsDesktop(): boolean {
  * divider you can drag to trade space between them. Because some servers refuse
  * to be framed, "Open in a new tab" is always one click away.
  */
-export const PreviewPanel: React.FC<PreviewPanelProps> = ({
+const PreviewPanelInner: React.FC<PreviewPanelProps> = ({
   url, title, onClose, width, onWidthChange, reloadKey = 0,
 }) => {
   const [nonce, setNonce] = useState(0);
@@ -334,3 +334,11 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
     </aside>
   );
 };
+
+/**
+ * Memoised: an agent run re-renders the app on every streamed token, and with the
+ * preview open that meant diffing the whole panel (iframe and all) hundreds of
+ * times per answer. Every prop here is stable between runs, so React now skips it.
+ */
+export const PreviewPanel = React.memo(PreviewPanelInner);
+PreviewPanel.displayName = 'PreviewPanel';

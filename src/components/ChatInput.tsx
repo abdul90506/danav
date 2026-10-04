@@ -78,9 +78,14 @@ async function prepareImageForModel(file: File): Promise<{ dataUrl: string; byte
 }
 
 interface ChatInputProps {
-  input: string;
-  setInput: (value: string) => void;
-  onSend: (attachments?: Attachment[], webSearch?: boolean) => void;
+  /**
+   * Bumped by the app when a draft must be thrown away (a new chat, a switched
+   * chat). The text itself is local state: keeping it in App meant every keystroke
+   * re-rendered the sidebar, the whole message list and both panels, which is what
+   * makes typing lag in a long conversation.
+   */
+  draftResetKey?: number;
+  onSend: (attachments: Attachment[] | undefined, text: string) => void;
   isLoading: boolean;
   onStop: () => void;
   placeholder?: string;
@@ -311,9 +316,8 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   );
 };
 
-export const ChatInput: React.FC<ChatInputProps> = ({
-  input,
-  setInput,
+const ChatInputInner: React.FC<ChatInputProps> = ({
+  draftResetKey = 0,
   onSend,
   isLoading,
   onStop,
@@ -329,6 +333,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   agentControls,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [draft, setDraft] = useState('');
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
@@ -479,32 +484,76 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
   };
 
-  // Fluid Auto-Grow Textarea: expands smoothly as the user writes more lines
+  /**
+   * Auto-grow that does not fight the caret.
+   *
+   * The old version set `height:auto` on every keystroke to measure the content,
+   * which collapses the box for a moment: on a long prompt (past max-height) the
+   * textarea scrolls back to the top and the whole prompt visibly jumps while you
+   * type, and every keystroke forces a full-document reflow. `scrollHeight` is
+   * already the content height, so we only need to collapse when the text got
+   * SHORTER than the box — that is the one case where the current height would
+   * hide the real content height.
+   */
+  const lastDraftLengthRef = useRef(0);
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
 
     const minHeight = isCentered ? 44 : 32;
     const maxHeight = isCentered ? 220 : 160;
+    const current = parseFloat(el.style.height) || 0;
+    const shrunk =
+      draft.length < lastDraftLengthRef.current || current < minHeight || (isCentered && current > maxHeight);
+    lastDraftLengthRef.current = draft.length;
 
-    el.style.height = 'auto';
-    const scrollHeight = el.scrollHeight;
-    const targetHeight = Math.min(Math.max(scrollHeight, minHeight), maxHeight);
-    el.style.height = `${targetHeight}px`;
-    el.style.overflowY = scrollHeight > maxHeight ? 'auto' : 'hidden';
+    if (shrunk) el.style.height = 'auto';
+    const contentHeight = el.scrollHeight;
+    const targetHeight = Math.min(Math.max(contentHeight, minHeight), maxHeight);
+    if (Math.abs(targetHeight - (parseFloat(el.style.height) || 0)) > 0.5) {
+      el.style.height = `${targetHeight}px`;
+    }
+    el.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden';
 
-    setIsInputExpanded(scrollHeight > minHeight + 6);
-  }, [input, isCentered]);
+    /**
+     * The two layouts give the text different widths (the pill keeps the send
+     * button beside it), so a prompt sitting exactly on the boundary would flip
+     * the composer back and forth — each flip re-wrapping the text and moving the
+     * box. So: expand as soon as the text no longer fits one line, and only go
+     * back to the pill when the box is empty again.
+     */
+    setIsInputExpanded((wasExpanded) => draft.trim().length > 0 && (wasExpanded || contentHeight > minHeight + 6));
+  }, [draft, isCentered, draftResetKey]);
 
-  const canSend = (Boolean(input.trim()) || attachments.length > 0) && !isLoading && !disabled;
+  /**
+   * The app bumps `draftResetKey` when the draft must go: it sent the message, or
+   * you switched chats. Clearing it here (instead of in the app) is what keeps
+   * typing local to this component — and the same effect puts the caret straight
+   * back in the box, so you can keep typing without clicking it again. This also
+   * runs when the composer is swapped for the other layout, which is a different
+   * DOM node: sending the very first message used to drop the focus there.
+   */
+  useEffect(() => {
+    if (!draftResetKey) return;
+    setDraft('');
+    lastDraftLengthRef.current = 0;
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = '';
+    if (document.activeElement !== el) el.focus({ preventScroll: true });
+  }, [draftResetKey]);
+
+  const canSend = (Boolean(draft.trim()) || attachments.length > 0) && !isLoading && !disabled;
 
   const handleTriggerSend = () => {
     if (!canSend) return;
-    onSend(attachments, true);
+    // The draft is cleared by the app's reset too, but clearing it here keeps the
+    // box from holding a stale message for a frame while the request goes out.
+    onSend(attachments, draft);
+    setDraft('');
     setAttachments([]);
-    // Reset textarea height back to minimum
     if (textareaRef.current) {
-      textareaRef.current.style.height = isCentered ? '44px' : '32px';
+      textareaRef.current.style.height = '';
       textareaRef.current.style.overflowY = 'hidden';
       setIsInputExpanded(false);
     }
@@ -611,8 +660,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           <div className="w-full px-3.5 sm:px-4 pt-3 pb-1">
             <textarea
               ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={placeholder}
               disabled={disabled}
@@ -917,8 +966,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const textarea = (
     <textarea
       ref={textareaRef}
-      value={input}
-      onChange={(e) => setInput(e.target.value)}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
       onKeyDown={handleKeyDown}
       placeholder={placeholder}
       disabled={disabled}
@@ -1094,3 +1143,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     </div>
   );
 };
+
+/**
+ * Memoised: the composer is a big subtree, and the app re-renders on every token
+ * of a streaming answer. With stable props (useStable) React skips it entirely
+ * while the agent works, so the box you are typing in never rebuilds under you.
+ */
+export const ChatInput = React.memo(ChatInputInner);
+ChatInput.displayName = 'ChatInput';

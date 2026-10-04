@@ -230,7 +230,7 @@ const getMessageBlocks = (message: Message): MessageBlock[] => {
   return list;
 };
 
-export const ChatMessage: React.FC<ChatMessageProps> = ({
+const ChatMessageInner: React.FC<ChatMessageProps> = ({
   message,
   onEditUserMessage,
   onRegenerateResponse,
@@ -948,3 +948,13 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
     </div>
   );
 };
+
+/**
+ * Memoised on purpose: while an answer streams, `syncMessageState` rebuilds the
+ * conversation on every token. Without this, every message in the chat re-rendered
+ * — markdown, code blocks and the whole tool trail — for each token of the last
+ * one. With it, React skips every message whose props are unchanged, and the app
+ * passes stable callbacks so that is actually possible (see useStable).
+ */
+export const ChatMessage = React.memo(ChatMessageInner);
+ChatMessage.displayName = 'ChatMessage';
