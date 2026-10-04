@@ -662,32 +662,6 @@ test('turn state: terminal output is bounded, duplicates and unknown events are 
   assert.equal(snap.content, '', 'a notice is not part of the answer text');
 });
 
-test('turn state: a report is replaced by the rewrite, notice row and all', () => {
-  const s = new AgentTurnState();
-  s.appendThinking('Planning. ');
-  s.appendText("I'll write the file.");
-  s.applyAgentEvent({ type: 'action_start', id: 'a1', tool: 'write_file', args: { path: 'notes.txt' } });
-  s.applyAgentEvent({ type: 'action_end', id: 'a1', status: 'done', result: { kind: 'write', path: 'notes.txt' } });
-  s.appendText('\n\nDone — here is the full report.\n\n**Files created**\n- notes.txt\n- helper.js\n- README.md');
-  s.applyAgentEvent({ type: 'notice', message: 'That reply came back as a report — asking for the short version.' });
-  s.applyAgentEvent({ type: 'drop_trailing_text' });
-  s.appendText('Done — notes.txt is written and the check passes.');
-
-  const snap = s.snapshot();
-  const texts = snap.blocks.filter((b) => b.type === 'text');
-  assert.equal(texts.length, 3, 'narration, the explanation, and the rewrite');
-  assert.equal(texts[0].content, "I'll write the file.", 'narration from before the action is untouched');
-  assert.equal(texts[1].notice, true, 'the line explaining the rewrite stays on screen');
-  assert.equal(texts[2].content, 'Done — notes.txt is written and the check passes.');
-  assert.ok(!snap.blocks.some((b) => b.type === 'text' && /Files created/.test(b.content)), 'the report is gone');
-  assert.equal(
-    snap.content,
-    "I'll write the file.\n\nDone — notes.txt is written and the check passes.",
-    'and the history keeps only what the user can still see'
-  );
-  assert.ok(snap.blocks.some((b) => b.type === 'action'), 'the action rows are not collateral damage');
-});
-
 test('turn state: anything still live when the turn ends is settled (Stopped / Interrupted)', () => {
   const mk = () => {
     const s = new AgentTurnState();
@@ -1006,11 +980,9 @@ test('data path: runAgentTurn turns a real SSE run into ordered blocks (and Stop
       'thinking', 'text', 'action:update_plan', 'action:write_file', 'action:write_file',
       'text', 'action:read_file', 'action:multi_edit', 'action:edit_file',
       'action:run_command', 'action:grep_search', 'action:list_dir',
-      // the model's answer, the run's note that no check had been run, and the
-      // answer it gave after being asked to verify
-      'text', 'text', 'text',
+      // the model's closing answer
+      'text',
     ]);
-    assert.match(finished.snap.blocks.at(-2).content, /no check has been run/i);
     assert.ok(finished.snap.blocks.filter((b) => b.type === 'action').every((b) => b.action.status === 'done'));
     assert.equal(finished.snap.blocks[0].isStillThinking, false);
     assert.match(finished.snap.content, /^I'll set up a small landing page\.\n\nNow a couple of refinements\.\n\nDone! I created index\.html/);

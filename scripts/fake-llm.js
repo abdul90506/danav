@@ -6,7 +6,7 @@
  *   node scripts/fake-llm.js 4010        # then use baseUrl http://127.0.0.1:4010/v1
  *
  * The `model` name picks the scenario: fake-build, fake-slow, fake-fail,
- * fake-approval, fake-bad-calls, fake-loop, fake-bulky, fake-preview, fake-project, fake-burst, fake-batch, fake-edit-streak, fake-gate, fake-quiet, fake-quiet-end, fake-report.
+ * fake-approval, fake-bad-calls, fake-loop, fake-bulky, fake-preview, fake-project, fake-burst, fake-batch, fake-edit-streak, fake-gate, fake-quiet, fake-quiet-end.
  */
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
@@ -159,18 +159,6 @@ export const scenarios = {
       ? { text: 'Checking the file again.', toolCalls: [{ name: 'read_file', args: { path: 'notes.txt' } }] }
       : { text: 'The file has not changed; stopping the loop.' },
 
-  /** Writes a file and then tries to finish without ever checking it. */
-  unverified: ({ roundIdx, messages }) => {
-    if (roundIdx === 0) return { text: 'Writing the file.', toolCalls: [{ name: 'write_file', args: { path: 'app.js', content: 'export const answer = 42;\n' } }] };
-    const nudged = messages.some((m) => m.role === 'user' && String(m.content).includes('ran no check'));
-    const checked = messages.some((m) => m.role === 'tool' && /answer|42/.test(String(m.content)));
-    if (nudged && !checked) {
-      return { text: 'Checking it now.', toolCalls: [{ name: 'run_command', args: { command: 'node -e "import(\'./app.js\').then(m => console.log(m.answer))"' } }] };
-    }
-    if (checked) return { text: 'The check printed 42 — verified.' };
-    return { text: 'All done — app.js is written.' };
-  },
-
   /** Works for a while without ever planning, then answers the reminder. */
   planLate: ({ roundIdx, messages }) => {
     const reminded = messages.some((m) => m.role === 'user' && String(m.content).includes('no plan is recorded'));
@@ -284,40 +272,6 @@ export const scenarios = {
     if (roundIdx === 1) return { toolCalls: [{ name: 'read_file', args: { path: 'silent/one.txt' } }] };
     const asked = messages.some((m) => m.role === 'user' && String(m.content).includes('closing summary'));
     return asked ? { text: 'one.txt is written and reads back correctly.' } : { text: '' };
-  },
-
-  /**
-   * Finishes with a report when a summary was asked for. The loop is expected to
-   * ask again and to tell the client to take the report off the screen.
-   */
-  report: ({ roundIdx, messages }) => {
-    if (roundIdx === 0) {
-      return {
-        text: 'Writing the file and reading it back.',
-        toolCalls: [
-          { name: 'write_file', args: { path: 'notes.txt', content: 'hello\n' } },
-          { name: 'read_file', args: { path: 'notes.txt' } },
-        ],
-      };
-    }
-    const asked = messages.some((m) => m.role === 'user' && String(m.content).includes('was a report'));
-    if (asked) return { text: 'Done — notes.txt is written and the check passes.' };
-    return {
-      text: [
-        'Everything the user asked for is now in place, and here is the full picture of it.',
-        '',
-        '**What was created**',
-        '- `notes.txt` — the file the user asked for, described here at some length so that the shape of this message',
-        '- `helper.js` — a second file, mentioned with enough words to push this answer well past the length',
-        '- `README.md` — documentation, listed here because that is what a report does with every single file',
-        '',
-        '**Verification**',
-        'The check was run and everything passed, which you can see from the exit code that was reported above.',
-        '',
-        '**Notes and follow-ups**',
-        '- Nothing else in the project was touched by this work, and no follow-up is required from the user.',
-      ].join('\n'),
-    };
   },
 
   /** Several independent read-only calls in one round. */
@@ -503,10 +457,8 @@ const byModel = {
   'fake-mangle-comma': scenarios.mangleComma,
   'fake-mangle-nopath': scenarios.mangleNoPath,
   'fake-long-parts': scenarios.longParts,
-  'fake-unverified': scenarios.unverified,
   'fake-quiet': scenarios.quiet,
   'fake-quiet-end': scenarios.quietEnd,
-  'fake-report': scenarios.report,
 };
 
 export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {

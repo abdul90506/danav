@@ -54,6 +54,7 @@ export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory
 
     `# Finishing
 - End with a short summary the user can read in five seconds: the result first, then which checks passed (or failed, and what you did about them), then how to run or see it (command or preview link).
+- Write that summary DIRECTLY. Never post a long report and leave it there: the shape above is the message, the first time. Nobody wants a report followed by a shorter version of the same thing.
 - Shape, not just length: 2–5 plain sentences, 500 characters is plenty. NO headings, NO bold section labels, NO bullet or numbered lists, NO file-by-file inventory, NO pasted code. If you are writing labels like "**Files created**", you are writing a report — stop and use prose instead. Example of a finished answer: "Done — the to-do app is in index.html with local storage, and npm test passes 4/4. Open it with npm run dev and visit the preview link; the only thing left is the dark-mode toggle you mentioned."
 - Detail is opt-in. Write a longer explanation only when the user asked for one (a report, a walkthrough, "explain in detail"), or when something genuinely needs care: a risky change, an unresolved failure, a decision they must make.
 - Never claim a check you did not run, and if work is unfinished say what is left in one line.`,

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { startFakeLlm, HTML, CSS } from '../fake-llm.js';
-import { runAgent, pruneMessages, revealPlan, worklogLines, verificationLabel, looksLikeReport, userWantsDetail } from '../../server/agent/loop.js';
+import { runAgent, pruneMessages, revealPlan, worklogLines, verificationLabel } from '../../server/agent/loop.js';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
 import { registerAgentRoutes, _activeRuns } from '../../server/agent/routes.js';
 import { resolveApproval } from '../../server/agent/approvals.js';
@@ -189,13 +189,7 @@ test('happy path: plan, write, read, multi-edit, edit, command, search, list —
   assert.equal(changed['index.html'].added, countLines(HTML) + 1);
   assert.equal(changed['index.html'].removed, 1);
   assert.equal(changed['style.css'].added, countLines(CSS) + 3);
-  assert.equal(end.steps, 5, 'three working rounds, the answer, and one verification round');
-
-  // the model finished without a check of its own accord, so the run asked once
-  assert.ok(
-    noticesSeen(events).some((n) => /no check has been run/i.test(n)),
-    'the run asked for a check before accepting the answer'
-  );
+  assert.equal(end.steps, 4, 'three working rounds and the answer');
 
   // the 2nd and 3rd calls of a round are announced as queued; the 1st goes straight to running
   const queuedIds = events.filter((e) => e.agent?.patch?.status === 'queued').map((e) => e.agent.id);
@@ -1396,19 +1390,6 @@ test('a call that keeps answering the same thing stops the run instead of spinni
   assert.equal(events.find((e) => e.agent?.type === 'run_end').agent.stopReason, 'no_progress');
 });
 
-test('code that was changed but never checked is verified before the run ends', async () => {
-  const { events, result, ws } = await agentRun({ model: 'fake-unverified', history: [{ role: 'user', content: 'write app.js' }] });
-  assert.ok(fs.existsSync(path.join(ws.root, 'app.js')), 'the file was written');
-  assert.equal(result.stopReason, 'completed');
-  assert.ok(
-    noticesSeen(events).some((n) => /no check has been run/i.test(n)),
-    'the user can see why the model is still working'
-  );
-  const commands = events.filter((e) => e.agent?.type === 'action_start' && e.agent.tool === 'run_command');
-  assert.ok(commands.length >= 1, 'a real check ran after the nudge');
-  assert.match(saidSoFar(events), /verified/i, 'the run ended with the check it ran');
-});
-
 test('each budget warning is said once, and the prompt states the budget', async () => {
   const previous = process.env.DANAV_AGENT_MAX_STEPS;
   process.env.DANAV_AGENT_MAX_STEPS = '12';
@@ -1606,52 +1587,4 @@ test('a run that would end without a word is asked for the closing summary', asy
   assert.match(view, /\[system notice\] You finished without a message\. Write the closing summary now/, 'the summary is asked for');
   const spoken = events.filter((e) => typeof e.content === 'string').map((e) => e.content).join('');
   assert.match(spoken, /one\.txt is written/, 'and the run ends with words, not silence');
-});
-
-test('a closing report becomes the short summary the user asked for', async () => {
-  const { events, requests, result } = await agentRun({ model: 'fake-report', history: [{ role: 'user', content: 'add notes.txt and check it' }] });
-  assert.equal(result.stopReason, 'completed');
-
-  const noticeAt = events.findIndex((e) => e.agent?.type === 'notice' && /came back as a report/.test(String(e.agent.message)));
-  const dropAt = events.findIndex((e) => e.agent?.type === 'drop_trailing_text');
-  assert.ok(noticeAt >= 0, 'the user is told what is happening');
-  assert.ok(dropAt > noticeAt, 'the report is taken off the screen after that line');
-  // Text arrives in chunks, so compare what was streamed before and after the drop.
-  const textBefore = events.slice(0, dropAt).filter((e) => typeof e.content === 'string').map((e) => e.content).join('');
-  const textAfter = events.slice(dropAt + 1).filter((e) => typeof e.content === 'string').map((e) => e.content).join('');
-  assert.match(textBefore, /What was created/, 'the report streamed first');
-  assert.match(textAfter, /notes\.txt is written and the check passes/, 'and the rewrite lands after the drop');
-
-  // The model is shown what it wrote, and told the shape in plain words.
-  const asked = requests.at(-1).messages;
-  const notice = asked.find((m) => m.role === 'user' && /was a report/.test(String(m.content)));
-  assert.ok(notice, 'the rewrite was requested');
-  assert.match(String(notice.content), /2–5 plain sentences, under 600 characters/);
-  assert.match(String(notice.content), /taken off their screen/);
-  assert.ok(asked.some((m) => m.role === 'assistant' && /What was created/.test(String(m.content))), 'it can see its own report');
-
-  // Only ever once per run, however many reports come back.
-  assert.equal(events.filter((e) => e.agent?.type === 'drop_trailing_text').length, 1);
-});
-
-test('the report check knows a report from prose, and stays quiet when detail was wanted', async () => {
-  // Both directions of the shape test.
-  const bulleted = 'Here is what I did.\n\n**Files**\n- one\n- two\n- three\n' + 'More prose. '.repeat(80);
-  assert.equal(looksLikeReport(bulleted), true, 'bullets after real work are a report');
-  const prose = 'Everything is done and the tests pass. '.repeat(30);
-  assert.equal(looksLikeReport(prose), false, 'long prose is not a report');
-  assert.equal(looksLikeReport('- one\n- two'), false, 'short lists are fine');
-  assert.equal(looksLikeReport('# One\n\nbody\n\n# Two\n\n' + 'x'.repeat(1000)), true, 'headings count too');
-
-  // Explicit requests for detail are respected: no rewrite is asked for.
-  assert.equal(userWantsDetail('give me a detailed report of the changes'), true);
-  assert.equal(userWantsDetail('walk me through the refactor step by step'), true);
-  assert.equal(userWantsDetail('add notes.txt and check it'), false);
-
-  const { events } = await agentRun({
-    model: 'fake-report',
-    history: [{ role: 'user', content: 'add notes.txt and then give me a detailed report' }],
-  });
-  assert.equal(events.filter((e) => e.agent?.type === 'drop_trailing_text').length, 0, 'a report was asked for, so it stands');
-  assert.ok(!events.some((e) => e.agent?.type === 'notice' && /came back as a report/.test(String(e.agent.message))));
 });

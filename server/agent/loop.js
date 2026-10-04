@@ -591,34 +591,6 @@ const isContextLimitError = (err) =>
  * on its own: a real run that verified its work must not be recorded as one that
  * changed files and checked nothing.
  */
-/**
- * Did the user ask for something long? Then a long answer is what they wanted and
- * the summary contract does not apply.
- */
-const DETAIL_REQUEST =
-  /\b(detailed|in detail|in depth|full report|complete report|report on|write[- ]up|walk me through|step[- ]by[- ]step|explain (everything|all|it all|each)|document it|documentation|deep dive|thorough|analysis|breakdown|compare)\b/i;
-export const userWantsDetail = (request) => DETAIL_REQUEST.test(String(request || ''));
-
-/**
- * Is this answer a report rather than the short summary that was asked for?
- *
- * The prompt states the shape in plain words, and models still hand back headings,
- * bold labels and bulleted file inventories after real work — so the loop checks
- * the shape it actually got instead of assuming. Length alone is not the signal:
- * prose of the same size is fine.
- */
-export function looksLikeReport(text) {
-  const body = String(text || '');
-  if (body.length < 400) return false; // two or three sentences: nothing to fix
-  const lines = body.split('\n');
-  const bullets = lines.filter((l) => /^\s*(?:[-*•]|\d+[.)])\s+\S/.test(l)).length;
-  const headings = lines.filter((l) => /^\s*#{1,6}\s+\S/.test(l)).length;
-  const boldLabels = (body.match(/\*\*[^*\n]{2,40}\*\*/g) || []).length;
-  if (headings >= 2 || bullets >= 3) return true;
-  // A pair of bold section labels over a long answer is the same habit, smaller.
-  return body.length >= 700 && boldLabels >= 2;
-}
-
 export function verificationLabel(command) {
   const segments = String(command || '')
     .split(/&&|\|\||;|\||\n/)
@@ -679,12 +651,6 @@ function hashText(text) {
 
 /** Tools whose whole point is to be called again (a server produces new output). */
 const POLLING_TOOLS = new Set(['read_process_output', 'list_processes', 'get_preview_url']);
-
-/**
- * Files whose change deserves a check before the run calls itself finished.
- * A document, a data file or a config is not something you "run"; code is.
- */
-const CODE_FILE = /\.(?:[cm]?js|jsx|tsx?|mjs|cjs|py|rb|go|rs|java|kt|kts|cs|php|c|h|cc|cpp|hpp|swift|scala|sh|bash|zsh|ps1|vue|svelte|astro|html|htm|css|scss|sass|less)$/i;
 
 // ---------------------------------------------------------------------------
 // The run
@@ -829,13 +795,10 @@ export async function runAgent({
     const budgetNotices = new Set();
     let wrapUp = null; // set once a budget runs out or the model keeps failing
     let nudged = false;
-    let verifyNudged = false;
     /** Model turns that ran tools without a single word to the user, in a row. */
     let silentSteps = 0;
     /** How many times this run has asked for a spoken line (never more than two). */
     let narrationNotices = 0;
-    /** The closing answer was a report and was asked for again — once per run. */
-    let summaryRewritten = false;
     let continuations = 0; // answers that hit the output limit and were continued
     let planNudged = false;
 
@@ -1074,60 +1037,6 @@ export async function runAgent({
             content: stats.toolCalls > 0
               ? '[system notice] You finished without a message. Write the closing summary now, in their language: what you changed, which checks passed (or failed), and how they can run or see it. Two to five plain sentences, no headings.'
               : "[system notice] Your last response was empty — it had no answer and no tool call. Answer the user's request now in words, or call the tools you need. Do not reply with nothing.",
-          });
-          continue;
-        }
-
-        // It changed code and never checked any of it. Asking once — before the
-        // turn closes — is the difference between "wrote the file" and "wrote
-        // the file and ran it", which is the whole quality bar of this agent.
-        const changedCode = [...state.changed.keys()].filter((filePath) => CODE_FILE.test(filePath));
-        if (
-          said && !wrapUp && !verifyNudged && changedCode.length > 0 && state.checks.length === 0 &&
-          stats.steps + 1 < maxSteps && Date.now() < deadline
-        ) {
-          verifyNudged = true;
-          const shown = changedCode.slice(0, 3).map((f) => `\`${f}\``).join(', ');
-          send({
-            agent: {
-              type: 'notice',
-              message: `No check has been run for ${changedCode.length === 1 ? '' : 'any of '}the changed file(s) — asking the model to verify before it finishes.`,
-            },
-          });
-          messages.push({
-            role: 'user',
-            content:
-              `[system notice] You changed ${changedCode.length} code file(s) (${shown}) but ran no check. ` +
-              "Run the project's most relevant verification now — its test, build, typecheck, linter, or the program itself — and read the output. " +
-              'If this project genuinely has no way to check itself, or the check is too slow or impossible here, say exactly that in your answer instead.',
-          });
-          continue;
-        }
-
-        // The answer is a report, and nobody asked for one. Ask for the short
-        // version and take the report off the screen, so the rewrite lands in its
-        // place rather than piling a second answer underneath it.
-        if (
-          said &&
-          !wrapUp &&
-          !summaryRewritten &&
-          stats.toolCalls >= 2 &&
-          looksLikeReport(said) &&
-          !userWantsDetail(currentRequest) &&
-          stats.steps + 1 < maxSteps &&
-          Date.now() < deadline
-        ) {
-          summaryRewritten = true;
-          send({ agent: { type: 'notice', message: 'That reply came back as a report — asking for the short version.' } });
-          send({ agent: { type: 'drop_trailing_text' } });
-          messages.push({ role: 'assistant', content: round.text });
-          messages.push({
-            role: 'user',
-            content:
-              `[system notice] That closing message was a report (${String(said).length} characters, with headings or bullet lists). ` +
-              'The user asked for the work, not for a report, and it has been taken off their screen. Write it again now as the summary they want: ' +
-              '2–5 plain sentences, under 600 characters — the result, which checks passed or failed, and how to run or see it. ' +
-              'No headings, no bold labels, no bullet lists, no file-by-file inventory, no code. This new message is the only one they will read.',
           });
           continue;
         }
