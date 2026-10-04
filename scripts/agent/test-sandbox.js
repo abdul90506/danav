@@ -104,8 +104,9 @@ if (args.includes('--sandbox')) {
     });
 
     test('sandbox: delete, move, mkdir', async () => {
-      await run('create_dir', { path: 'tmpdir/a/b' });
-      await run('write_file', { path: 'tmpdir/a/b/f.txt', content: 'x\n' });
+      // No create_dir tool: the parents come from writing the file.
+      assert.equal((await run('write_file', { path: 'tmpdir/a/b/f.txt', content: 'x\n' })).ok, true);
+      assert.equal((await ws.stat(ws.resolve('tmpdir/a/b'))).type, 'dir');
       assert.equal((await run('delete_file', { path: 'tmpdir' })).ok, false, 'needs recursive');
       assert.equal((await run('move_file', { from: 'tmpdir/a/b/f.txt', to: 'moved/f.txt' })).ok, true);
       assert.equal((await ws.stat(ws.resolve('moved/f.txt'))).type, 'file');

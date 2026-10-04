@@ -662,6 +662,32 @@ test('turn state: terminal output is bounded, duplicates and unknown events are 
   assert.equal(snap.content, '', 'a notice is not part of the answer text');
 });
 
+test('turn state: a report is replaced by the rewrite, notice row and all', () => {
+  const s = new AgentTurnState();
+  s.appendThinking('Planning. ');
+  s.appendText("I'll write the file.");
+  s.applyAgentEvent({ type: 'action_start', id: 'a1', tool: 'write_file', args: { path: 'notes.txt' } });
+  s.applyAgentEvent({ type: 'action_end', id: 'a1', status: 'done', result: { kind: 'write', path: 'notes.txt' } });
+  s.appendText('\n\nDone — here is the full report.\n\n**Files created**\n- notes.txt\n- helper.js\n- README.md');
+  s.applyAgentEvent({ type: 'notice', message: 'That reply came back as a report — asking for the short version.' });
+  s.applyAgentEvent({ type: 'drop_trailing_text' });
+  s.appendText('Done — notes.txt is written and the check passes.');
+
+  const snap = s.snapshot();
+  const texts = snap.blocks.filter((b) => b.type === 'text');
+  assert.equal(texts.length, 3, 'narration, the explanation, and the rewrite');
+  assert.equal(texts[0].content, "I'll write the file.", 'narration from before the action is untouched');
+  assert.equal(texts[1].notice, true, 'the line explaining the rewrite stays on screen');
+  assert.equal(texts[2].content, 'Done — notes.txt is written and the check passes.');
+  assert.ok(!snap.blocks.some((b) => b.type === 'text' && /Files created/.test(b.content)), 'the report is gone');
+  assert.equal(
+    snap.content,
+    "I'll write the file.\n\nDone — notes.txt is written and the check passes.",
+    'and the history keeps only what the user can still see'
+  );
+  assert.ok(snap.blocks.some((b) => b.type === 'action'), 'the action rows are not collateral damage');
+});
+
 test('turn state: anything still live when the turn ends is settled (Stopped / Interrupted)', () => {
   const mk = () => {
     const s = new AgentTurnState();
@@ -1109,6 +1135,60 @@ test('Settings offers a Chat Data tab (the backup it explains is only reachable 
   );
   assert.match(html, /Chat Data/, 'the tab is reachable');
   assert.match(html, /Appearance/, 'and the other tabs are still there');
+});
+
+test('the composer owns the draft, keeps the caret, and the chat is memoised', async () => {
+  const ui = await loadComponent('src/components/ChatInput.tsx');
+  const area = await loadComponent('src/components/ChatArea.tsx');
+  const message = await loadComponent('src/components/ChatMessage.tsx');
+
+  // Memo, not just a plain function component: a streaming answer re-renders the
+  // app on every token, and without this every message (markdown included) and the
+  // whole composer were rebuilt for each one.
+  const memoType = Symbol.for('react.memo');
+  for (const [name, component] of [
+    ['ChatInput', ui.ChatInput],
+    ['ChatArea', area.ChatArea],
+    ['ChatMessage', message.ChatMessage],
+  ]) {
+    assert.equal(component.$$typeof, memoType, `${name} must be memoised`);
+  }
+
+  // An empty composer renders a disabled send button — the draft it sends lives
+  // inside the component now (the app re-rendering per keystroke was the lag).
+  const html = renderToStaticMarkup(
+    React.createElement(ui.ChatInput, {
+      draftResetKey: 0,
+      onSend: () => {},
+      isLoading: false,
+      onStop: () => {},
+      providers: [],
+      selectedProviderId: '',
+      selectedModelId: '',
+      thinkingLevel: 'Auto',
+      onSelectModel: () => {},
+      onSelectThinkingLevel: () => {},
+    })
+  );
+  assert.match(html, /<textarea/, 'the box is a textarea');
+  assert.match(html, /disabled/, 'nothing typed yet: send starts disabled');
+
+  const input = fs.readFileSync(path.join(root, 'src/components/ChatInput.tsx'), 'utf8');
+  // Collapsing the box to measure on every keystroke is what made a long prompt
+  // scroll back to the top while typing (and forced a reflow per key).
+  const collapses = input.match(/el\.style\.height = 'auto';/g) || [];
+  assert.equal(collapses.length, 1, 'the box is collapsed exactly once, and only to measure');
+  assert.match(input, /if \(shrunk\) el\.style\.height = 'auto';/, 'that collapse is guarded by "the text got shorter"');
+  // Sending must not cost the user the focus: the box is cleared from the app's
+  // reset token and the caret is put back by hand.
+  assert.match(input, /el\.focus\(\{ preventScroll: true \}\)/, 'the caret comes back on its own');
+
+  const app = fs.readFileSync(path.join(root, 'src/App.tsx'), 'utf8');
+  assert.ok(!/setInput\b/.test(app), 'the app no longer holds the draft');
+  assert.match(app, /useStable\(/, 'callbacks handed to the memoised children never change identity');
+  // localStorage was written synchronously on every token of a stream.
+  assert.match(app, /scheduleStoredConversations\(conversations\)/, 'storage writes are coalesced');
+  assert.ok(!/saveStoredConversations\(conversations\)/.test(app), 'and no longer per token');
 });
 
 test('a missing backup reads as "nothing to restore yet", not as an error', async () => {

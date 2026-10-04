@@ -89,6 +89,26 @@ export class AgentTurnState {
     }
   }
 
+  /**
+   * Remove the trailing answer text (however many blocks it arrived in) and rebuild
+   * the joined content from what is left. Action and thinking blocks stop the
+   * removal — only the prose at the end of the turn goes.
+   */
+  dropTrailingText() {
+    const kept: MessageBlock[] = [];
+    while (this.blocks.length) {
+      const last = this.blocks[this.blocks.length - 1];
+      if (last.type !== 'text') break;
+      this.blocks.pop();
+      if (last.notice) kept.unshift(last); // an explanation, not the answer
+    }
+    if (kept.length) this.blocks.push(...kept);
+    this.content = this.blocks
+      .filter((b): b is Extract<MessageBlock, { type: 'text' }> => b.type === 'text' && !b.notice)
+      .map((b) => b.content)
+      .join('\n\n');
+  }
+
   markThinkingDone() {
     if (!this.blocks.some((b) => b.type === 'thinking' && b.isStillThinking)) return;
     const seconds = Math.max(1, Math.round((this.now() - (this.thinkingStartedAt ?? this.now())) / 1000));
@@ -110,6 +130,15 @@ export class AgentTurnState {
       case 'notice':
         this.markThinkingDone();
         if (ev.message) this.blocks.push({ id: this.nextId('note'), type: 'text', content: String(ev.message), notice: true });
+        break;
+
+      case 'drop_trailing_text':
+        // The run decided the closing message was a report rather than the short
+        // summary the user wanted, and asked for a rewrite. Take the report off the
+        // screen so the rewrite lands in its place instead of below it. Notice rows
+        // (the line explaining this) stay where they are.
+        this.markThinkingDone();
+        this.dropTrailingText();
         break;
 
       case 'action_start': {

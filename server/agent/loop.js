@@ -14,7 +14,7 @@ import { LlmError, streamCompletion } from './llm.js';
 import { buildSystemPrompt, formatSnapshot } from './prompt.js';
 import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun } from './journal.js';
-import { buildToolset, READ_ONLY_TOOLS } from './tools.js';
+import { buildToolset, READ_ONLY_TOOLS, RETIRED_TOOLS } from './tools.js';
 import { checkAction, createLedger, observeOwned } from './policy.js';
 import { splitLines } from './textops.js';
 import { memoryForPrompt } from './memory.js';
@@ -591,6 +591,34 @@ const isContextLimitError = (err) =>
  * on its own: a real run that verified its work must not be recorded as one that
  * changed files and checked nothing.
  */
+/**
+ * Did the user ask for something long? Then a long answer is what they wanted and
+ * the summary contract does not apply.
+ */
+const DETAIL_REQUEST =
+  /\b(detailed|in detail|in depth|full report|complete report|report on|write[- ]up|walk me through|step[- ]by[- ]step|explain (everything|all|it all|each)|document it|documentation|deep dive|thorough|analysis|breakdown|compare)\b/i;
+export const userWantsDetail = (request) => DETAIL_REQUEST.test(String(request || ''));
+
+/**
+ * Is this answer a report rather than the short summary that was asked for?
+ *
+ * The prompt states the shape in plain words, and models still hand back headings,
+ * bold labels and bulleted file inventories after real work — so the loop checks
+ * the shape it actually got instead of assuming. Length alone is not the signal:
+ * prose of the same size is fine.
+ */
+export function looksLikeReport(text) {
+  const body = String(text || '');
+  if (body.length < 400) return false; // two or three sentences: nothing to fix
+  const lines = body.split('\n');
+  const bullets = lines.filter((l) => /^\s*(?:[-*•]|\d+[.)])\s+\S/.test(l)).length;
+  const headings = lines.filter((l) => /^\s*#{1,6}\s+\S/.test(l)).length;
+  const boldLabels = (body.match(/\*\*[^*\n]{2,40}\*\*/g) || []).length;
+  if (headings >= 2 || bullets >= 3) return true;
+  // A pair of bold section labels over a long answer is the same habit, smaller.
+  return body.length >= 700 && boldLabels >= 2;
+}
+
 export function verificationLabel(command) {
   const segments = String(command || '')
     .split(/&&|\|\||;|\||\n/)
@@ -802,6 +830,12 @@ export async function runAgent({
     let wrapUp = null; // set once a budget runs out or the model keeps failing
     let nudged = false;
     let verifyNudged = false;
+    /** Model turns that ran tools without a single word to the user, in a row. */
+    let silentSteps = 0;
+    /** How many times this run has asked for a spoken line (never more than two). */
+    let narrationNotices = 0;
+    /** The closing answer was a report and was asked for again — once per run. */
+    let summaryRewritten = false;
     let continuations = 0; // answers that hit the output limit and were continued
     let planNudged = false;
 
@@ -813,13 +847,13 @@ export async function runAgent({
         wrapUp = 'step_limit';
         messages.push({
           role: 'user',
-          content: '[system notice] You have used all the steps allowed for one run. Do NOT call any more tools. Summarise what is done, what is left, and tell the user they can reply "continue" to keep going.',
+          content: '[system notice] You have used all the steps allowed for one run. Do NOT call any more tools. Write the closing summary now, in 2–5 plain sentences: what is done, what is left, and that replying "continue" keeps going. No headings, no bullet lists.',
         });
       } else if (!wrapUp && Date.now() > deadline) {
         wrapUp = 'time_limit';
         messages.push({
           role: 'user',
-          content: '[system notice] The time allowed for one run is up. Do NOT call any more tools. Summarise what is done and what is left.',
+          content: '[system notice] The time allowed for one run is up. Do NOT call any more tools. Write the closing summary now, in 2–5 plain sentences: what is done, what is left. No headings, no bullet lists.',
         });
       }
       stopReason = wrapUp || stopReason;
@@ -1038,7 +1072,7 @@ export async function runAgent({
           messages.push({
             role: 'user',
             content: stats.toolCalls > 0
-              ? '[system notice] You finished without a message. Briefly tell the user, in their language, what you did and the result.'
+              ? '[system notice] You finished without a message. Write the closing summary now, in their language: what you changed, which checks passed (or failed), and how they can run or see it. Two to five plain sentences, no headings.'
               : "[system notice] Your last response was empty — it had no answer and no tool call. Answer the user's request now in words, or call the tools you need. Do not reply with nothing.",
           });
           continue;
@@ -1070,6 +1104,34 @@ export async function runAgent({
           continue;
         }
 
+        // The answer is a report, and nobody asked for one. Ask for the short
+        // version and take the report off the screen, so the rewrite lands in its
+        // place rather than piling a second answer underneath it.
+        if (
+          said &&
+          !wrapUp &&
+          !summaryRewritten &&
+          stats.toolCalls >= 2 &&
+          looksLikeReport(said) &&
+          !userWantsDetail(currentRequest) &&
+          stats.steps + 1 < maxSteps &&
+          Date.now() < deadline
+        ) {
+          summaryRewritten = true;
+          send({ agent: { type: 'notice', message: 'That reply came back as a report — asking for the short version.' } });
+          send({ agent: { type: 'drop_trailing_text' } });
+          messages.push({ role: 'assistant', content: round.text });
+          messages.push({
+            role: 'user',
+            content:
+              `[system notice] That closing message was a report (${String(said).length} characters, with headings or bullet lists). ` +
+              'The user asked for the work, not for a report, and it has been taken off their screen. Write it again now as the summary they want: ' +
+              '2–5 plain sentences, under 600 characters — the result, which checks passed or failed, and how to run or see it. ' +
+              'No headings, no bold labels, no bullet lists, no file-by-file inventory, no code. This new message is the only one they will read.',
+          });
+          continue;
+        }
+
         if (!said) {
           // Still nothing: never end a run without a word to the user.
           send({ agent: { type: 'notice', message: 'The model returned an empty response. Send the request again, or try another model.' } });
@@ -1091,6 +1153,11 @@ export async function runAgent({
       // Preserve every provider tool_call id in the transcript, but execute a
       // consecutive same-file edit streak as one atomic multi_edit operation.
       const executionPrepared = coalesceAdjacentFileEdits(prepared, tools);
+
+      // Did this turn actually say anything to the user? A turn that only fires
+      // tool calls is silent, and a run of silent turns is a run the user cannot
+      // follow — see the narration nudge at the end of this round.
+      silentSteps = round.text.trim() ? 0 : silentSteps + 1;
 
       messages.push({
         role: 'assistant',
@@ -1341,7 +1408,10 @@ export async function runAgent({
             res = saved;
           }
         } else if (!tools.has(name)) {
-          const msg = `Unknown tool "${name}". Available tools: ${tools.definitions.map((d) => d.function.name).join(', ')}.`;
+          const retired = RETIRED_TOOLS.get(name);
+          const msg = retired
+            ? `"${name}" is not a tool any more — ${retired}`
+            : `Unknown tool "${name}". Available tools: ${tools.definitions.map((d) => d.function.name).join(', ')}.`;
           res = { ok: false, output: `Error: ${msg}`, error: msg, ui: { kind: name, ok: false } };
         } else {
           // The invariant, checked before anything is touched: a call that would
@@ -1478,6 +1548,26 @@ export async function runAgent({
       for (const { modelId } of prepared) {
         if (!answered.has(modelId)) messages.push({ role: 'tool', tool_call_id: modelId, content: 'Skipped.' });
       }
+
+      // Narration, enforced rather than hoped for. The prompt asks for a short
+      // line before and after real work, but a weak or rushed model just calls
+      // tools turn after turn and leaves the user staring at action rows with no
+      // idea where any of it is going. Two silent turns in a row is the point to
+      // ask — once, twice at the very most, so the transcript stays clean.
+      const wantsNarration =
+        (silentSteps >= 2 && narrationNotices === 0) || (silentSteps >= 5 && narrationNotices === 1);
+      if (!wrapUp && wantsNarration && Date.now() < deadline) {
+        narrationNotices++;
+        messages.push({
+          role: 'user',
+          content:
+            `[system notice] You have run ${silentSteps} steps without saying anything to the user. ` +
+            'Before your next action, write ONE short, plain sentence telling them what you are doing now and why — ' +
+            'the same way you would if a colleague were watching over your shoulder. Plain prose, no heading, no list, ' +
+            'no repetition of anything you already said. Then keep going with the task.',
+        });
+      }
+
       stopReason = wrapUp || stopReason;
     }
   } catch (err) {

@@ -347,13 +347,13 @@ export const TOOL_DEFINITIONS = [
   ),
   fn(
     'write_file',
-    'Create a new file, or completely replace an existing one, with `content` (parent folders are created for you). Best for NEW files. For changes to an existing file prefer edit_file / multi_edit — they are faster and cannot accidentally drop code.',
+    'Create a new file, or completely replace an existing one, with `content` (parent folders are created for you). Best for NEW files. For changes to an existing file prefer edit_file / multi_edit — they are faster and cannot accidentally drop code. Always put "path" FIRST in the arguments: a call cut off by the output limit is recoverable at that point, and a file longer than one call is written in parts (write_file, then append_file).',
     { path: P.path, content: { type: 'string', description: 'The complete file contents.' } },
     ['path', 'content']
   ),
   fn(
     'append_file',
-    'Add text to the END of a file (the file is created if it does not exist). Use it to write a very large file in parts — write_file with the first part, then append_file with each next part — so that no single call has to be huge. Never repeat what is already in the file.',
+    'Add text to the END of a file (the file is created if it does not exist). Use it to write a very large file in parts — write_file with the first part, then append_file with each next part (~150 lines each) — so that no single call has to be huge. Never repeat what is already in the file, and put "path" FIRST in the arguments.',
     { path: P.path, content: { type: 'string', description: 'The text to add at the end.' } },
     ['path', 'content']
   ),
@@ -399,7 +399,6 @@ export const TOOL_DEFINITIONS = [
   ),
   fn('delete_file', 'Delete a file or folder. A non-empty folder needs recursive=true.', { path: P.path, recursive: { type: 'boolean' } }, ['path']),
   fn('move_file', 'Move or rename a file or folder.', { from: { type: 'string' }, to: { type: 'string' } }, ['from', 'to']),
-  fn('create_dir', 'Create a folder (and any missing parents).', { path: P.path }, ['path']),
   fn(
     'grep_search',
     'Search file CONTENTS with a regular expression. Returns `file:line: text`. Skips node_modules, .git, build output and binary files. Use glob (e.g. "*.tsx") to narrow by file name.',
@@ -525,6 +524,22 @@ export const TOOL_DEFINITIONS = [
   ),
 ];
 
+/**
+ * Tools that were folded into others, kept only as a redirect.
+ *
+ * `create_dir` was a whole tool for an operation two existing paths already do
+ * better: `write_file` creates every missing parent folder, and a shell
+ * `mkdir -p` covers the rare empty folder. One tool fewer is one wrong choice
+ * fewer — but a model that learned the old name should be told the new way in
+ * one line, not left guessing at "unknown tool".
+ */
+export const RETIRED_TOOLS = new Map([
+  [
+    'create_dir',
+    'write_file already creates every missing folder on its way to the file, so just write the file where you want it (or use run_command with "mkdir -p <path>" for an empty folder).',
+  ],
+]);
+
 export const READ_ONLY_TOOLS = new Set([
   'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'list_processes', 'read_process_output', 'web_search', 'fetch_url', 'search_memory',
   'image_search', 'delegate_task',
@@ -556,8 +571,7 @@ export function displayArgs(name, rawArgs) {
     case 'file_outline':
     case 'write_file':
     case 'edit_file':
-    case 'delete_file':
-    case 'create_dir': pick.path = s('path'); break;
+    case 'delete_file': pick.path = s('path'); break;
     case 'move_file': pick.from = s('from'); pick.to = s('to'); break;
     case 'grep_search': pick.pattern = s('pattern'); pick.path = s('path'); pick.glob = s('glob'); break;
     case 'file_search': pick.pattern = s('pattern'); pick.path = s('path'); break;
@@ -1141,15 +1155,6 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       return { output: `Moved ${rel(from)} → ${rel(to)}.`, ui: { kind: 'move', from: rel(from), to: rel(to) } };
     },
 
-    async create_dir(args, ctx) {
-      const abs = await target(reqStr(args, 'path'));
-      await ws.mkdirp(abs);
-      // The agent made it, so it already knows it is empty — no listing needed
-      // before it can be removed again.
-      observeListing(ws, ctx.state, abs, [], { depth: 1 });
-      return { output: `Created folder ${rel(abs)}/.`, ui: { kind: 'mkdir', path: rel(abs) } };
-    },
-
     // ----------------------------------------------------------------- search
     async grep_search(args) {
       const pattern = reqStr(args, 'pattern');
@@ -1693,7 +1698,14 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         // Double-encoded: the provider wrapped the whole object in a JSON string.
         try { value = JSON.parse(value); } catch { /* validated below */ }
       }
-      return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+      // Some models send the whole tool-call object, or wrap it in a one-item array.
+      if (Array.isArray(value)) value = value.length === 1 ? value[0] : null;
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      for (const key of ['arguments', 'args', 'parameters']) {
+        const inner = value[key];
+        if (inner && typeof inner === 'object' && !Array.isArray(inner)) return inner;
+      }
+      return value;
     };
     if (!raw) return { ok: true, args: {}, repaired: false };
     let parsed = null;

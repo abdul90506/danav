@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
-import { assertPublicUrl, buildToolset, displayArgs, isPrivateAddress, peekPartialArgs, portsInCommand, READ_ONLY_TOOLS, resolveSafeUrl, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
+import { assertPublicUrl, buildToolset, displayArgs, isPrivateAddress, peekPartialArgs, portsInCommand, READ_ONLY_TOOLS, resolveSafeUrl, RETIRED_TOOLS as retiredTools, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
 import { createRedactor } from '../../server/agent/util.js';
 import { repairJsonText } from '../../server/agent/partial.js';
 
@@ -13,6 +13,10 @@ const { test } = globalThis.__agentTest;
 const isWin = process.platform === 'win32';
 
 console.log('\n[tools]');
+
+function toolsetHas(name) {
+  return TOOL_DEFINITIONS.some((d) => d.function.name === name);
+}
 
 async function setup({ autoRun = true, search, probe, runSubagent } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-tools-'));
@@ -226,7 +230,7 @@ test('multi_edit: ordered, atomic, combined ranges; accepts a JSON-string edits 
   assert.equal(fs.readFileSync(path.join(dir, 'm.txt'), 'utf8'), before);
 });
 
-test('delete / move / create_dir, and writes inside .git are refused', async () => {
+test('delete / move, and writes inside .git are refused', async () => {
   const { run, dir } = await setup();
   await run('write_file', { path: 'd/f.txt', content: 'x\n' });
   await run('write_file', { path: 'd/nested/g.txt', content: 'x\n' });
@@ -242,7 +246,15 @@ test('delete / move / create_dir, and writes inside .git are refused', async () 
   const mv = await run('move_file', { from: 'a.txt', to: 'sub/b.txt' });
   assert.equal(mv.ui.kind, 'move');
   assert.ok(fs.existsSync(path.join(dir, 'sub/b.txt')));
-  assert.equal((await run('create_dir', { path: 'x/y/z' })).ui.kind, 'mkdir');
+  // Folders have no tool of their own any more: creating one is a side effect of
+  // writing a file into it, and the retired name is answered with the redirect.
+  assert.equal(toolsetHas('create_dir'), false);
+  const deep = await run('write_file', { path: 'x/y/z/keep.txt', content: 'x\n' });
+  assert.equal(deep.ok, true, 'write_file still makes every missing folder');
+  assert.ok(fs.existsSync(path.join(dir, 'x/y/z/keep.txt')));
+  const retired = retiredTools.get('create_dir');
+  assert.ok(retired, 'the old name has somewhere to point');
+  assert.match(retired, /write_file already creates every missing folder/);
   const git = await run('write_file', { path: '.git/hooks/pre-commit', content: 'x' });
   assert.equal(git.ok, false);
   assert.match(git.output, /\.git is blocked/);
@@ -1064,6 +1076,13 @@ test('parseArgs: valid JSON passes through, almost-JSON is repaired, garbage is 
   const dr = tools.parseArgs(JSON.stringify(JSON.stringify({ path: 'g.txt', content: 'one\ntwo\n' })));
   assert.equal(dr.ok, true);
   assert.equal(dr.args.path, 'g.txt');
+
+  // some models send the whole tool-call object, or wrap the arguments in an array
+  const wrapped = tools.parseArgs(JSON.stringify({ name: 'write_file', arguments: { path: 'w.txt', content: 'one\ntwo\n' } }));
+  assert.deepEqual([wrapped.ok, wrapped.args.path], [true, 'w.txt']);
+  const arrayed = tools.parseArgs(JSON.stringify([{ path: 'arr.txt', content: 'one\ntwo\n' }]));
+  assert.deepEqual([arrayed.ok, arrayed.args.path], [true, 'arr.txt']);
+  assert.equal(tools.parseArgs(JSON.stringify([{ path: 'a' }, { path: 'b' }])).ok, false, 'two objects is not a call');
 
   // what cannot be repaired says exactly why
   const bad = tools.parseArgs('{"path": "a.txt", "content": ');
