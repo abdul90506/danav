@@ -189,7 +189,12 @@ test('happy path: plan, write, read, multi-edit, edit, command, search, list —
   assert.equal(changed['index.html'].added, countLines(HTML) + 1);
   assert.equal(changed['index.html'].removed, 1);
   assert.equal(changed['style.css'].added, countLines(CSS) + 3);
-  assert.equal(end.steps, 4, 'three working rounds and the answer');
+  assert.equal(end.steps, 5, 'three working rounds, the answer, and the round that closes the checklist');
+  // The fake never marks its own checklist off, so the run asks — silently, in the
+  // transcript only — for what it left open before accepting the answer.
+  const planNotice = requests.flatMap((r) => r.messages).find((m) => m.role === 'user' && /your own checklist still has/.test(String(m.content)));
+  assert.ok(planNotice, 'the open checklist is handed back to the model once');
+  assert.match(String(planNotice.content), /Style it/);
 
   // the 2nd and 3rd calls of a round are announced as queued; the 1st goes straight to running
   const queuedIds = events.filter((e) => e.agent?.patch?.status === 'queued').map((e) => e.agent.id);
@@ -982,9 +987,9 @@ test('read-only tools of one round run IN PARALLEL; the model still sees the res
 });
 
 test('the run refuses to delete what it has never looked at, and says what to look at', async () => {
-  // The whole point of the gate: a model that goes straight for the delete does
-  // not get to make it. Nothing is asked of the system prompt — the call simply
-  // does not run, and the tool result tells the model what evidence is missing.
+  // The gate answers its own question where it can: a model that goes straight for
+  // the delete gets the folder listed and read for it, and the result says what was
+  // found. The one refusal left is the workspace itself.
   const root = tmp('danav-gate-');
   fs.mkdirSync(path.join(root, 'legacy', 'nested'), { recursive: true });
   fs.writeFileSync(path.join(root, 'legacy', 'old.js'), 'old\n');
@@ -993,49 +998,40 @@ test('the run refuses to delete what it has never looked at, and says what to lo
   fs.writeFileSync(path.join(root, 'src', 'app.js'), 'app\n');
   const ws = new LocalWorkspace({ id: 'ws-gate', kind: 'local', name: 'gate', root, autoRun: true });
 
-  // The run is synchronous, so "was anything touched?" has to be sampled the
-  // moment the refusal lands — by the end of the run the agent has done it right.
+  // The run plays out to the end, so "was anything touched when it was refused?"
+  // has to be sampled as it happens.
   const atRefusal = [];
   const { events, requests } = await agentRun({
     model: 'fake-gate',
     workspace: ws,
     onEvent: (e) => {
       if (e.agent?.type === 'action_end' && e.agent.status === 'blocked') {
-        atRefusal.push({
-          legacy: fs.existsSync(path.join(root, 'legacy', 'old.js')),
-          src: fs.existsSync(path.join(root, 'src', 'app.js')),
-        });
+        atRefusal.push({ src: fs.existsSync(path.join(root, 'src', 'app.js')) });
       }
     },
   });
   const ends = agentEvents(events, 'action_end');
-  const starts = agentEvents(events, 'action_start');
 
-  // 1. the un-inspected delete never ran
-  assert.equal(ends[0].status, 'blocked', `expected a refusal, got ${ends[0].status}: ${ends[0].error}`);
-  assert.equal(ends[0].ok, false);
-  assert.equal(ends[0].result.blocked, true);
-  assert.match(ends[0].error, /has not been inspected/, 'the refusal says why');
-  assert.match(ends[0].error, /list `legacy\//, 'and it names the call that would fix it');
-  assert.equal(atRefusal[0].legacy, true, 'the folder was still there when it was refused');
-  const refusal = requests.flatMap((r) => r.messages).find((m) => m.role === 'tool' && /Refused/.test(m.content));
+  // 1. the folder nobody looked at is looked at, and the removal then happens
+  assert.equal(ends[0].status, 'done', `expected the command to run, got ${ends[0].status}: ${ends[0].error}`);
+  const firstResult = requests.flatMap((r) => r.messages).find((m) => m.role === 'tool' && /Looked first/.test(String(m.content)));
+  assert.ok(firstResult, 'the result tells the model what was looked at');
+  assert.match(firstResult.content, /listed `legacy\/`/);
+  assert.match(firstResult.content, /old\.js/, 'and names what it is about to remove');
+  assert.equal(fs.existsSync(path.join(root, 'legacy')), false, 'the removal really happened');
+
+  // 2. the workspace itself is the one thing that is refused, every time
+  assert.equal(ends[1].status, 'blocked', `expected a refusal, got ${ends[1].status}: ${ends[1].error}`);
+  assert.equal(ends[1].ok, false);
+  assert.equal(ends[1].result.blocked, true);
+  assert.match(ends[1].error, /workspace itself/);
+  assert.equal(atRefusal[0]?.src, true, 'the refused command touched nothing');
+  const refusal = requests.flatMap((r) => r.messages).find((m) => m.role === 'tool' && /Refused/.test(String(m.content)));
   assert.ok(refusal, 'the model reads the refusal back as the tool result');
-  assert.match(refusal.content, /list|read/);
 
-  // 2. after listing it, the same delete goes through
-  assert.equal(starts[1].tool, 'list_dir');
-  assert.equal(ends[1].status, 'done');
-  assert.equal(starts[2].tool, 'run_command', 'removal goes through the shell now');
+  // 3. the next removal of un-inspected files looks first as well
   assert.equal(ends[2].status, 'done');
-  assert.equal(fs.existsSync(path.join(root, 'legacy')), false, 'and now it is really gone');
-
-  // 3. the same rule covers a destructive shell command
-  assert.equal(starts[3].tool, 'run_command');
-  assert.equal(ends[3].status, 'blocked', `expected a refusal, got ${ends[3].status}: ${ends[3].error}`);
-  assert.match(ends[3].error, /src\//);
-  assert.equal(atRefusal[1].src, true, 'the command did not run');
-  assert.equal(starts[4].tool, 'list_dir');
-  assert.equal(ends[5].status, 'done');
+  assert.match(String(requests.flatMap((r) => r.messages).find((m) => m.role === 'tool' && /listed `src\/`/.test(String(m.content)))?.content || ''), /app\.js/);
   assert.equal(fs.existsSync(path.join(root, 'src')), false);
 
   // A refusal is guidance, not a failure streak: the run finishes normally.

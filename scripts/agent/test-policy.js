@@ -74,40 +74,53 @@ test('removalTargets only claims paths it can actually resolve', () => {
   assert.deepEqual(removalTargets('rm -rf * && rm -rf real-dir'), ['real-dir']);
 });
 
-test('a file that was never opened cannot be deleted', async () => {
-  const { gate, root, read } = await setup({ 'notes.txt': 'secret\n' });
-  const blocked = await gate('run_command', remove('notes.txt', false));
-  assert.ok(blocked, 'the delete is refused');
-  assert.match(blocked.message, /has not been inspected in this run/);
-  assert.match(blocked.message, /read `notes.txt`/, 'and it says what to do about it');
-  assert.equal(blocked.ui.blocked, true);
-  assert.ok(exists(path.join(root, 'notes.txt')), 'and nothing was touched');
+test('a remove of a file that was never opened is looked at first, then allowed', async () => {
+  const { gate, root, read, state, ws } = await setup({ 'notes.txt': 'secret\n' });
+  const looked = await gate('run_command', remove('notes.txt', false));
+  // The run answers the gate's own question: it reads the file, and says so in
+  // the result the model reads. Nothing is refused that a look would allow.
+  assert.equal(looked?.allow, true, 'the removal is allowed after the look');
+  assert.match(looked.note, /Looked first/);
+  assert.match(looked.note, /read `notes.txt`/);
+  assert.ok(exists(path.join(root, 'notes.txt')), 'the gate itself touches nothing');
+  assert.ok(state.ledger.seen.has(await ws.safePath('notes.txt')), 'and the ledger now knows the file');
 
-  // Having read it is enough.
+  // Having read it is enough on its own.
   await read('notes.txt');
   assert.equal(await gate('run_command', remove('notes.txt', false)), null);
 });
 
-test('a folder the agent never listed cannot be deleted recursively', async () => {
-  const { gate, root, list } = await setup({ 'legacy/a.js': 'a\n', 'legacy/b.js': 'b\n' });
-  const blocked = await gate('run_command', remove('legacy'));
-  assert.ok(blocked);
-  assert.match(blocked.message, /has not been inspected in this run/);
-  assert.match(blocked.message, /list `legacy\/`/);
-  assert.ok(exists(path.join(root, 'legacy', 'a.js')));
+test('a file too big to look at is still refused, with the reason', async () => {
+  const { gate, root, read } = await setup({});
+  fs.writeFileSync(path.join(root, 'huge.bin'), Buffer.alloc(3 * 1024 * 1024, 0x41));
+  const blocked = await gate('run_command', remove('huge.bin', false));
+  assert.ok(blocked && !blocked.allow, 'a file the run cannot look at is not one it may remove');
+  assert.match(blocked.message, /not been inspected/);
+  assert.match(blocked.message, /huge\.bin/);
 
-  // Listing it is enough — but only once the WHOLE tree has been seen.
+  // The model can still do it properly by reading the file itself.
+  await read('huge.bin');
+  assert.equal(await gate('run_command', remove('huge.bin', false)), null);
+});
+
+test('a folder that was never listed is listed first, and then allowed', async () => {
+  const { gate, root, list } = await setup({ 'legacy/a.js': 'a\n', 'legacy/b.js': 'b\n' });
+  const looked = await gate('run_command', remove('legacy'));
+  assert.equal(looked?.allow, true);
+  assert.match(looked.note, /listed `legacy\/` — 2 files/);
+  assert.ok(exists(path.join(root, 'legacy', 'a.js')), 'the gate only looks');
+
   await list('legacy');
   assert.equal(await gate('run_command', remove('legacy')), null);
 });
 
-test('a nested folder is still un-inspected after only the top level was listed', async () => {
+test('a nested folder is reached by the automatic look, and named in it', async () => {
   const { gate, list } = await setup({ 'app/index.js': 'x\n', 'app/deep/inner.js': 'y\n' });
   await list('app'); // depth 1: `deep/` is a name, not a contents
-  const blocked = await gate('run_command', remove('app'));
-  assert.ok(blocked, 'listing a folder is not listing what is inside its folders');
-  assert.match(blocked.message, /app\/deep/);
-  assert.match(blocked.message, /list `app\/deep\/`/);
+  const looked = await gate('run_command', remove('app'));
+  assert.equal(looked?.allow, true, 'the deeper listing settles it');
+  assert.match(looked.note, /listed `app(\/deep)?\/`/, 'the folder the run had never reached into is listed');
+  assert.match(looked.note, /inner\.js/, 'the nested file is in the note, so the model has seen it');
 
   await list('app', 3);
   assert.equal(await gate('run_command', remove('app')), null);
@@ -131,26 +144,27 @@ test('a generated folder needs one look, not a tour of every package', async () 
     'node_modules/b/nested/index.js': 'b\n',
   });
   // Even the target itself: nobody reads every package to delete node_modules.
-  const blocked = await gate('run_command', remove('node_modules'));
-  assert.ok(blocked, 'but it still has to look at what it is removing');
+  const looked = await gate('run_command', remove('node_modules'));
+  assert.equal(looked?.allow, true, 'the look is the whole story for a generated folder');
   await list('node_modules');
   assert.equal(await gate('run_command', remove('node_modules')), null);
   assert.equal(await gate('run_command', { command: 'rm -rf node_modules' }), null);
 });
 
-test('a truncated listing proves nothing about the folders it cut off', async () => {
+test('a tree too big for the automatic look is refused, with the reason', async () => {
   const { ws, state, gate } = await setup(Object.fromEntries(
     Array.from({ length: 320 }, (_, i) => [`big/f${i}.js`, 'x\n'])
   ));
   const abs = await ws.safePath('big');
   const { entries, truncated } = await ws.listTree(abs, { depth: 1, maxEntries: 300 });
-  assert.equal(truncated, true, 'the fixture really does overflow the listing');
+  assert.equal(truncated, true, 'the fixture really does overflow a shallow listing');
   observeListing(ws, state, abs, entries, { truncated, depth: 1 });
-  // The folder is marked as listed (its own entries were read), but the file the
-  // listing never got to is not — so the delete is still refused.
+  // The folder is listed, but the files the shallow listing never reached were not
+  // seen — and the automatic look cannot fix that here, because the tree is also
+  // wider than the look's own limit. So the gate refuses and says what to do.
   const blocked = await gate('run_command', remove('big'));
-  assert.ok(blocked, 'an incomplete listing is not an inspection');
-  assert.match(blocked.message, /big\/f\d+\.js/);
+  assert.ok(blocked && !blocked.allow, 'an incomplete listing is not an inspection');
+  assert.match(blocked.message, /not been inspected/);
 });
 
 test('the agent may remove what it created itself', async () => {
@@ -164,53 +178,49 @@ test('the agent may remove what it created itself', async () => {
   assert.equal(await gate('run_command', remove('scratch')), null);
 });
 
-test('a move is refused for a file that was never opened, and for a destination that was', async () => {
+test('a move looks at both sides — the file it takes and the file it lands on', async () => {
   const { gate, read } = await setup({ 'a.txt': 'a\n', 'keep.txt': 'precious\n' });
 
-  // The source: nothing moved that the run has never seen.
-  const blocked = await gate('run_command', { command: 'mv a.txt b.txt' });
-  assert.ok(blocked);
-  assert.match(blocked.message, /has not been inspected in this run/);
-  assert.match(blocked.message, /read `a.txt`/);
+  // The source is looked at first: the model is told what it is moving.
+  const looked = await gate('run_command', { command: 'mv a.txt b.txt' });
+  assert.equal(looked?.allow, true);
+  assert.match(looked.note, /read `a\.txt`/);
 
-  // The destination matters just as much: `mv a.txt keep.txt` throws keep.txt away.
-  await read('a.txt');
+  // The destination matters just as much: `mv a.txt keep.txt` throws keep.txt away,
+  // so that file is read before the command is allowed.
   const clobber = await gate('run_command', { command: 'mv a.txt keep.txt' });
-  assert.ok(clobber, 'moving onto an unread file is refused');
-  assert.match(clobber.message, /read `keep.txt`/);
+  assert.equal(clobber?.allow, true);
+  assert.match(clobber.note, /read `keep\.txt`/, 'the file that would be replaced was read first');
 
-  // Once both sides have been looked at, the move goes through.
+  // Once both sides have been looked at, no note is needed.
+  await read('a.txt');
   await read('keep.txt');
   assert.equal(await gate('run_command', { command: 'mv a.txt keep.txt' }), null);
   assert.equal(await gate('run_command', { command: 'mv a.txt b.txt' }), null);
 
-  // A directory has to have been listed, not just named.
-  const dirMove = await gate('run_command', { command: 'mv somewhere b.txt' });
-  assert.equal(dirMove, null, 'a source that is not there is the shell\'s business');
+  // A source that is not there is the shell's business.
+  assert.equal(await gate('run_command', { command: 'mv somewhere b.txt' }), null);
 
   // ...and the workspace itself is never the operand.
   const root = await gate('run_command', { command: 'mv . b.txt' });
-  assert.ok(root);
+  assert.ok(root && !root.allow);
   assert.match(root.message, /workspace itself/);
 });
 
-test('a shell command that removes un-inspected files is refused', async () => {
+test('a shell command that removes un-inspected files looks first, then runs', async () => {
   const { gate, read, list } = await setup({ 'src/app.js': 'x\n', 'src/util.js': 'y\n' });
   // Not a removing command: untouched.
   assert.equal(await gate('run_command', { command: 'node src/app.js' }), null);
   // Nothing there to lose: untouched (the shell's own error is the honest answer).
   assert.equal(await gate('run_command', { command: 'rm -rf nowhere' }), null);
 
-  const blocked = await gate('run_command', { command: 'rm -rf src' });
-  assert.ok(blocked, 'a folder the agent never listed is not a folder it may rm');
-  assert.match(blocked.message, /src\//);
-  assert.match(blocked.message, /list `src\/`/, 'and it is told to list the folder, not to read it');
+  const looked = await gate('run_command', { command: 'rm -rf src' });
+  assert.equal(looked?.allow, true, 'the run lists the folder rather than being refused');
+  assert.match(looked.note, /listed `src\/` — 2 files/);
+  assert.match(looked.note, /app\.js/, 'the files it is about to remove are named in the result');
 
+  // A file the run has read stays seen; listing the folder is inspecting it.
   await read('src/app.js');
-  const stillBlocked = await gate('run_command', { command: 'rm -rf src' });
-  assert.ok(stillBlocked, 'reading one file is not inspecting the folder');
-
-  // Listing the folder IS inspecting it: every file inside came back named.
   await list('src');
   assert.equal(await gate('run_command', { command: 'rm -rf src' }), null);
 });

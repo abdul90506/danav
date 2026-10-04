@@ -138,6 +138,32 @@ export const App: React.FC = () => {
   // What the active workspace's own sandbox is doing right now.
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
 
+  /**
+   * Only one revealed surface at a time.
+   *
+   * Opening the file panel, the workspaces dialog or the sandbox manager used to
+   * leave whatever was already open sitting behind it — you had to close one
+   * before reading the next. The most recently opened one wins and the others
+   * close themselves; each toggle stays a plain on/off for the button that owns it.
+   */
+  const openedOrderRef = useRef<string[]>([]);
+  const revealedSurfaces: Array<[string, boolean, (open: boolean) => void]> = [
+    ['settings', isSettingsOpen, setIsSettingsOpen],
+    ['workspaceDialog', workspaceDialogOpen, setWorkspaceDialogOpen],
+    ['files', filesOpen, setFilesOpen],
+    ['sandboxes', sandboxesOpen, setSandboxesOpen],
+  ];
+  const revealedSignature = revealedSurfaces.map(([, open]) => (open ? '1' : '0')).join('');
+  useEffect(() => {
+    const opened = new Set(revealedSurfaces.filter(([, open]) => open).map(([name]) => name));
+    // Remember the newest opener, then drop everything older.
+    openedOrderRef.current = [...openedOrderRef.current.filter((name) => opened.has(name)), ...[...opened].filter((name) => !openedOrderRef.current.includes(name))];
+    const winner = openedOrderRef.current[openedOrderRef.current.length - 1];
+    if (opened.size <= 1 || !winner) return;
+    for (const [name, open, setOpen] of revealedSurfaces) if (open && name !== winner) setOpen(false);
+  }, [revealedSignature]);
+
+
   // FlixRaid Movie Player Modal state
   const [activeMoviePlayer, setActiveMoviePlayer] = useState<{
     isOpen: boolean;

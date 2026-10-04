@@ -844,16 +844,18 @@ test('wording: a write whose body was saved without a path reads "Saved", not "C
 test('wording: an action the run REFUSED reads "Refused", not "Couldn\'t"', () => {
   // The gate stops a delete the agent never inspected. That is a redirection,
   // not a crash, and it must not be dressed up as one.
+  const reason = 'Refused: the command was not run. `.` is the workspace itself — not a folder inside it — and removing or moving it would take everything in it with it.';
   const b = fmt.actionLabel(act({
-    tool: 'delete_file',
+    tool: 'run_command',
     status: 'blocked',
-    args: { path: 'legacy' },
-    result: { kind: 'delete', path: 'legacy', isDir: true, blocked: true },
-    error: 'Refused: nothing was deleted. `legacy/` is a folder and you have not looked inside it in this run.',
+    args: { command: 'rm -rf .' },
+    result: { kind: 'command', command: 'rm -rf .', blocked: true },
+    error: reason,
   }));
   assert.equal(b.verb, 'Refused');
-  assert.equal(b.target, 'legacy');
-  assert.equal(b.meta, 'Refused: nothing was deleted. `legacy/` is a folder and you have not looked inside it in this run.');
+  assert.equal(b.target, 'rm -rf .');
+  assert.match(b.meta, /^Refused: the command was not run\./);
+  assert.match(b.meta, /workspace itself/, 'the reason is the one the run gave');
   assert.equal(b.added, undefined, 'and it never claims to have changed anything');
   assert.equal(b.expandable, true, 'the full reason is one click away');
 });

@@ -799,6 +799,8 @@ export async function runAgent({
     let silentSteps = 0;
     /** How many times this run has asked for a spoken line (never more than two). */
     let narrationNotices = 0;
+    /** Times this run has asked the model to finish the checklist it set itself. */
+    let planFinishNudges = 0;
     let continuations = 0; // answers that hit the output limit and were continued
     let planNudged = false;
 
@@ -1044,6 +1046,27 @@ export async function runAgent({
         if (!said) {
           // Still nothing: never end a run without a word to the user.
           send({ agent: { type: 'notice', message: 'The model returned an empty response. Send the request again, or try another model.' } });
+        }
+
+        // A checklist with items still open is work the user was told was coming,
+        // and a run that ends there looks finished and is not. The model is asked
+        // — silently, in the transcript only — to either do what is left or say
+        // plainly in one line why it could not. The question is asked once while
+        // there is real budget left: a stale list is the model's to fix, and it is
+        // never worth burning the end of a run over.
+        const open = (state.plan || []).filter((item) => item.status !== 'completed');
+        const roomLeft = !wrapUp && Date.now() < deadline - 90_000 && stats.steps < maxSteps - 4;
+        if (said && open.length && planFinishNudges < 1 && roomLeft) {
+          planFinishNudges++;
+          messages.push({
+            role: 'user',
+            content:
+              `[system notice] Before you finish: your own checklist still has ${open.length} open item${open.length === 1 ? '' : 's'} —\n` +
+              open.map((item) => `- ${item.status === 'in_progress' ? '[~]' : '[ ]'} ${item.content}`).join('\n') +
+              '\nFinish them now, or mark them off if they are already done. If the user\'s request does not really need one of them, rewrite the checklist with update_plan so it says what is actually left. ' +
+              'Start by saying in ONE short line what was left — plain prose, no heading — then do it and write the summary.',
+          });
+          continue;
         }
         break;
       }
@@ -1328,16 +1351,23 @@ export async function runAgent({
           // The model reads the refusal as the tool's result and can go and get
           // the evidence — which is the whole point of refusing.
           const blocked = await checkAction({ workspace, state, name, args: execArgs });
-          res = blocked
-            ? {
-                ok: false,
-                blocked: true,
-                failedSoft: true, // a refusal is guidance, not a failure streak
-                output: `Error: ${blocked.message}`,
-                error: blocked.message,
-                ui: { ok: false, ...blocked.ui },
-              }
-            : await tools.execute(name, execArgs, ctx);
+          if (blocked?.allow) {
+            // The gate's own question was answered by looking: the call runs, and
+            // the model is told in the result what that look found.
+            res = await tools.execute(name, execArgs, ctx);
+            if (blocked.note) res.output = `${blocked.note}\n${res.output}`;
+          } else if (blocked) {
+            res = {
+              ok: false,
+              blocked: true,
+              failedSoft: true, // a refusal is guidance, not a failure streak
+              output: `Error: ${blocked.message}`,
+              error: blocked.message,
+              ui: { ok: false, ...blocked.ui },
+            };
+          } else {
+            res = await tools.execute(name, execArgs, ctx);
+          }
         }
         if (!res.ok && !res.denied && !res.blocked) state.toolFailures++;
         if (name === 'run_command' && !res.denied && res.ui?.kind === 'command') {

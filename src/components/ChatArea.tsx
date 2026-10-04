@@ -107,12 +107,21 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
     setPinnedBoth(wentUp ? false : distanceFromBottom <= 48);
   };
 
-  // Sending a message always comes back to the bottom, even after reading back through history.
+  /**
+   * Sending a message always comes back to the bottom — including when the user
+   * had scrolled up through history, and including the case where the new message
+   * has not been laid out yet: the box is scrolled once now and once after the
+   * browser has painted, so the answer that follows starts from the bottom rather
+   * than from wherever the old height ended.
+   */
   useEffect(() => {
     if (messages.length > prevMessagesCountRef.current) {
       const lastMsg = messages[messages.length - 1];
       if (lastMsg?.role === 'user') {
         scrollToBottom(false);
+        const frame = requestAnimationFrame(() => scrollToBottom(false));
+        prevMessagesCountRef.current = messages.length;
+        return () => cancelAnimationFrame(frame);
       }
     }
     prevMessagesCountRef.current = messages.length;

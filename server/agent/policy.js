@@ -251,6 +251,71 @@ async function uninspected(ws, dirAbs, led, budget) {
 
 const refusal = (message, ui) => ({ message, ui });
 
+// ---------------------------------------------------------------------------
+// Answering the question instead of asking it
+// ---------------------------------------------------------------------------
+
+/** Bounds on the automatic look: enough to know what is there, never a full read. */
+const AUTO_TREE_DEPTH = 6;
+const AUTO_TREE_ENTRIES = 400;
+const AUTO_FOLDERS = 3;
+const AUTO_FILES = 6;
+const AUTO_FILE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The gate always asks the same thing — "do you know what this command is about
+ * to remove or replace?" — and the honest answer is a look, not a refusal. So
+ * when the run has not looked yet, it looks here: the folders are listed and the
+ * files are read, bounded, and what was found goes into the tool's own result so
+ * the model still learns what it is about to touch.
+ *
+ * Nothing is relaxed: the inspection really happens, on the real workspace, and
+ * a look that cannot be completed (a truncated listing, a huge or binary file)
+ * returns null, which leaves the caller refusing exactly as it did before.
+ *
+ * @returns a one-line note for the tool result, or null when the look failed.
+ */
+async function lookFirst(ws, state, folders, files) {
+  const seen = [];
+  for (const rel of folders.slice(0, AUTO_FOLDERS)) {
+    const abs = await resolveIn(ws, rel);
+    if (!abs) return null;
+    try {
+      const { entries, truncated } = await ws.listTree(abs, { depth: AUTO_TREE_DEPTH, maxEntries: AUTO_TREE_ENTRIES });
+      observeListing(ws, state, abs, entries, { truncated, depth: AUTO_TREE_DEPTH });
+      if (truncated) return null; // an incomplete listing is not an inspection
+      const named = entries.filter((e) => e.type !== 'dir').map((e) => e.path);
+      const shown = named.slice(0, 6).map((p) => `\`${p}\``).join(', ');
+      seen.push(
+        `listed \`${ws.displayPath(abs)}/\` — ${named.length} file${named.length === 1 ? '' : 's'}${
+          named.length ? ` (${shown}${named.length > 6 ? ', …' : ''})` : ''
+        }`
+      );
+    } catch {
+      return null;
+    }
+  }
+  for (const rel of files.slice(0, AUTO_FILES)) {
+    const abs = await resolveIn(ws, rel);
+    if (!abs) return null;
+    try {
+      const st = await ws.stat(abs);
+      if (!st?.type || st.type === 'dir') continue; // nothing there to look at
+      if (Number.isFinite(st.size) && st.size > AUTO_FILE_BYTES) return null;
+      const r = await ws.readText(abs);
+      if (r.binary) return null;
+      observeFile(state, abs);
+      const lines = String(r.text || '').split('\n');
+      const first = (lines.find((line) => line.trim()) || '').trim().slice(0, 70);
+      seen.push(`read \`${ws.displayPath(abs)}\` — ${lines.length} line${lines.length === 1 ? '' : 's'}${first ? `, starts ${JSON.stringify(first)}` : ''}`);
+    } catch {
+      return null;
+    }
+  }
+  if (!seen.length) return null;
+  return `Looked first, because this run had not: ${seen.join(' · ')}.`;
+}
+
 /**
  * May this call run?
  *
@@ -261,90 +326,95 @@ export async function checkAction({ workspace: ws, state, name, args }) {
   if (!led || !ws || !args) return null;
 
   if (name === 'run_command') {
-    // A move is a removal's quiet cousin: the file that disappears is replaced
-    // by one under a new name, and moving ONTO a file throws that file away.
-    // Both halves get the same question the delete path asks.
-    const moves = movingTargets(args.command);
-    if (moves.length) {
-      const needFiles = [];
-      const needFolders = [];
-      const clobbered = [];
-      let rootSource = '';
-      for (const { from, to } of moves) {
+    /**
+     * Everything this command touches that the run has not inspected yet, worked
+     * out from the command text alone. Called twice: once to find out whether a
+     * look is needed, and again afterwards to check that it actually settled the
+     * question. A move is a removal's quiet cousin — the file that disappears is
+     * replaced by one under a new name, and moving ONTO a file throws that file
+     * away — so both halves are collected here.
+     */
+    const unseenTargets = async () => {
+      const dirs = [];
+      const files = [];
+      const roots = [];
+      const addDir = (abs) => dirs.push({ rel: ws.displayPath(abs), shown: `${ws.displayPath(abs)}/` });
+      const addFile = (abs, shown = null) => files.push({ rel: shown || ws.displayPath(abs), shown: shown || ws.displayPath(abs) });
+
+      for (const { from, to } of movingTargets(args.command)) {
         const absFrom = await resolveIn(ws, from);
         if (!absFrom) continue;
         if (isRootPath(ws, absFrom)) {
-          rootSource = from;
+          roots.push(from);
           continue;
         }
         const stFrom = await ws.stat(absFrom).catch(() => null);
         if (!stFrom?.type) continue; // nothing there: the shell's own error is the honest answer
-        const shownFrom = ws.displayPath(absFrom);
         if (stFrom.type === 'file') {
-          if (!known(led, absFrom)) needFiles.push(`read \`${shownFrom}\``);
+          if (!known(led, absFrom)) addFile(absFrom);
         } else if (!led.listed.has(absFrom)) {
-          needFolders.push(`list \`${shownFrom}/\``);
+          addDir(absFrom);
         }
         const absTo = await resolveIn(ws, to);
         if (!absTo || absTo === absFrom) continue;
         const stTo = await ws.stat(absTo).catch(() => null);
-        if (stTo?.type === 'file' && !known(led, absTo)) clobbered.push(`read \`${ws.displayPath(absTo)}\``);
+        if (stTo?.type === 'file' && !known(led, absTo)) addFile(absTo);
       }
-      if (rootSource) {
-        return refusal(
-          `Refused: the command was not run. \`${rootSource}\` is the workspace itself, so moving or renaming it is not something a tool call gets to decide. ` +
-            `Move the files or folders you mean instead.`,
-          { kind: 'command', command: String(args.command || ''), blocked: true }
-        );
-      }
-      const ask = [...new Set([...needFolders, ...needFiles, ...clobbered])];
-      if (ask.length) {
-        return refusal(
-          `Refused: nothing was moved. This command renames or replaces something that has not been inspected in this run — ${ask.join(', ')} first, ` +
-            `so the file you move is the one you mean and the file you land on is one you have already seen.`,
-          { kind: 'command', command: String(args.command || ''), blocked: true }
-        );
-      }
-    }
-    const targets = removalTargets(args.command);
-    if (!targets.length) return null;
-    const unseen = [];
-    const roots = [];
-    for (const t of targets) {
-      const abs = await resolveIn(ws, t);
-      if (!abs) continue;
-      if (isRootPath(ws, abs)) {
-        roots.push(t);
-        continue;
-      }
-      const st = await ws.stat(abs).catch(() => null);
-      if (!st?.type) continue; // nothing there to lose
-      if (st.type === 'dir') {
-        if (!led.listed.has(abs)) {
-          unseen.push(`${ws.displayPath(abs)}/`);
+
+      for (const target of removalTargets(args.command)) {
+        const abs = await resolveIn(ws, target);
+        if (!abs) continue;
+        if (isRootPath(ws, abs)) {
+          roots.push(target);
           continue;
         }
-        if (disposable(ws, abs)) continue;
-        const { unknown, paths } = await uninspected(ws, abs, led, { n: MAX_WALK });
-        if (!unknown && paths.length) unseen.push(...paths.map((p) => p));
-        continue;
+        const st = await ws.stat(abs).catch(() => null);
+        if (!st?.type) continue; // nothing there to lose
+        if (st.type === 'dir') {
+          if (!led.listed.has(abs)) {
+            addDir(abs);
+            continue;
+          }
+          if (disposable(ws, abs)) continue;
+          const { unknown, paths } = await uninspected(ws, abs, led, { n: MAX_WALK });
+          if (!unknown) {
+            for (const p of paths) {
+              if (p.endsWith('/')) dirs.push({ rel: p.slice(0, -1), shown: p });
+              else files.push({ rel: p, shown: p });
+            }
+          }
+          continue;
+        }
+        if (!known(led, abs)) addFile(abs);
       }
-      if (!known(led, abs)) unseen.push(ws.displayPath(abs));
-    }
-    if (roots.length) {
+
+      const unique = (list) => [...new Map(list.map((x) => [x.shown, x])).values()];
+      return { roots, dirs: unique(dirs), files: unique(files) };
+    };
+
+    let need = await unseenTargets();
+    if (need.roots.length) {
       return refusal(
-        `Refused: the command was not run. \`${roots[0]}\` is the workspace itself — not a folder inside it — and removing it would take everything in it with it. ` +
-          `Remove the specific files or folders you mean instead, or, if the whole workspace is finished with, say so to the user and let them delete it.`,
+        `Refused: the command was not run. \`${need.roots[0]}\` is the workspace itself — not a folder inside it — and removing or moving it would take everything in it with it. ` +
+          `Name the files or folders you actually mean instead, or, if the whole workspace is finished with, say so to the user and let them deal with it.`,
         { kind: 'command', command: String(args.command || ''), blocked: true }
       );
     }
-    if (!unseen.length) return null;
-    const list = [...new Set(unseen)];
-    return refusal(
-      `Refused: the command was not run. It would remove ${missing(list)}, which ${list.length === 1 ? 'has' : 'have'} not been inspected in this run. ` +
-        `${howToInspect(list)} first, so the removal is one you can see and describe, then run the command again.`,
-      { kind: 'command', command: String(args.command || ''), blocked: true }
-    );
+    if (need.dirs.length || need.files.length) {
+      const note = await lookFirst(ws, state, need.dirs.map((d) => d.rel), need.files.map((f) => f.rel));
+      if (note) {
+        need = await unseenTargets();
+        if (!need.roots.length && !need.dirs.length && !need.files.length) return { allow: true, note };
+      }
+      const list = [...need.dirs.map((d) => d.shown), ...need.files.map((f) => f.shown)];
+      const what = movingTargets(args.command).length ? 'would be moved or replaced' : 'would be removed';
+      return refusal(
+        `Refused: the command was not run. It ${what} ${missing(list)}, which ${list.length === 1 ? 'has' : 'have'} not been inspected in this run, ` +
+          `and looking it up automatically was not possible (too large, or the listing came back incomplete). ` +
+          `${howToInspect(list)} first, so the change is one you can see and describe, then run the command again.`,
+        { kind: 'command', command: String(args.command || ''), blocked: true }
+      );
+    }
   }
 
   return null;

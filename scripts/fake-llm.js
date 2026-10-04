@@ -410,16 +410,12 @@ export const scenarios = {
     const remove = process.platform === 'win32' ? 'Remove-Item -Recurse -Force' : 'rm -rf';
     switch (roundIdx) {
       case 0:
+        // Straight for the delete, without ever listing the folder.
         return { text: 'Removing the old folder.', toolCalls: [{ name: 'run_command', args: { command: `${remove} legacy` } }] };
       case 1:
-        return { text: 'Looking at it first.', toolCalls: [{ name: 'list_dir', args: { path: 'legacy', depth: 3 } }] };
+        // The workspace itself: the one removal that is never allowed.
+        return { toolCalls: [{ name: 'run_command', args: { command: `${remove} .` } }] };
       case 2:
-        return { toolCalls: [{ name: 'run_command', args: { command: `${remove} legacy` } }] };
-      case 3:
-        return { text: 'Clearing src with a command.', toolCalls: [{ name: 'run_command', args: { command: `${remove} src` } }] };
-      case 4:
-        return { toolCalls: [{ name: 'list_dir', args: { path: 'src', depth: 3 } }] };
-      case 5:
         return { toolCalls: [{ name: 'run_command', args: { command: `${remove} src` } }] };
       default:
         return { text: 'Both folders are gone.' };

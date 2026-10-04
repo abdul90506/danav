@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { Bot, Check, ChevronDown, Cloud, FolderTree, Laptop, Layers, Plus, Trash2 } from 'lucide-react';
 import type { AgentWorkspace, SandboxStatus } from '../types';
+import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 
 interface AgentControlsProps {
   enabled: boolean;
@@ -64,27 +65,14 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
   const active = workspaces.find((w) => w.id === activeWorkspaceId) || null;
   const dot = active?.kind === 'sandbox' && sandboxState ? SANDBOX_DOT[sandboxState] : null;
 
-  // The open workspace menu closes the moment the user clicks away from it, or
-  // presses Escape — it must never be something they have to click twice to hide.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const dismiss = () => {
-      setMenuOpen(false);
-      setConfirmDelete(null);
-    };
-    const onDown = (e: MouseEvent) => {
-      if (!ref.current || !ref.current.contains(e.target as Node)) dismiss();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') dismiss();
-    };
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [menuOpen]);
+  // The open workspace menu closes the moment the user clicks away from it, presses
+  // Escape, or opens another menu — it must never be something they have to click
+  // twice to hide, or find open behind the menu they just opened.
+  const closeMenu = useCallback(() => {
+    setMenuOpen(false);
+    setConfirmDelete(null);
+  }, []);
+  useDismissOnOutside(ref, menuOpen, closeMenu);
 
   const pill = enabled
     ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 border-transparent'

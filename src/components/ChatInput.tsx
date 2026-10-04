@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useMemo, KeyboardEvent } from 'react';
+import React, { useRef, useEffect, useState, useMemo, useCallback, KeyboardEvent } from 'react';
 import {
   ArrowUp,
   Sparkles,
@@ -13,6 +13,7 @@ import {
   File,
   Folder,
 } from 'lucide-react';
+import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 import { Attachment, Provider, ThinkingLevel, Model } from '../types';
 import {
   ATTACHMENT_BUDGET_BYTES,
@@ -364,33 +365,14 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     return () => document.removeEventListener('mousedown', onDown);
   }, [controlsPinned]);
 
-  // Close menus on an outside click or Escape — a revealed menu is never a trap.
-  useEffect(() => {
-    const onKey = (e: Event) => {
-      if ((e as globalThis.KeyboardEvent).key !== 'Escape') return;
-      setModelDropdownOpen(false);
-      setThinkingDropdownOpen(false);
-      setPlusMenuOpen(false);
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, []);
-
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
-        setModelDropdownOpen(false);
-      }
-      if (thinkingMenuRef.current && !thinkingMenuRef.current.contains(e.target as Node)) {
-        setThinkingDropdownOpen(false);
-      }
-      if (plusMenuRef.current && !plusMenuRef.current.contains(e.target as Node)) {
-        setPlusMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  // Menus: an outside click, Escape, or simply opening another one closes this
+  // one — the user never has to close a menu before opening the next.
+  const closeModelMenu = useCallback(() => setModelDropdownOpen(false), []);
+  const closeThinkingMenu = useCallback(() => setThinkingDropdownOpen(false), []);
+  const closePlusMenu = useCallback(() => setPlusMenuOpen(false), []);
+  useDismissOnOutside(modelMenuRef, modelDropdownOpen, closeModelMenu);
+  useDismissOnOutside(thinkingMenuRef, thinkingDropdownOpen, closeThinkingMenu);
+  useDismissOnOutside(plusMenuRef, plusMenuOpen, closePlusMenu);
 
   // Process files/folders into Attachment objects
   const processFiles = async (fileList: FileList | File[], isFolder = false) => {
@@ -551,6 +533,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = '';
+    el.style.overflowY = 'hidden';
     if (document.activeElement !== el) el.focus({ preventScroll: true });
   }, [draftResetKey]);
 
@@ -566,8 +549,8 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     if (textareaRef.current) {
       textareaRef.current.style.height = '';
       textareaRef.current.style.overflowY = 'hidden';
-      setIsInputExpanded(false);
     }
+    setIsInputExpanded(false);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1127,29 +1110,29 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
           isDraggingOver ? 'ring-2 ring-blue-500/50 dark:ring-blue-400/50 border-blue-500' : ''
         }`}
       >
-        {isInputExpanded ? (
-          <>
-            {/* Text uses the whole width of the box */}
-            <div className="px-3.5 pt-2.5 pb-0.5">{textarea}</div>
-            {/* Controls drop to their own row below */}
-            <div className="flex items-center justify-between gap-1 px-2 pb-1.5 pt-0.5">
-              <div className="flex items-center gap-1">{attachControl}</div>
-              <div className="flex items-center gap-1">
-                {thinkControl}
-                {sendControl}
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="flex items-center pl-2 pr-1.5 py-1.5">
-            {attachControl}
-            <div className="flex-1 min-w-0 px-2 flex items-center">{textarea}</div>
-            <div className="flex items-center gap-1 shrink-0">
-              {thinkControl}
-              {sendControl}
-            </div>
+        {/*
+          One tree, two layouts. The textarea sits at the same position in the DOM
+          either way and only its wrapper's classes change, because React rebuilds a
+          node that moves between branches: the old markup put the textarea inside
+          two different structures, so the box changing shape — which happens the
+          moment the text grows past one line — threw away the element and with it
+          the caret, and the user had to click back into the box to carry on typing.
+          The order of the rows is CSS `order`, the element itself never moves.
+        */}
+        <div
+          className={`flex flex-wrap items-center ${
+            isInputExpanded ? 'gap-x-1 px-1.5 pb-1.5 pt-0.5' : 'pl-2 pr-1.5 py-1.5'
+          }`}
+        >
+          <div className={isInputExpanded ? 'order-1 w-full px-2 pt-2' : 'order-2 flex-1 min-w-0 px-2 flex items-center'}>
+            {textarea}
           </div>
-        )}
+          <div className={isInputExpanded ? 'order-2 flex items-center gap-1 pl-1' : 'order-1 shrink-0'}>{attachControl}</div>
+          <div className={`order-3 ml-auto flex items-center gap-1 shrink-0 ${isInputExpanded ? 'pr-1' : ''}`}>
+            {thinkControl}
+            {sendControl}
+          </div>
+        </div>
       </div>
     </div>
   );
