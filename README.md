@@ -155,6 +155,15 @@ What that buys, in the agent's own tools:
 | `edit_file occurrence:N` | When the same text appears twice: the error lists every candidate with its surrounding lines, so one `occurrence` finishes the job instead of another read of the file. |
 | `grep_search` | Text, strings, error messages: grouped per file with counts, whole-word, with context lines, `glob`/`exclude` filters and paging. |
 
+**Class members, CSS rules and anything else the line scan cannot hold.** The index holds
+top-level declarations, so `find_symbol` falls back to one bounded, name-specific search
+before it answers: a method (`async toggle(id) {`), a stylesheet rule (`.panel-scroll {`,
+with or without its dot) or a Python method come back with their file and line, labelled
+as what they are, and `read_file symbol:` then reads the rule or the method straight out
+of its file — one-line CSS rules included, which the CSS outline used not to see at all.
+Near misses stay labelled as near misses, so a weak suggestion can never hide a real
+declaration behind it.
+
 Three habits come with it, and the prompt states them as rules: find code with the
 index instead of by reading whole files, never read the same thing twice in one run
 (a repeat full read comes back as "unchanged since you read it" instead of burning

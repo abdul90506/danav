@@ -109,7 +109,13 @@ function runCss(lines, push) {
     }
     const at = /^(\s*)@(media|supports|keyframes|font-face|layer|container|mixin|include|function)\b/.exec(line);
     if (at) return push(i + 1, indentOf(line), 'at-rule', line);
-    if (/^[^\s@}\/][^{}]*\{\s*(\/\*.*\*\/)?\s*$/.test(line)) push(i + 1, 0, 'rule', line);
+    /**
+     * A rule, whether it opens a block or is written on one line. The old test
+     * only accepted `selector {` with the brace at the end, so a compact sheet
+     * (`.panel-scroll { overflow: auto; }`) had no outline at all — and with no
+     * outline, `read_file symbol: ".panel-scroll"` could not find it either.
+     */
+    if (/^[^\s@}\/][^{}]*\{/.test(line)) push(i + 1, 0, 'rule', line);
   });
 }
 

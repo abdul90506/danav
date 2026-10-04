@@ -762,20 +762,6 @@ export async function runAgent({
 
   try {
     // ---- context ------------------------------------------------------------
-    let snapshot = '';
-    let guidance = '';
-    try {
-      const { entries, truncated } = await workspace.listTree(workspace.root, { depth: 2, maxEntries: 120 });
-      snapshot = formatSnapshot(entries, truncated);
-    } catch (err) {
-      snapshot = `(could not list the workspace: ${err.message})`;
-    }
-    try {
-      guidance = await collectProjectGuidance(workspace, redact);
-    } catch {
-      /* optional editor/project rules must never prevent the agent from starting */
-    }
-
     const priorMessages = cleanHistory(history);
     /**
      * What this run is answering. A resume sends its own instruction as the last
@@ -789,6 +775,64 @@ export async function runAgent({
       !String(m.content || '').startsWith('[continue]')
     )?.content || '';
     lastUserRequest = currentRequest;
+
+    /**
+     * The code index, built (or re-used) before the prompt is written.
+     *
+     * This is what turns "here is a folder listing, go find the code" into "here
+     * is the shape of the project and the files this request is probably about".
+     * It is also primed into the cache here, so the tools of this run — and the
+     * write tools patching it as they go — share one copy instead of each paying
+     * for a scan. A workspace where it cannot be built is simply the old agent.
+     */
+    let repoMap = '';
+    let relevantFiles = '';
+    let indexSummary = '';
+    let indexedFiles = 0;
+    try {
+      const index = await getIndex(workspace);
+      if (index && Object.keys(index.files || {}).length) {
+        primeIndex(workspace, index);
+        const files = Object.keys(index.files).length;
+        const symbols = Object.values(index.files).reduce((n, f) => n + (f.symbols?.length || 0), 0);
+        repoMap = renderRepoMap(index);
+        relevantFiles = renderRelevantFiles(index, currentRequest, { limit: 8 });
+        indexSummary = `${files} files, ${symbols} definitions${index.truncated ? ', partial' : ''}`;
+        indexedFiles = files;
+      }
+    } catch {
+      /* the index is an optimisation: never a reason for a run to fail */
+    }
+
+    /**
+     * The workspace listing, sized by what else the prompt already carries.
+     *
+     * On a code project the index above has just described every file that holds a
+     * definition and ranked the ones this request is about, so a second-level
+     * dump of paths is mostly repetition — costing tokens and attention. A shallow
+     * listing still earns its place (the top-level files are real context: README,
+     * config, entry points), so the depth is chosen rather than fixed. A workspace
+     * with no code index gets the full listing, as before.
+     */
+    let snapshot = '';
+    let guidance = '';
+    try {
+      const richIndex = indexedFiles >= 15;
+      const { entries, truncated } = await workspace.listTree(workspace.root, {
+        depth: richIndex ? 1 : 2,
+        maxEntries: richIndex ? 60 : 120,
+      });
+      snapshot = formatSnapshot(entries, truncated);
+      if (richIndex) snapshot += '\n(the code index above lists what is in the folders; use list_dir or file_search for anything else)';
+    } catch (err) {
+      snapshot = `(could not list the workspace: ${err.message})`;
+    }
+    try {
+      guidance = await collectProjectGuidance(workspace, redact);
+    } catch {
+      /* optional editor/project rules must never prevent the agent from starting */
+    }
+
     const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, 2500, 6, { resume }));
     // Memory is looked up against the request AND the files this workspace was
     // last working on: "continue with the retry work" has to find the note about
@@ -806,32 +850,6 @@ export async function runAgent({
     } catch {
       /* detection is a courtesy; a workspace it cannot read is not a failure */
     }
-    /**
-     * The code index, built (or re-used) before the prompt is written.
-     *
-     * This is what turns "here is a folder listing, go find the code" into "here
-     * is the shape of the project and the files this request is probably about".
-     * It is also primed into the cache here, so the tools of this run — and the
-     * write tools patching it as they go — share one copy instead of each paying
-     * for a scan. A workspace where it cannot be built is simply the old agent.
-     */
-    let repoMap = '';
-    let relevantFiles = '';
-    let indexSummary = '';
-    try {
-      const index = await getIndex(workspace);
-      if (index && Object.keys(index.files || {}).length) {
-        primeIndex(workspace, index);
-        const files = Object.keys(index.files).length;
-        const symbols = Object.values(index.files).reduce((n, f) => n + (f.symbols?.length || 0), 0);
-        repoMap = renderRepoMap(index);
-        relevantFiles = renderRelevantFiles(index, currentRequest, { limit: 8 });
-        indexSummary = `${files} files, ${symbols} definitions${index.truncated ? ', partial' : ''}`;
-      }
-    } catch {
-      /* the index is an optimisation: never a reason for a run to fail */
-    }
-
     const messages = [
       { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, activity, repoMap, relevantFiles, indexSummary, resume, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
       ...priorMessages,
@@ -1104,7 +1122,7 @@ export async function runAgent({
           messages.push({
             role: 'user',
             content: stats.toolCalls > 0
-              ? '[system notice] You finished without a message. Write the closing summary now, in their language: what you changed, which checks passed (or failed), and how they can run or see it. Two to five plain sentences, no headings.'
+              ? '[system notice] You finished without a message. Write the closing summary now, in their language: what you changed and why, which checks passed (or failed), how they can run or see it — and as long as this run deserves. A one-file change gets a couple of lines; a real piece of work gets a real explanation. Plain prose, no headings.'
               : "[system notice] Your last response was empty — it had no answer and no tool call. Answer the user's request now in words, or call the tools you need. Do not reply with nothing.",
           });
           continue;

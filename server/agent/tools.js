@@ -882,7 +882,15 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
     if (def?.name) return def.name;
     // A method has no keyword: "sendMessage(text) {" — the identifier before "(".
     const m = /([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/.exec(symbol.text || '');
-    return m ? m[1] : null;
+    if (m) return m[1];
+    // A CSS rule has neither: ".narration-step {" — the selector itself is the name.
+    // A CSS rule has neither a keyword nor a call: the selector itself is the name
+    // ("the rule outline" carries it without the trailing brace).
+    if (lang === 'css') {
+      const sel = /^\s*([^\s{,]+)/.exec(symbol.text || '');
+      if (sel) return sel[1];
+    }
+    return null;
   };
 
   /** Braces and strings, minus strings/comments — enough to find where a body ends. */
@@ -950,6 +958,50 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       found: { name: hit.name || query, line: hit.line, endLine: end + 1, kind: hit.kind, text: lines.slice(start, end + 1).join('\n'), exact: hit.rank === 0 },
       candidates: scored.slice(1, 6).filter((s) => s.rank > 0).map((s) => `${s.name} (L${s.line})`),
     };
+  };
+
+  /**
+   * Definitions the index's line scan cannot see.
+   *
+   * The index is built from single lines that look like top-level declarations, so
+   * three real things are missing from it: class members (`render() {`, `async
+   * save() {`), CSS rules (`.narration-step {`), and anything else a project
+   * declares in a way no generic scanner knows. All three are exactly what "where
+   * is this defined?" gets asked about, so a miss in the index falls back to one
+   * bounded, name-specific search and reports what it finds as what it is.
+   */
+  const outsideIndexDefinitions = async (name, { maxResults = 160, limit = 8 } = {}) => {
+    const bare = String(name || '').trim().replace(/^[.#]/, '');
+    if (!/^[A-Za-z_$][\w$-]*$/.test(bare)) return [];
+    const esc = bare.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let found;
+    try {
+      found = await ws.grep({ pattern: `\\b${esc}\\b`, path: ws.root, maxResults, ignoreCase: false });
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const m of found.matches || []) {
+      const line = String(m.text || '');
+      const trimmed = line.trim();
+      const lang = languageOf(m.path);
+      // A class member / method: an identifier, its parameters, then a body brace.
+      const method = new RegExp(`^(?:export\\s+)?(?:async\\s+|static\\s+|get\\s+|set\\s+|public\\s+|private\\s+|protected\\s+|override\\s+|readonly\\s+)*${esc}\\s*(?:<[^>]*>)?\\s*\\([^)]*\\)\\s*(?::[^{;=]+)?\\s*\\{?`);
+      const isMethod = method.test(trimmed) && !/^(if|for|while|switch|catch|return|function|new|typeof|await|else)/.test(trimmed);
+      const isCss = /^(?:[.#&:][\w-]|[\w-]+)[^{};]*\{[\s\S]*$/.test(trimmed) && (lang === 'css' || /\.(?:css|scss|sass|less)$/i.test(m.path));
+      const isPython = lang === 'python' && new RegExp(`^def\\s+${esc}\\b`).test(trimmed);
+      if (!isMethod && !isCss && !isPython) continue;
+      const kind = isCss ? 'CSS rule' : isPython ? 'method' : 'class member';
+      /**
+       * The string that `read_file symbol:` wants: for CSS that is the selector
+       * WITH its dot (".panel-scroll"), for a method the bare identifier. Printing
+       * the wrong one sends the model to a second failed call.
+       */
+      const symbol = isCss ? (trimmed.match(/^[^\s{,]+/) || [''][0]) : isPython ? (trimmed.match(/^def\s+([A-Za-z_]\w*)/) || [])[1] || bare : bare;
+      out.push({ path: m.path, line: m.line, kind, symbol, text: trimmed.slice(0, 120) });
+      if (out.length >= limit) break;
+    }
+    return out;
   };
 
   const noteChange = (ctx, path, added, removed) => {
@@ -1590,9 +1642,16 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const wantRefs = mode !== 'definitions';
       const wantDefs = mode !== 'references';
 
-      const defs = index ? findDefinitions(index, name, { kind, limit: max }) : { results: [], exact: false, total: 0 };
+      const defs = index ? findDefinitions(index, name, { kind, limit: max }) : { results: [], exact: false, exactCount: 0, nearMisses: [], total: 0 };
+      /**
+       * The index holds top-level declarations only. Class members and CSS rules
+       * are looked up as soon as there is no exact hit — not only when the index
+       * came back empty, because a weak near miss ("Panel" for "panel-scroll")
+       * used to hide the real answer behind a suggestion.
+       */
+      const outside = wantDefs && !defs.exactCount ? await outsideIndexDefinitions(name) : [];
       const sections = [];
-      if (wantDefs && defs.results.length) {
+      if (wantDefs && defs.exactCount > 0) {
         const exact = defs.results.filter((d) => d.exact);
         const near = defs.results.filter((d) => !d.exact);
         const files = new Set(exact.length ? exact.map((d) => d.path) : defs.results.map((d) => d.path));
@@ -1606,10 +1665,34 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
           ? near.filter((n) => !exact.some((e) => e.name === n.name)).slice(0, 4).map((n) => `${n.name} (${n.path}:${n.line})`)
           : [];
         sections.push(`${head}\n${rows}${alsoNear.length ? `\n  also close: ${alsoNear.join(', ')}` : ''}`);
-      } else if (wantDefs && !index) {
-        sections.push('(no code index is available; searching the text instead)');
       } else if (wantDefs) {
-        sections.push(`No definition of \`${name}\` is in the index. Try relevant_files for the area, or grep_search for the text.`);
+        /*
+          Not a top-level declaration: before telling the model "nothing here",
+          look for the shapes the index cannot hold — class members, CSS rules,
+          Python methods — and still offer the index's near misses next to them.
+          Without this, "where is .narration-step defined" or "where is render()"
+          came back as "no result", and the model's next move was a blind grep.
+        */
+        const css = outside.some((d) => d.kind === 'CSS rule');
+        const example = outside.find((d) => d.symbol)?.symbol || name;
+        const hint = css
+          ? `read_file with symbol: "${example}" returns the rule from its file (or start_line/end_line around it)`
+          : `read_file with symbol: "${example}" reads it straight out of its file`;
+        const bits = [];
+        if (outside.length) {
+          bits.push(
+            `${outside.length} declaration${outside.length === 1 ? '' : 's'} outside the index:` +
+              `\n${outside.map((d) => `  ${d.path}:${d.line} — ${d.kind}\n      ${d.text}`).join('\n')}\n  ${hint}.`
+          );
+        }
+        const near = defs.results.slice(0, 4);
+        if (near.length) {
+          bits.push(
+            `Closest names in the index (not matches):\n` +
+              near.map((d) => `  ${d.path}:${d.line} — ${d.kind} ${d.name}`).join('\n')
+          );
+        }
+        sections.push(bits.length ? `No top-level definition of \`${name}\` in the index.\n\n${bits.join('\n\n')}` : `No definition of \`${name}\` was found anywhere in the workspace. Try relevant_files for the area, or grep_search for the text — the name may be spelled differently here.`);
       }
 
       let refCount = 0;
@@ -1624,7 +1707,10 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         } catch {
           refs = { matches: [], truncated: false };
         }
-        const defLines = new Set((defs.exactCount ? defs.results.filter((d) => d.exact) : defs.results).map((d) => `${d.path}:${d.line}`));
+        const defLines = new Set([
+          ...(defs.exactCount ? defs.results.filter((d) => d.exact) : defs.results).map((d) => `${d.path}:${d.line}`),
+          ...outside.map((d) => `${d.path}:${d.line}`),
+        ]);
         const byFile = new Map();
         for (const m of refs.matches || []) {
           if (defLines.has(`${m.path}:${m.line}`)) continue;
@@ -1916,6 +2002,9 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
           await ws.writeText(c.abs, c.next);
           observeOwned(ctx.state, c.abs);
           noteChange(ctx, rel(c.abs), c.added, c.removed);
+          // A sweep across files renames things everywhere: the index has to follow
+          // it, or the next find_symbol answers from the names that no longer exist.
+          noteIndexWrite(c.abs, c.next);
         }
         for (const c of changes) {
           const v = await checkSyntax(ws, c.abs, rel(c.abs), c.next).catch(() => null);

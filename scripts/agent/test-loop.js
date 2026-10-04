@@ -1570,9 +1570,15 @@ test('a run that goes quiet is asked to narrate, and a talkative one is left alo
   assert.match(system, /Never write progress-formula lines/, 'and bans the "I am going to…" filler');
   assert.match(system, /I am going to check X/, 'naming the phrasings to avoid');
   assert.match(system, /about 0–3 short lines for a whole run/, 'the budget for narration is explicit');
-  assert.match(system, /End with a short summary/, 'and a short closing summary is still required');
-  assert.match(system, /2–5 plain sentences, 500 characters is plenty/, 'its length is stated');
-  assert.match(system, /NO headings, NO bold section labels, NO bullet/, 'and so is its shape');
+  // The closing summary is required, and its LENGTH is the model's judgement of
+  // the run — a one-file change reads differently from a long, risky one. The old
+  // flat "500 characters is plenty" is gone on purpose.
+  assert.match(system, /End with a summary that fits the work/, 'a closing summary is required');
+  assert.match(system, /one small change, one obvious answer → one or two lines/, 'small work is summarised small');
+  assert.match(system, /Five to ten sentences of real explanation is right for a run like that/, 'big work is explained properly');
+  assert.match(system, /never pad, never under-report/, 'and the rule is fit, not length');
+  assert.match(system, /NO headings, NO bold section labels, NO file-by-file inventory/, 'the shape stays readable');
+  assert.ok(!/500 characters is plenty/.test(system), 'the flat length cap is gone');
   assert.match(system, /never describe work you did not do/i, 'the prompt forbids claiming work that never happened');
 
   // ...and a run that ignores it is asked, exactly once. The notices stay in the
@@ -1609,6 +1615,9 @@ test('the prompt arrives already knowing the project, and the request it has to 
   write('src/theme.ts', 'export function toggleTheme(current) {\n  return current === "dark" ? "light" : "dark";\n}\n');
   write('src/panel.ts', 'export const createPanelStore = () => ({});\n');
   write('src/App.tsx', 'import { toggleTheme } from "./theme";\nimport { createPanelStore } from "./panel";\nexport function App() { return [toggleTheme("light"), createPanelStore()]; }\n');
+  // Enough files that the index counts as a real codebase: the workspace listing
+  // then shrinks to the top level, because the index already says what is below.
+  for (let i = 0; i < 14; i++) write(`src/mod${i}.ts`, `export function mod${i}(value: number) {\n  return value + ${i};\n}\n`);
   const ws = new LocalWorkspace({ id: 'ws-index-loop', kind: 'local', name: 'indexed', root, autoRun: true });
   try {
     const run = await agentRun({
@@ -1626,6 +1635,7 @@ test('the prompt arrives already knowing the project, and the request it has to 
     assert.match(system, /Find code with the index, not with your eyes/, 'the prompt teaches the index tools');
     assert.match(system, /Never read the same thing twice/, 'and the no-repeat rule');
     assert.match(system, /Edit by the safest handle you have/, 'edits get their recovery paths named');
+    assert.match(system, /# Workspace right now\n[\s\S]*the code index above lists what is in the folders/, 'a rich index replaces the nested listing instead of repeating it');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -58,6 +58,19 @@ it('flips the theme', () => { if (toggleTheme('light') !== 'dark') throw new Err
   write('src/components/Card.tsx', `export function Card() { return null; }
 export function CardList() { return null; }
 `);
+  write('src/panel.css', `.panel {
+  display: flex;
+}
+.panel-scroll { overflow: auto; }
+`);
+  write('src/Widget.tsx', `export class Widget {
+  private open = false;
+
+  async toggle(id: string): Promise<void> {
+    this.open = !this.open;
+  }
+}
+`);
   write('docs/notes.md', '# Notes\n\nThe theme toggle lives in src/theme.ts.\n');
   write('package-lock.json', '{ "lockfileVersion": 3, "packages": {} }\n');
   write('dist/bundle.min.js', 'var a=1;function b(){return a}\n');
@@ -203,8 +216,9 @@ test('find_symbol answers definitions, uses and impact in one call', async () =>
     assert.match(r.output, /no test imports it; test files in the same area/);
 
     const missing = await run('find_symbol', { name: 'toggleThem' });
-    assert.match(missing.output, /No exact match for `toggleThem` — closest definitions in the index:/);
-    assert.match(missing.output, /toggleTheme/, 'a near miss is offered');
+    assert.match(missing.output, /No top-level definition of `toggleThem` in the index/);
+    assert.match(missing.output, /Closest names in the index \(not matches\):/);
+    assert.match(missing.output, /toggleTheme/, 'a near miss is offered, and labelled as one');
 
     const defsOnly = await run('find_symbol', { name: 'toggleTheme', mode: 'definitions' });
     assert.ok(!/Used in/.test(defsOnly.output), 'mode=definitions skips the reference search');
@@ -233,6 +247,79 @@ test('read_file by symbol returns the whole definition and nothing after it', as
     const near = await run('read_file', { path: 'src/panel.ts', symbol: 'Panel' });
     assert.match(near.output, /closest match/);
     assert.match(near.output, /near matches: usePanelOpen/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('find_symbol reaches class members and CSS rules the line index cannot hold', async () => {
+  const root = project();
+  try {
+    const ws = await workspaceFor(root);
+    const { run } = toolsetFor(ws);
+
+    // A class member is not a top-level declaration: the index never sees it, so
+    // without the fallback the answer was "no result" and the next move was a
+    // blind grep.
+    const method = await run('find_symbol', { name: 'toggle' });
+    assert.match(method.output, /No top-level definition of `toggle` in the index/);
+    assert.match(method.output, /src\/Widget\.tsx:\d+ — class member/);
+    assert.match(method.output, /async toggle\(id: string\)/);
+    assert.match(method.output, /read_file with symbol: "toggle"/);
+
+    // A CSS rule, looked up with or without its dot.
+    const rule = await run('find_symbol', { name: '.panel-scroll' });
+    assert.match(rule.output, /src\/panel\.css:\d+ — CSS rule/);
+    assert.match(rule.output, /read_file with symbol: "\.panel-scroll"/);
+    const bare = await run('find_symbol', { name: 'panel-scroll' });
+    assert.match(bare.output, /src\/panel\.css:\d+ — CSS rule/, 'the dot is optional');
+
+    // Something that really is not there says so, instead of inventing a hit.
+    const nothing = await run('find_symbol', { name: 'nothingNamedThis' });
+    assert.match(nothing.output, /No definition of `nothingNamedThis` was found anywhere in the workspace/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('read_file by symbol reads a CSS rule, one-line rules included', async () => {
+  const root = project();
+  try {
+    const ws = await workspaceFor(root);
+    const { run } = toolsetFor(ws);
+
+    const block = await run('read_file', { path: 'src/panel.css', symbol: '.panel' });
+    assert.match(block.output, /rule `\.panel` \(lines 1-3 of \d+\)/);
+    assert.match(block.output, /display: flex/);
+
+    const oneliner = await run('read_file', { path: 'src/panel.css', symbol: '.panel-scroll' });
+    assert.match(oneliner.output, /overflow: auto/);
+
+    const outline = await run('file_outline', { path: 'src/panel.css' });
+    assert.match(outline.output, /\.panel-scroll \{ overflow: auto; \}/, 'a compact rule is in the outline too');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('multi_edit can replace a definition by name, next to text and line edits', async () => {
+  const root = project();
+  try {
+    const ws = await workspaceFor(root);
+    const { run } = toolsetFor(ws);
+
+    const r = await run('multi_edit', {
+      edits: [
+        { path: 'src/theme.ts', symbol: 'toggleTheme', new_string: "export function toggleTheme() {\n  return 'system';\n}" },
+        { path: 'src/panel.ts', old_string: 'let open: string | null = null;', new_string: 'let open: string | null = null; // one panel at a time' },
+      ],
+    });
+    assert.match(r.output, /Edited/);
+    const theme = fs.readFileSync(path.join(root, 'src/theme.ts'), 'utf8');
+    assert.match(theme, /return 'system'/);
+    assert.match(theme, /THEME_KEY/, 'the rest of the file survives');
+    const panel = fs.readFileSync(path.join(root, 'src/panel.ts'), 'utf8');
+    assert.match(panel, /one panel at a time/, 'a text edit in the same call still lands');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
