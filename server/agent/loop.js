@@ -378,6 +378,16 @@ function roundDigest(dropped, original = null) {
       const name = tc.function?.name || '?';
       let args = {};
       try { args = JSON.parse(tc.function?.arguments || '{}') || {}; } catch { /* keep {} */ }
+      if (name === 'update_plan' && Array.isArray(args.todos)) {
+        // The plan is the run's own state. If its round is trimmed, the checklist
+        // has to survive the trimming — otherwise a long run forgets what it
+        // decided to do and starts re-planning from nothing.
+        const items = args.todos
+          .filter((item) => item && typeof item.content === 'string')
+          .map((item) => `${item.status === 'completed' ? '[x]' : item.status === 'in_progress' ? '[~]' : '[ ]'} ${digestLine(item.content, 70)}`);
+        lines.push(`  plan (${items.filter((i) => i.startsWith('[x]')).length}/${items.length} done): ${items.join('; ')}`.slice(0, 400));
+        continue;
+      }
       const target = args.path || args.from || args.file_path || args.pattern || args.query || args.command || args.task || '';
       const out = results.get(tc.id) ?? '';
       const first = digestLine(out, 120);

@@ -1465,3 +1465,34 @@ test('work that goes deep without a plan is reminded once, and the plan is kept'
   assert.equal(plans[0].agent.result.todos[1].status, 'in_progress');
   assert.equal(plans[0].agent.result.done, 1);
 });
+
+test('a plan survives the trimming of the round that produced it', () => {
+  const messages = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'do the job' },
+  ];
+  messages.push({
+    role: 'assistant',
+    content: null,
+    tool_calls: [{
+      id: 'p1',
+      type: 'function',
+      function: {
+        name: 'update_plan',
+        arguments: JSON.stringify({ todos: [{ content: 'Read the module', status: 'completed' }, { content: 'Add the retry helper', status: 'in_progress' }, { content: 'Run the tests', status: 'pending' }] }),
+      },
+    }],
+  });
+  messages.push({ role: 'tool', tool_call_id: 'p1', content: 'Plan updated: 1/3 done.' });
+  for (let i = 0; i < 10; i++) {
+    messages.push({ role: 'assistant', content: null, tool_calls: [{ id: `c${i}`, type: 'function', function: { name: 'run_command', arguments: JSON.stringify({ command: `echo ${i}` }) } }] });
+    messages.push({ role: 'tool', tool_call_id: `c${i}`, content: `ok ${i} `.repeat(200) });
+  }
+
+  pruneMessages(messages, 6000);
+  const log = worklogLines(messages).join('\n');
+  assert.match(log, /plan \(1\/3 done\)/, `the checklist is in the work log: ${log.slice(0, 300)}`);
+  assert.match(log, /\[~\] Add the retry helper/);
+  assert.match(log, /\[ \] Run the tests/);
+  assert.ok(!messages.some((m) => m.role === 'assistant' && m.tool_calls?.some((tc) => tc.function.name === 'update_plan')), 'the round itself is gone');
+});

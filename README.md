@@ -116,6 +116,19 @@ Memory notes are structured by category and priority, ranked against the current
 
 Edits are exact-match with guidance when they miss (closest lines are shown), tolerate indentation drift, keep CRLF files CRLF, and report real `+added −removed` and line ranges computed from a Myers diff. `list_processes` recovers the ids of background servers from earlier turns, so a dev server started last message can still be checked, previewed or stopped.
 
+### A long run keeps its head
+
+An agent run is dozens of model turns, minutes of wall clock, and a context window that has to be trimmed to fit. Danav manages that in the loop itself, rather than assuming the model behaves:
+
+- **The budget is visible.** Halfway through, the run tells the model where it stands; with five steps or 15% of the time left it says so in the chat too. A wrap-up becomes a decision, not a surprise.
+- **Nothing learned is dropped silently.** When the transcript must shrink, the oldest tool rounds each leave one line behind — the call and the first line of what came back — in a small `[work so far]` note at the top. The file bodies go; the findings stay.
+- **A dead end is named.** The same call returning the same result four times ends the run with a reason instead of burning what is left of the budget, and any repeat is told plainly that it learned nothing new.
+- **Verification is asked for, once.** If code files changed and nothing was run, the run requests the project's own check before accepting the answer — and the checks it recognises (`npm test`, `node --test`, `pytest`, `vitest`, `tsc`, `go test`, `cargo test`, … even inside `cd x && …` or `CI=1 …`) are recorded in the journal.
+- **A cut-off answer is not lost.** If the provider's connection dies mid-sentence, the request is repeated and only the part not yet shown is streamed; if it keeps dying, the half that arrived stays on screen and the run carries on.
+- **A plan survives the run.** The `update_plan` checklist is written into the journal, so a run stopped by a limit is picked up by the next one (`continue`) from the unfinished plan instead of from scratch.
+- **Memory is ranked, not matched literally.** Notes are scored by how rare each word is among your notes, by curated tags, recency and category, and looked up against both the request and the files the workspace was last working on.
+- **Six calls deep with no plan** earns one reminder to call `update_plan` — the checklist is rendered in the chat and carried into the next run.
+
 ### Safety model
 
 - **Local file tools cannot leave the workspace folder** (`..`, absolute paths and symlinks are checked; `.ssh`, `.aws`, `.gnupg`, `.kube` are blocked; `.git` is read-only for the file tools).
