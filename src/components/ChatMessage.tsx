@@ -12,6 +12,7 @@ import { isPreviewUrl, previewHost } from '../utils/previewUrl';
 import { AgentActionRow } from './AgentActionRow';
 import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from './thinkingAccordion';
 import { changedSummary, isLive, stopNotice } from '../agent/format';
+import { useThrottledValue } from '../utils/throttledValue';
 
 interface ChatMessageProps {
   message: Message;
@@ -42,6 +43,21 @@ const looksLikeProse = (value: string): boolean => {
   if (/^\s*#{1,6}\s+/m.test(text)) return true;
   const sentences = text.split(/[.!?]\s+/).filter((part) => part.trim().length > 12);
   return sentences.length >= 2;
+};
+
+/**
+ * One markdown block, parsed at most thirty times a second while it is the live
+ * one. In an agent transcript the answer can be many blocks long, and only the
+ * block still being written is re-parsed on every frame; the finished ones are
+ * parsed once when they arrive.
+ */
+const MarkdownBlock: React.FC<{ content: string; streaming?: boolean; components: any }> = ({ content, streaming, components }) => {
+  const shown = useThrottledValue(content, 32, Boolean(streaming));
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={(uri) => uri}>
+      {shown}
+    </ReactMarkdown>
+  );
 };
 
 interface ThinkingSectionProps {
@@ -250,6 +266,15 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
   );
 
   const safeMessageContent = normalizeMessageContent(message.content || '');
+  /**
+   * While the answer streams, the text arrives once per animation frame. Markdown
+   * is parsed from the WHOLE message every time it changes, so a long answer would
+   * be re-parsed sixty times a second, each time on more text. Reading it thirty
+   * times a second looks identical and costs half as much; when the stream stops,
+   * the final text is rendered at once. `message.content` itself is untouched, so
+   * copying the answer always copies all of it.
+   */
+  const streamedContent = useThrottledValue(safeMessageContent, 32, Boolean(message.isGenerating));
   const blocks = getMessageBlocks(message);
   // An agent turn is a chronological list of narration + actions; it renders as one timeline.
   const isAgentTimeline = Boolean(message.agent) || blocks.some((b) => b.type === 'text' || b.type === 'action');
@@ -762,9 +787,11 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
             </div>
           ) : (
             <div key={block.id} className={`markdown-body my-2${block.id === liveTextId ? ' is-streaming' : ''}`}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} urlTransform={(uri) => uri}>
-                {normalizeMessageContent(block.content)}
-              </ReactMarkdown>
+              <MarkdownBlock
+                content={normalizeMessageContent(block.content)}
+                streaming={block.id === liveTextId}
+                components={markdownComponents}
+              />
             </div>
           )
         );
@@ -869,7 +896,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
               urlTransform={(uri) => uri}
             >
               {(() => {
-                let text = safeMessageContent;
+                let text = streamedContent;
                 const hasPoster =
                   text.includes('themoviedb.org') ||
                   text.includes('tmdb.org') ||
