@@ -41,6 +41,24 @@ async function setup({ autoRun = true, search, probe, runSubagent } = {}) {
   return { ws, dir, tools, ctx, events, run };
 }
 
+test('a call that fails on its arguments comes back with the signature and the near miss', async () => {
+  const { run } = await setup();
+  // A mistyped key used to answer only "Missing required argument" — the model then
+  // guessed again. Now the near miss and the real signature ride along, so the retry
+  // is the right call.
+  const typo = await run('run_command', { comand: 'echo hi' });
+  assert.equal(typo.ok, false);
+  assert.match(typo.output, /Missing required argument "command"/);
+  assert.match(typo.output, /You sent "comand" — this argument is named "command"/);
+  assert.match(typo.output, /run_command\(\{ command, cwd\?, timeout_seconds\?, background\? \}\)/);
+
+  // And the aliases models reach for still resolve to the real keys.
+  const wrote = await run('write_file', { file_path: 'aliased.txt', contents: 'ok\n' });
+  assert.equal(wrote.ok, true);
+  const readBack = await run('read_file', { file_path: 'aliased.txt', start: 1, end: 1 });
+  assert.match(readBack.output, /ok/);
+});
+
 test('every tool has a schema and an implementation', async () => {
   const { tools } = await setup();
   const names = TOOL_DEFINITIONS.map((d) => d.function.name);

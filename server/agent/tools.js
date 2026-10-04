@@ -46,7 +46,41 @@ const ALIASES = {
   timeout_seconds: ['timeout', 'timeout_s', 'timeoutSec'],
   start_line: ['start', 'from_line', 'line_start'],
   end_line: ['end', 'to_line', 'line_end'],
+  // The history/check tools, in the words models actually reach for.
+  view: ['mode', 'subcommand'],
+  only: ['check', 'checks', 'name', 'script'],
+  symbol: ['func', 'function', 'definition', 'member'],
 };
+
+/**
+ * What to say when a call fails because of its arguments.
+ *
+ * Two failures that cost a whole round trip each: a required argument the model
+ * named differently (`command` sent as `comand`), and arguments the tool does not
+ * have at all. Both are answered with the tool's real signature, so the retry is
+ * the right call rather than a guess.
+ */
+function argumentHint(name, args, message) {
+  const missing = /Missing required argument "([\w]+)"/.exec(String(message || ''));
+  const keys = Object.keys(args && typeof args === 'object' ? args : {});
+  const def = TOOL_DEFINITIONS.find((d) => d.function.name === name);
+  const props = def?.function?.parameters?.properties || {};
+  const params = Object.keys(props);
+  if (!params.length) return '';
+  const bits = [];
+  if (missing) {
+    const want = missing[1];
+    const near = keys.find((k) => k !== want && editDistance(k.toLowerCase(), want.toLowerCase()) <= 2);
+    if (near) bits.push(`You sent "${near}" — this argument is named "${want}".`);
+    if (keys.length) bits.push(`Arguments received: ${keys.join(', ')}.`);
+  } else if (keys.length) {
+    const unknown = keys.filter((k) => !params.includes(k));
+    if (unknown.length && unknown.length <= 3) bits.push(`Unknown argument${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}.`);
+  }
+  const required = new Set(def.function.parameters.required || []);
+  bits.push(`${name}({ ${params.map((p) => (required.has(p) ? p : `${p}?`)).join(', ')} })`);
+  return bits.join(' ');
+}
 
 /** Models drift on argument names; accept the common synonyms. */
 function normalizeArgs(args) {
@@ -138,6 +172,22 @@ export function checkSummaryLine(text) {
     if (wanted.test(lines[i]) && lines[i].length < 160) return lines[i].trim();
   }
   return '';
+}
+
+/**
+ * A read-only git command run through the shell is the slow path once the history
+ * tools exist: raw `git log` output is unshaped, uncapped, and has to be asked for
+ * again for the next question. Same idea as the index tip in grep_search — say so
+ * ONCE per run, at the moment the choice was made, and never for a command that
+ * writes (commit, reset, checkout, push): there is no tool for those on purpose.
+ */
+export function gitReadTip(command, ctx) {
+  if (!/\bgit\s+(?:-{1,2}[\w=-]+\s+)*(log|blame|diff|show|status|shortlog|whatchanged)\b/.test(String(command || ''))) return '';
+  if (!ctx?.state || ctx.state.gitTipShown) return '';
+  ctx.state.gitTipShown = true;
+  return (
+    '\n[Tip: repo_history answers this in one shaped call — view="log" with a path for the commits that touched a file, view="blame" with a symbol for who last changed it, view="diff" for the uncommitted changes (your own edits included). repo_status gives branch and uncommitted files in one line. Raw git is still fine for anything else.]'
+  );
 }
 
 /** A simple glob (test files, docs, a folder tree) as a regular expression. */
@@ -2832,15 +2882,23 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
     async execute(name, rawArgs, ctx) {
       const kindByTool = { list_dir: 'list', read_file: 'read', write_file: 'write', edit_file: 'edit', multi_edit: 'edit' };
       try {
-        const res = await impl[name](normalizeArgs(rawArgs), ctx);
+        const args = normalizeArgs(rawArgs);
+        let res = await impl[name](args, ctx);
+        if (name === 'run_command' && res.ok !== false) {
+          const tip = gitReadTip(args.command, ctx);
+          if (tip) res = { ...res, output: `${res.output}${tip}` };
+        }
         return { ok: res.ok !== false, ...res, ui: { ok: res.ok !== false, ...res.ui } };
       } catch (err) {
         if (err?.name === 'AbortError') throw err;
         const message = err instanceof ToolError || err instanceof WorkspaceError ? err.message : `Unexpected error: ${err?.message || err}`;
         if (!(err instanceof ToolError) && !(err instanceof WorkspaceError)) console.error(`[agent] tool ${name} crashed:`, err);
+        // A failed call should teach the retry: the tool's real signature, and any
+        // near-miss argument name, ride along with the error.
+        const hint = /Missing required argument/.test(message) ? argumentHint(name, rawArgs, message) : '';
         return {
           ok: false,
-          output: `Error: ${safe(message)}`,
+          output: hint ? `Error: ${safe(message)}\n${safe(hint)}` : `Error: ${safe(message)}`,
           error: safe(message),
           ui: { kind: kindByTool[name] || name, ok: false },
         };

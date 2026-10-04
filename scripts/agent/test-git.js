@@ -194,6 +194,25 @@ test('repo_history diff shows the agent its own uncommitted work', async () => {
   }
 });
 
+test('raw git through the shell is answered with the tool that shapes it — once', async () => {
+  const { root, ws } = await makeRepo();
+  try {
+    const { run, ctx } = toolsetFor(ws);
+    const first = await run('run_command', { command: 'git log --oneline -3' });
+    assert.match(first.output, /Tip: repo_history answers this in one shaped call/);
+    assert.match(first.output, /view="blame"/);
+
+    const second = await run('run_command', { command: 'git status --short' });
+    assert.ok(!/Tip:/.test(second.output), 'the tip is said once per run, not after every git command');
+
+    ctx.state.gitTipShown = false;
+    const write = await run('run_command', { command: 'git commit --allow-empty -m "nope" -c user.email=x@y.z -c user.name=x' });
+    assert.ok(!/Tip: repo_history/.test(write.output), 'a history-WRITING command gets no tip: there is no tool for that on purpose');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('the history tools are read-only, in the toolset, and safe in parallel', async () => {
   const names = TOOL_DEFINITIONS.map((d) => d.function.name);
   for (const tool of ['repo_status', 'repo_history', 'run_checks']) {
