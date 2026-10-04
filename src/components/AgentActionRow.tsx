@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useCallback, useRef } from 'react';
 import { ChevronRight, Circle, CircleCheck, CircleDot, ExternalLink, PanelRight } from 'lucide-react';
 import type { AgentAction, AgentDiffHunk } from '../types';
 import { actionLabel, formatRanges, isWorking } from '../agent/format';
 import { AnimatedCount } from './AnimatedCount';
 import { FileTypeIcon } from './FileTypeIcon';
+import { createPanelStore, usePanelOpen } from './panels';
+import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 
 /**
  * One thing the agent did, as a plain line of text — no card, no status box:
@@ -137,8 +139,26 @@ const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
   );
 };
 
+/**
+ * One action's detail open at a time, chat-wide: opening another row's detail (or
+ * clicking anywhere outside this one) closes this one, so a long transcript never
+ * ends up with a column of half-expanded boxes.
+ */
+const detailStore = createPanelStore();
+
 export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApproval, onOpenPreview }) => {
-  const [open, setOpen] = useState(false);
+  const open = usePanelOpen(detailStore, action.id);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => detailStore.close(), []);
+  useDismissOnOutside(rowRef, open, close);
+  const setOpen = useCallback(
+    (next: boolean | ((was: boolean) => boolean)) => {
+      const was = detailStore.get() === action.id;
+      const value = typeof next === 'function' ? (next as (was: boolean) => boolean)(was) : next;
+      detailStore.set(value ? action.id : null);
+    },
+    [action.id]
+  );
   const label = actionLabel(action);
   const live = isWorking(action); // shimmer = working on it right now
   const queued = action.status === 'queued';
@@ -197,7 +217,7 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
   const clickable = label.expandable;
 
   return (
-    <div className="agent-row">
+    <div className="agent-row" ref={rowRef}>
       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-h-[26px] text-[13px] leading-6 select-none">
         <button
           type="button"

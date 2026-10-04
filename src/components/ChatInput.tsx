@@ -509,6 +509,20 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     el.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden';
 
     /**
+     * Tell the transcript how much of it the composer is covering.
+     *
+     * The composer floats above the messages, and a long prompt makes it taller
+     * than the space the layout reserved — past a line or two its top edge starts
+     * hiding the end of the answer. Publishing the overflow as a CSS variable (not
+     * React state) keeps that in the browser's layout pass instead of re-rendering
+     * the whole chat on every keystroke.
+     */
+    const extra = Math.max(0, targetHeight - 96);
+    const root = document.documentElement;
+    if (extra > 0) root.style.setProperty('--danav-composer-extra', `${Math.round(extra)}px`);
+    else root.style.removeProperty('--danav-composer-extra');
+
+    /**
      * The two layouts give the text different widths (the pill keeps the send
      * button beside it), so a prompt sitting exactly on the boundary would flip
      * the composer back and forth — each flip re-wrapping the text and moving the
@@ -530,12 +544,21 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     if (!draftResetKey) return;
     setDraft('');
     lastDraftLengthRef.current = 0;
+    document.documentElement.style.removeProperty('--danav-composer-extra');
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = '';
     el.style.overflowY = 'hidden';
     if (document.activeElement !== el) el.focus({ preventScroll: true });
   }, [draftResetKey]);
+
+  // Leaving the chat (or the composer) must not leave a gap behind it.
+  useEffect(
+    () => () => {
+      document.documentElement.style.removeProperty('--danav-composer-extra');
+    },
+    []
+  );
 
   const canSend = (Boolean(draft.trim()) || attachments.length > 0) && !isLoading && !disabled;
 
@@ -550,6 +573,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
       textareaRef.current.style.height = '';
       textareaRef.current.style.overflowY = 'hidden';
     }
+    document.documentElement.style.removeProperty('--danav-composer-extra');
     setIsInputExpanded(false);
   };
 

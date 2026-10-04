@@ -6,23 +6,18 @@
  * ThinkingSection inside any message can take part without the whole chat having
  * to re-render every time a thought opens or closes.
  */
+import { createPanelStore } from './panels';
 
-let openId: string | null = null;
-const listeners = new Set<() => void>();
+const store = createPanelStore();
 
 export function getOpenThinkingId(): string | null {
-  return openId;
+  return store.get();
 }
 
 export function setOpenThinkingId(id: string | null): void {
-  if (openId === id) return;
-  openId = id;
-  for (const listener of listeners) listener();
+  store.set(id);
 }
 
 export function subscribeThinkingAccordion(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
+  return store.subscribe(listener);
 }

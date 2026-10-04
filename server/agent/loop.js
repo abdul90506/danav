@@ -12,6 +12,7 @@ import { requestApproval, cancelApprovalsFor } from './approvals.js';
 import { limits } from './config.js';
 import { LlmError, streamCompletion } from './llm.js';
 import { buildSystemPrompt, formatSnapshot } from './prompt.js';
+import { detectChecks, formatChecksHint } from './verify.js';
 import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun } from './journal.js';
 import { buildToolset, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint } from './tools.js';
@@ -442,6 +443,9 @@ function shrinkToolOutputs(messages, limit) {
  * net, clip the prompt's appended context (never its rule prefix) and oversized
  * user payloads so providers get a compact request instead of a hard 400.
  */
+/** How many tool rounds a run may still use after the step limit, to land what it started. */
+const WRAP_UP_TOOL_STEPS = 3;
+
 export function pruneMessages(messages, budgetChars) {
   const budget = Math.max(0, Math.floor(Number(budgetChars) || 0));
   const initial = totalSize(messages);
@@ -783,8 +787,16 @@ export async function runAgent({
       .slice(0, 8)
       .join(' ');
     const memory = redact(memoryForPrompt(workspace.id, 6000, `${currentRequest} ${touched}`.trim()));
+    // What this project can check, so "verify your work" is an instruction the
+    // model can act on instead of one it has to guess at.
+    let checksHint = '';
+    try {
+      checksHint = formatChecksHint(await detectChecks(workspace));
+    } catch {
+      /* detection is a courtesy; a workspace it cannot read is not a failure */
+    }
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, activity, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
+      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, activity, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
       ...priorMessages,
     ];
 
@@ -801,6 +813,8 @@ export async function runAgent({
     let narrationNotices = 0;
     /** Times this run has asked the model to finish the checklist it set itself. */
     let planFinishNudges = 0;
+    /** Tool-bearing rounds used AFTER the step limit was reached (to land work in flight). */
+    let wrapUpToolStepsUsed = 0;
     let continuations = 0; // answers that hit the output limit and were continued
     let planNudged = false;
 
@@ -812,7 +826,8 @@ export async function runAgent({
         wrapUp = 'step_limit';
         messages.push({
           role: 'user',
-          content: '[system notice] You have used all the steps allowed for one run. Do NOT call any more tools. Write the closing summary now, in 2–5 plain sentences: what is done, what is left, and that replying "continue" keeps going. No headings, no bullet lists.',
+          content:
+            `[system notice] You have used all ${maxSteps} steps for one run. Use the next ${WRAP_UP_TOOL_STEPS} tool call(s) at most to LAND what you are in the middle of — finish the file you are writing, run the one check that matters — and then write the closing summary: what is done, what is left, and that replying "continue" keeps going. No new work, no exploration, no headings or bullet lists in the summary.`,
         });
       } else if (!wrapUp && Date.now() > deadline) {
         wrapUp = 'time_limit';
@@ -869,8 +884,16 @@ export async function runAgent({
       if (prune.pruned) send({ status: 'Trimming old context…' });
 
       stats.steps++;
+      if (wrapUp && useTools) wrapUpToolStepsUsed++;
       const live = new Map(); // tool-call slot -> { uiId, lastSent, lastKey }
-      const useTools = !wrapUp;
+      /**
+       * Wrap-up means "stop starting things", not "stop being able to finish them".
+       * A run that hit the step limit with a half-written file must be able to place
+       * that file; anything else (a time limit, a repeated failure, a diagnosis of
+       * no progress) is a reason to write the answer with the tools off.
+       */
+      const canLand = wrapUp === 'step_limit' && wrapUpToolStepsUsed < WRAP_UP_TOOL_STEPS;
+      const useTools = !wrapUp || canLand;
 
       /**
        * The one live writer for this call. Created through a single promise, so a call can never end

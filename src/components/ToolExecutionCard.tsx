@@ -18,6 +18,8 @@ interface ToolExecutionCardProps {
  * expanded to inspect the raw output the model actually read.
  */
 export const ToolExecutionCard: React.FC<ToolExecutionCardProps> = ({ tool, onWatch }) => {
+  // The newest tool result is the interesting one, so a card opens as it starts
+  // and only one stays open — the same rule the action rows follow.
   const [expanded, setExpanded] = useState(true);
 
   const isRunning = tool.status === 'running';

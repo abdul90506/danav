@@ -37,20 +37,19 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  /** Following the bottom. Only the user can turn this off — see handleScroll. */
+  /** Following the bottom. Only the user can turn this off — see the handlers. */
   const [pinned, setPinned] = useState(true);
   const pinnedRef = useRef(true);
   /**
    * Where our own last scroll landed. A scroll event that arrives at (or below)
    * that position was caused by us, so it says nothing about what the user wants.
-   * Comparing positions — instead of ignoring scroll events for a moment after
-   * every scroll — is what lets the user stop the follow mid-stream: the old
-   * time window swallowed their scroll while an answer was still arriving.
    */
   const ownScrollTopRef = useRef(-1);
   /** A smooth scroll animates; the events during it are ours too. */
   const smoothUntilRef = useRef(0);
   const lastTopRef = useRef(0);
+  /** Finger position for touch scrolling: a drag down the screen means "scroll up". */
+  const touchYRef = useRef<number | null>(null);
   const prevMessagesCountRef = useRef<number>(messages.length);
 
   // Re-rendering on every scroll event would be worse than the thing it fixes.
@@ -82,11 +81,29 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
   /**
    * The user is the only one who can stop the chat following.
    *
-   * Our own scrolls land at the position we set, so they are recognisable and
-   * ignored; anything above that came from a wheel, a drag or the keyboard, and
-   * an upward move — however small — means "hold still, I am reading". Coming
-   * back to the bottom starts the follow again.
+   * The intent comes from the device, not from guessing: a wheel turned up, a
+   * finger dragged down, or Page Up means "hold still". Those are exact signals,
+   * and they work while an answer is streaming — which is when someone reads back
+   * over the previous turns. A scroll that lands above where we last put the view
+   * is the fallback, for scrollbars and programmatic moves. Coming back to the
+   * bottom starts the follow again.
    */
+  const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (event.deltaY < 0) setPinnedBoth(false);
+  };
+  const onTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
+    touchYRef.current = event.touches[0]?.clientY ?? null;
+  };
+  const onTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+    const y = event.touches[0]?.clientY;
+    if (y === undefined || touchYRef.current === null) return;
+    if (y > touchYRef.current + 4) setPinnedBoth(false); // finger down the screen = content up
+    touchYRef.current = y;
+  };
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'PageUp' || event.key === 'ArrowUp' || event.key === 'Home') setPinnedBoth(false);
+  };
+
   const handleScroll = () => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -108,11 +125,48 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
   };
 
   /**
-   * Sending a message always comes back to the bottom — including when the user
-   * had scrolled up through history, and including the case where the new message
-   * has not been laid out yet: the box is scrolled once now and once after the
-   * browser has painted, so the answer that follows starts from the bottom rather
-   * than from wherever the old height ended.
+   * Following, at most once per frame.
+   *
+   * `scrollHeight` forces the browser to lay the whole chat out again, so asking
+   * for one scroll per animation frame keeps the list pinned without doing the
+   * same work several times inside a frame — and it is the single path every
+   * "follow the newest" call goes through, so the send-scroll and the stream
+   * follow can never fight each other.
+   */
+  const followFrameRef = useRef(0);
+  const follow = useCallback(() => {
+    if (!pinnedRef.current || followFrameRef.current) return;
+    followFrameRef.current = requestAnimationFrame(() => {
+      followFrameRef.current = 0;
+      scrollToBottom(false);
+    });
+  }, [scrollToBottom]);
+  useEffect(() => () => cancelAnimationFrame(followFrameRef.current), []);
+
+  // While an answer streams and the user has not scrolled away, stay at the bottom.
+  useEffect(() => {
+    follow();
+  }, [messages, follow]);
+
+  /**
+   * Anything that changes the height of the transcript after the fact — an image
+   * loading, an action row expanding, the composer's own spacer — has to keep the
+   * chat pinned too. A ResizeObserver catches all of them in one place, instead of
+   * every component remembering to ask for a scroll.
+   */
+  useEffect(() => {
+    const column = scrollContainerRef.current?.firstElementChild;
+    if (!column || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => follow());
+    observer.observe(column);
+    return () => observer.disconnect();
+  }, [follow]);
+
+  /**
+   * Sending always comes back to the bottom — including from far up the history,
+   * and including the case where the new message has not been laid out yet: the
+   * box is scrolled once now and once after the browser has painted, so the answer
+   * that follows starts from the bottom rather than from the old height.
    */
   useEffect(() => {
     if (messages.length > prevMessagesCountRef.current) {
@@ -127,23 +181,6 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
     prevMessagesCountRef.current = messages.length;
   }, [messages.length, scrollToBottom]);
 
-  /**
-   * While an answer streams, follow it — but only while the user is still at the
-   * bottom.
-   *
-   * This runs on every token, and `scrollHeight` forces the browser to lay the
-   * whole chat out again. Asking for at most one scroll per animation frame keeps
-   * the list pinned without doing the same work several times inside one frame.
-   */
-  const followFrameRef = useRef(0);
-  useEffect(() => {
-    if (!pinnedRef.current || followFrameRef.current) return;
-    followFrameRef.current = requestAnimationFrame(() => {
-      followFrameRef.current = 0;
-      scrollToBottom(false);
-    });
-  }, [messages, scrollToBottom]);
-  useEffect(() => () => cancelAnimationFrame(followFrameRef.current), []);
 
   const lastMessage = messages[messages.length - 1];
   const hasError = lastMessage?.role === 'assistant' && Boolean(lastMessage.error);
@@ -154,6 +191,11 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
+        onWheel={onWheel}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onKeyDown={onKeyDown}
+        tabIndex={-1}
         className="h-full overflow-y-auto w-full"
       >
         {/*
@@ -161,7 +203,9 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
           itself from the width it is actually given rather than from the window
           — see the `.chat-column` rules in index.css.
         */}
-        <div className={`chat-column max-w-3xl w-full mx-auto px-4 sm:px-6 space-y-2 ${sidebarCollapsed ? 'pt-14 lg:pt-6' : 'pt-6'} ${agentMode ? 'pb-40 sm:pb-44' : 'pb-28 sm:pb-32'}`}>
+        <div
+          className={`chat-column max-w-3xl w-full mx-auto px-4 sm:px-6 space-y-2 ${sidebarCollapsed ? 'pt-14 lg:pt-6' : 'pt-6'} ${agentMode ? 'pb-40 sm:pb-44' : 'pb-28 sm:pb-32'}`}
+        >
           {messages.length === 0 ? (
             // Clean Empty State
             <div className="min-h-[50vh] flex flex-col items-center justify-center text-center px-4 pt-12">
@@ -204,6 +248,13 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
                 </div>
               )}
 
+              {/*
+                The composer floats over the transcript, and a long draft makes it
+                taller — far enough that its top would cover the last lines of the
+                answer. It publishes how much extra room it needs as a CSS variable
+                (no re-render, no measurement loop), and this spacer clears it.
+              */}
+              <div style={{ height: 'var(--danav-composer-extra, 0px)' }} aria-hidden="true" />
               <div ref={bottomRef} className="h-2" />
             </div>
           )}

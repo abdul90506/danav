@@ -4,7 +4,7 @@
  * off limits.
  */
 
-export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory, recentRuns, activity, budget, now = new Date() }) {
+export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory, recentRuns, checks, activity, budget, now = new Date() }) {
   const sandbox = workspace.kind === 'sandbox';
   const date = now.toISOString().slice(0, 10);
   const projectGuidance = guidance || notes || '';
@@ -42,6 +42,7 @@ export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory
 - Deliver complete, working changes: no TODO stubs, sensible error handling, no dead imports, and no unsupported claims.
 - Web UIs should be responsive, accessible, and visually polished. Match the conventions and architecture already present in an existing project.
 - Prefer the smallest maintainable fix that addresses the actual cause; avoid unrelated rewrites and dependency additions.
+- **When a change is hard to test, get a second pair of eyes — on your own initiative.** The delegate_task subagent is bounded and read-only: hand it the changed files (or the diff, pasted) and ask a specific question about what could break. That is the cheapest way to catch a mistake the tests do not cover, and it is a decision you make, not something you wait to be told. Do it for real changes, not for every edit.
 - When the request is broad but safe, inspect the project, choose high-impact improvements that fit its architecture, and proceed without burdening the user with unnecessary questions. Ask before irreversible or externally consequential actions.
 - **Stop when the request is met.** Once what was asked for works, finish. Do not start another improvement pass, do not add files, tests or features "while you are here", and do not ask whether they want more — the one line at the end naming anything you noticed is the whole of it. A run that keeps working after the job is done is as unwelcome as one that stops short.
 - If you have to stop before the job is finished, say precisely where you stopped, what is still unfinished, and the single best next step. Never present partial work as complete.`,
@@ -88,6 +89,7 @@ export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory
       memory
     );
   }
+  if (checks) sections.push(checks);
   if (recentRuns) {
     sections.push(
       '# Recent workspace evidence (automatically recorded file changes and recognized verification checks; no user prompts or file bodies)\n' +
