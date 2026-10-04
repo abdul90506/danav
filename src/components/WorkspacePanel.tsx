@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useEscapeToClose } from '../utils/useDismissOnOutside';
 import { ArrowLeft, Brain, ChevronRight, Cloud, Laptop, Loader2, RefreshCw, Trash2, X } from 'lucide-react';
 import type { AgentWorkspace } from '../types';
 import { clearMemory, deleteMemoryNote, getFile, getMemory, getTree, type MemoryNote, type MemoryRun, type TreeEntry } from '../services/agentApi';
@@ -15,6 +16,8 @@ const MAX_LINES = 5000;
 
 /** Read-only view of what is in the workspace: a lazy folder tree and a file viewer. */
 export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refreshToken, onClose }) => {
+  // Escape closes the panel, like every other thing that can be revealed.
+  useEscapeToClose(onClose);
   const [tree, setTree] = useState<Record<string, TreeEntry[]>>({});
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
