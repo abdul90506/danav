@@ -73,8 +73,8 @@ const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
               <FileTypeIcon path={f.path} />
               <span className="font-medium text-zinc-800 dark:text-zinc-100 truncate">{f.path}</span>
               {f.ranges && f.ranges.length > 0 && <span className="font-mono text-[11px] text-zinc-400">{formatRanges(f.ranges, 3)}</span>}
-              {f.added > 0 && <span className="font-mono text-emerald-600 dark:text-emerald-400">+{f.added}</span>}
-              {f.removed > 0 && <span className="font-mono text-rose-500 dark:text-rose-400">−{f.removed}</span>}
+              {f.added > 0 && <span className="font-mono tabular-nums text-emerald-600 dark:text-emerald-400">+{f.added}</span>}
+              {f.removed > 0 && <span className="font-mono tabular-nums text-rose-500 dark:text-rose-400">−{f.removed}</span>}
               {f.edits && f.edits > 1 && <span className="text-zinc-400">· {f.edits} edits</span>}
             </div>
             {f.hunks && f.hunks.length > 0 && <Diff hunks={f.hunks} />}
@@ -250,14 +250,14 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
             <AnimatedCount
               value={label.added}
               sign="+"
-              className="shrink-0 font-mono text-[12px] tabular-nums text-zinc-500 dark:text-zinc-400"
+              className="shrink-0 font-mono text-[12px] tabular-nums text-emerald-600 dark:text-emerald-400"
             />
           )}
           {label.removed !== undefined && label.removed > 0 && (
             <AnimatedCount
               value={label.removed}
               sign="−"
-              className="shrink-0 font-mono text-[12px] tabular-nums text-zinc-500 dark:text-zinc-400"
+              className="shrink-0 font-mono text-[12px] tabular-nums text-rose-500 dark:text-rose-400"
             />
           )}
           {label.chips?.map((c) => (

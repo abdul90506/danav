@@ -14,9 +14,35 @@ import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from
 import { stopNotice, workedSummary } from '../agent/format';
 import { useDismissOnOutside, useEscapeToClose } from '../utils/useDismissOnOutside';
 import { createPanelStore, usePanelOpen } from './panels';
-import { AgentTrail } from './AgentTrailGroup';
+import { AgentTrail, TrailNotes } from './AgentTrailGroup';
 import { useThrottledValue } from '../utils/throttledValue';
 import { useElapsedSeconds } from '../utils/useElapsedSeconds';
+
+/**
+ * A summary line with its line counts in colour: "+7" green, "−1" red, everything
+ * else as plain as the rest of the row.
+ */
+const SummaryText: React.FC<{ text?: string }> = ({ text }) => (
+  <>
+    {(text || '').split(/(\+\d+|−\d+)/g).map((part, i) => {
+      if (/^\+\d+$/.test(part)) {
+        return (
+          <span key={i} className="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">
+            {part}
+          </span>
+        );
+      }
+      if (/^−\d+$/.test(part)) {
+        return (
+          <span key={i} className="tabular-nums font-medium text-rose-500 dark:text-rose-400">
+            {part}
+          </span>
+        );
+      }
+      return <React.Fragment key={i}>{part}</React.Fragment>;
+    })}
+  </>
+);
 
 /** One work row open at a time, chat-wide — the same rule as every other panel. */
 const workStore = createPanelStore();
@@ -99,10 +125,12 @@ const AgentWorkRow: React.FC<{
           /*
             The turn's own numbers, one size up from the small print: this is the
             line a finished turn is read by, so it gets room to breathe and wraps
-            at the separators on a narrow screen instead of being cut off.
+            at the separators on a narrow screen instead of being cut off. The line
+            counts are the one place colour is allowed — +green, −red is how anyone
+            reads a diff at a glance.
           */
           <span className="text-[14px] leading-6 font-medium text-zinc-600 dark:text-zinc-300 group-hover/work:text-zinc-900 dark:group-hover/work:text-zinc-100 transition-colors">
-            {summary}
+            <SummaryText text={summary} />
             {summary && notice ? <span className="font-normal text-zinc-400 dark:text-zinc-500"> · </span> : null}
             {notice ? <span className="font-normal text-zinc-500 dark:text-zinc-400">{notice}</span> : null}
           </span>
@@ -204,6 +232,8 @@ interface ThinkingSectionProps {
   thinkingDuration?: number;
   /** How many reasoning rounds this turn had, when more than one. */
   rounds?: number;
+  /** The turn is still running: only then may this row shimmer. */
+  live?: boolean;
 }
 
 /** One thought open at a time inside the trails, chat-wide — like everything else. */
@@ -236,7 +266,8 @@ const TrailThinkingEntry: React.FC<{
         aria-expanded={open}
         className="group/think inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 rounded text-[12px] leading-5 text-left cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
-        <Brain className={`w-3.5 h-3.5 shrink-0 text-zinc-500 dark:text-zinc-400 ${active ? 'thinking-brain-shimmer' : ''}`} />
+        {/* No brain here: inside the trail every row is a plain line, and the
+            indent already says whose reasoning this is. */}
         {active ? (
           <span className="thinking-shimmer tracking-wide">Thinking…</span>
         ) : (
@@ -265,7 +296,10 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   isStillThinking,
   thinkingDuration,
   rounds,
+  live = true,
 }) => {
+  /** Nothing animates on a turn that is over. */
+  const spinning = isStillThinking && live;
   // One thought open at a time, chat-wide: opening this one closes the others.
   // The third argument is the server snapshot — without it React refuses to
   // render this anywhere that is not a live browser (the test renderer, and any
@@ -290,7 +324,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
    */
   const [liveSeconds, setLiveSeconds] = useState(0);
   React.useEffect(() => {
-    if (!isStillThinking) {
+    if (!spinning) {
       setLiveSeconds(0);
       return;
     }
@@ -299,18 +333,18 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
       setLiveSeconds(Math.max(0, Math.round((Date.now() - started) / 1000)));
     }, 500);
     return () => clearInterval(timer);
-  }, [isStillThinking]);
+  }, [spinning]);
 
   // Follow the newest reasoning — inside this box only, so the chat around it never moves.
   // The scroll is INSTANT on purpose: a smooth one fires a stream of scroll events that
   // look exactly like a user scrolling away, and the follow switched itself off.
   React.useEffect(() => {
-    if (!isExpanded || !isStillThinking || pausedRef.current) return;
+    if (!isExpanded || !spinning || pausedRef.current) return;
     const el = thinkBoxRef.current;
     if (!el) return;
     ignoreScrollUntilRef.current = performance.now() + 150;
     el.scrollTop = el.scrollHeight;
-  }, [thinkingContent, isExpanded, isStillThinking]);
+  }, [thinkingContent, isExpanded, spinning]);
 
   // Pause the follow when the user scrolls up or grabs the scrollbar; resume at the bottom.
   const handleThinkBoxScroll = () => {
@@ -334,12 +368,12 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   // in (see `.stream-lines` in index.css). Long blocks fall back to one text
   // node — the fade is a nicety, not worth a thousand spans per frame.
   const streamLines = React.useMemo(() => {
-    if (!isStillThinking) return null;
+    if (!spinning) return null;
     const lines = thinkingContent.split('\n');
     return lines.length <= 400 ? lines : null;
-  }, [thinkingContent, isStillThinking]);
+  }, [thinkingContent, spinning]);
 
-  const durationSec = (thinkingDuration || 0) + (isStillThinking ? liveSeconds : 0) || 1;
+  const durationSec = (thinkingDuration || 0) + (spinning ? liveSeconds : 0) || 1;
 
   return (
     <div ref={rootRef} className="mb-3.5 select-none">
@@ -357,7 +391,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
               : 'group-hover/think:text-zinc-700 dark:group-hover/think:text-zinc-200'
           }`}
         />
-        {isStillThinking ? (
+        {spinning ? (
           <span className="thinking-shimmer text-xs tracking-wide">Thinking…</span>
         ) : (
           <span className="text-xs tracking-wide text-zinc-500 dark:text-zinc-400 group-hover/think:text-zinc-800 dark:group-hover/think:text-zinc-200 transition-colors">
@@ -939,7 +973,12 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
       .join('\n\n')
       .slice(-60_000);
     const duration = parts.reduce((sum, b) => sum + (b.duration || 0), 0);
-    const stillThinking = parts.some((b) => b.isStillThinking) && !message.error;
+    /**
+     * Only the live turn may shimmer. A stopped run can leave a reasoning block
+     * that never got its \"done\" event, and the row then kept a shimmering
+     * \"Thinking…\" label under a finished turn — animation that never stopped.
+     */
+    const stillThinking = parts.some((b) => b.isStillThinking) && Boolean(message.isGenerating) && !message.error;
     return { id: `think-${message.id}`, content, duration, stillThinking, rounds: parts.length };
   })();
 
@@ -1032,7 +1071,9 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
   const renderTrail = () => {
     const out: React.ReactNode[] = [];
     let group: AgentAction[] = [];
-    const flush = () => {
+    let notes: string[] = [];
+    let notesFrom = '';
+    const flushActions = () => {
       if (group.length === 0) return;
       const first = group[0].id;
       out.push(
@@ -1048,14 +1089,39 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
       );
       group = [];
     };
+    /**
+     * The lines the agent said along the way fold into one row of their own — "3
+     * lines written" — instead of arriving in the trail as paragraphs: they are
+     * commentary on the work, and the work is what the trail is for. They are kept,
+     * in order, one click behind their row.
+     */
+    const flushNotes = () => {
+      if (notes.length === 0) return;
+      out.push(
+        <div key={`n-${notesFrom}`} className="my-1.5">
+          <TrailNotes id={`${message.id}:notes-${notesFrom}`} notes={notes} />
+        </div>
+      );
+      notes = [];
+    };
     for (const block of blocks) {
       if (block.type === 'action') {
+        flushNotes();
         if (!inFold(block)) continue; // the preview row stands on its own, outside
         group.push(block.action);
         continue;
       }
       if (block.type === 'text' && visibleTextIds.has(block.id)) continue;
-      flush();
+      // The newest line is on screen as the shimmer under the working label; the
+      // trail picks it up once the next one replaces it.
+      if (block.type === 'text' && liveNarration && block.id === liveNarration.id) continue;
+      if (block.type === 'text' && !block.notice) {
+        if (notes.length === 0) notesFrom = block.id;
+        notes.push(block.content);
+        continue;
+      }
+      flushActions();
+      flushNotes();
       if (block.type === 'thinking') {
         // Every round in the place it happened, with its own seconds. The merged
         // "3 rounds" line belongs to the simple case (a turn with no work to fold),
@@ -1070,10 +1136,12 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
           />
         );
       } else if (block.type === 'text') {
+        // A notice (a system line, not the agent's words) stays as it is.
         out.push(textNode(block, true));
       }
     }
-    flush();
+    flushActions();
+    flushNotes();
     return out;
   };
 
@@ -1203,6 +1271,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
                       isStillThinking={thinkingAggregate.stillThinking}
                       thinkingDuration={thinkingAggregate.duration || undefined}
                       rounds={thinkingAggregate.rounds}
+                      live={liveTurn}
                     />
                   </div>
                 )}

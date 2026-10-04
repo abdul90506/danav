@@ -129,3 +129,50 @@ export const AgentTrail: React.FC<TrailProps> = ({ trailId, actions, grouped = t
     </div>
   );
 };
+
+/** One "lines written" row open at a time, chat-wide. */
+const noteStore = createPanelStore();
+
+/**
+ * The lines the agent said while it worked, folded into one row.
+ *
+ * Commentary is not the work: in the trail it would read as a wall of paragraphs
+ * between the rows that matter, and on screen it used to sit above the run and
+ * then disappear into it. Folded, it is out of the way and still there — the same
+ * bargain the actions themselves get.
+ */
+export const TrailNotes: React.FC<{ id: string; notes: string[] }> = ({ id, notes }) => {
+  const open = usePanelOpen(noteStore, id);
+  const toggle = useCallback(() => (noteStore.get() === id ? noteStore.close() : noteStore.set(id)), [id]);
+  const label = `${notes.length} line${notes.length === 1 ? '' : 's'} written`;
+
+  return (
+    <div className="my-0.5">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="group/note inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 max-w-full text-left cursor-pointer rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
+      >
+        <span className="text-[12px] leading-5 text-zinc-500 dark:text-zinc-400 group-hover/note:text-zinc-700 dark:group-hover/note:text-zinc-200 transition-colors">
+          {label}
+        </span>
+        <ChevronRight
+          className={`w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/note:text-zinc-600 dark:group-hover/note:text-zinc-300 ${
+            open ? 'rotate-90' : ''
+          }`}
+        />
+      </button>
+
+      {open && (
+        <div className="mt-0.5 ml-1.5 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 space-y-1 animate-in fade-in duration-150">
+          {notes.map((note, i) => (
+            <p key={i} className="text-[12px] leading-5 text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap select-text">
+              {note}
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
