@@ -46,15 +46,40 @@ const AgentWorkRow: React.FC<{
 }> = ({ messageId, live, liveLabel, elapsedSeconds, summary, notice, children }) => {
   const id = `work-${messageId}`;
   const open = usePanelOpen(workStore, id);
-  const close = React.useCallback(() => workStore.close(), []);
+  /** The user's own choice, so the automatic open and close can leave it alone. */
+  const pinnedRef = useRef(false);
   /**
-   * Once opened, the trail stays open: reading it and clicking somewhere else is
-   * not the same as dismissing a menu. Escape still puts it away (and, being
-   * registered, that Escape does not also stop a run that is still working).
+   * Once the user opens it (or closes it) it is theirs: reading it and clicking
+   * somewhere else is not the same as dismissing a menu. Escape still puts it
+   * away — and, being registered, that Escape does not also stop a run that is
+   * still working.
    */
-  useEscapeToClose(close, open);
+  useEscapeToClose(
+    React.useCallback(() => {
+      pinnedRef.current = false;
+      workStore.close();
+    }, []),
+    open
+  );
 
-  const toggle = () => (workStore.get() === id ? workStore.close() : workStore.set(id));
+  /**
+   * While the run is working the trail is on screen — that is the whole point of
+   * watching it work — and the moment the run ends it folds away again, leaving
+   * the one line that says what it did. A trail the user opened (or closed) by
+   * hand is left exactly as they left it.
+   */
+  React.useEffect(() => {
+    if (pinnedRef.current) return;
+    if (live && workStore.get() !== id) workStore.set(id);
+    else if (!live && workStore.get() === id) workStore.close();
+  }, [live, id]);
+
+  const toggle = () => {
+    const nowOpen = workStore.get() === id;
+    pinnedRef.current = true;
+    if (nowOpen) workStore.close();
+    else workStore.set(id);
+  };
 
   return (
     <div className="mt-1 select-none">
@@ -63,13 +88,8 @@ const AgentWorkRow: React.FC<{
         onClick={toggle}
         aria-expanded={open}
         title={open ? 'Hide what this turn did' : 'Show what this turn did'}
-        className="group/work flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 max-w-full text-left cursor-pointer py-1 -my-0.5 rounded-sm"
+        className="group/work inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5 max-w-full text-left cursor-pointer -mx-1.5 px-1.5 py-1 rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
-        <ChevronRight
-          className={`w-3.5 h-3.5 shrink-0 self-center text-zinc-400 dark:text-zinc-500 transition-transform duration-200 group-hover/work:text-zinc-700 dark:group-hover/work:text-zinc-200 ${
-            open ? 'rotate-90' : ''
-          }`}
-        />
         {live ? (
           <span className="agent-shimmer text-[14px] leading-6">{liveLabel}</span>
         ) : (
@@ -87,6 +107,13 @@ const AgentWorkRow: React.FC<{
         {live && elapsedSeconds >= 2 && (
           <span className="text-[13px] text-zinc-400 dark:text-zinc-500">{elapsedSeconds}s</span>
         )}
+        {/* The arrow sits after the words and points the way the panel comes out:
+            forward while it is closed, down once it is open. */}
+        <ChevronRight
+          className={`w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-200 group-hover/work:text-zinc-700 dark:group-hover/work:text-zinc-200 ${
+            open ? 'rotate-90' : ''
+          }`}
+        />
       </button>
 
       {/*
@@ -961,6 +988,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
           <AgentTrail
             trailId={`${message.id}:${first}`}
             actions={group}
+            grouped={!liveTurn}
             onApproval={onAgentApproval}
             onOpenPreview={onOpenPreview}
           />

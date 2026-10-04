@@ -23,6 +23,13 @@ interface TrailProps {
   /** Stable prefix for group ids: one message's trail cannot clash with another's. */
   trailId: string;
   actions: AgentAction[];
+  /**
+   * Whether to sum the actions up by kind. A finished run reads best as "2 files
+   * analyzed"; a run that is still going is watched step by step, so its rows are
+   * shown as they happen instead of being counted behind a line whose number keeps
+   * changing under the reader's eyes.
+   */
+  grouped?: boolean;
   onApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
   onOpenPreview?: (url: string, title?: string) => void;
 }
@@ -46,16 +53,16 @@ const GroupRow: React.FC<{
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        className="group/group inline-flex items-center gap-1.5 py-0.5 max-w-full text-left cursor-pointer"
+        className="group/group inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 max-w-full text-left cursor-pointer rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
+        <span className="text-[12px] leading-5 text-zinc-500 dark:text-zinc-400 group-hover/group:text-zinc-700 dark:group-hover/group:text-zinc-200 transition-colors">
+          {label}
+        </span>
         <ChevronRight
           className={`w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/group:text-zinc-600 dark:group-hover/group:text-zinc-300 ${
             open ? 'rotate-90' : ''
           }`}
         />
-        <span className="text-[12px] leading-5 text-zinc-500 dark:text-zinc-400 group-hover/group:text-zinc-700 dark:group-hover/group:text-zinc-200 transition-colors">
-          {label}
-        </span>
       </button>
 
       {open && (
@@ -69,9 +76,9 @@ const GroupRow: React.FC<{
   );
 };
 
-export const AgentTrail: React.FC<TrailProps> = ({ trailId, actions, onApproval, onOpenPreview }) => {
+export const AgentTrail: React.FC<TrailProps> = ({ trailId, actions, grouped = true, onApproval, onOpenPreview }) => {
   /** Groups in the order they first happened, each holding the actions that belong to it. */
-  const grouped = useMemo(() => {
+  const groups = useMemo(() => {
     const out: Array<{ kind: string; actions: AgentAction[] }> = [];
     const byKind = new Map<string, number>();
     for (const action of actions) {
@@ -87,9 +94,20 @@ export const AgentTrail: React.FC<TrailProps> = ({ trailId, actions, onApproval,
     return out;
   }, [actions]);
 
+  /** A live run is read step by step; a finished one is read as a summary. */
+  if (!grouped) {  // the prop, not the list below
+    return (
+      <div className="space-y-px">
+        {actions.map((a) => (
+          <AgentActionRow key={a.id} action={a} onApproval={onApproval} onOpenPreview={onOpenPreview} />
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div>
-      {grouped.map((entry) =>
+      {groups.map((entry) =>
         entry.actions.length === 1 ? (
           <AgentActionRow
             key={entry.actions[0].id}
