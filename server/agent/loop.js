@@ -13,7 +13,7 @@ import { limits } from './config.js';
 import { LlmError, streamCompletion } from './llm.js';
 import { buildSystemPrompt, formatSnapshot } from './prompt.js';
 import { collectProjectGuidance } from './context.js';
-import { recentRunsForPrompt, recordRun } from './journal.js';
+import { readRunJournal, recentRunsForPrompt, recordRun } from './journal.js';
 import { buildToolset, READ_ONLY_TOOLS } from './tools.js';
 import { checkAction, createLedger } from './policy.js';
 import { splitLines } from './textops.js';
@@ -685,6 +685,10 @@ export async function runAgent({
   // Child runs are deliberately read-only: their only context is a small set of
   // explicitly selected, redacted file excerpts. They have no tools, shell or
   // write access; the parent remains responsible for every change and check.
+  // The request this run is answering, for anything that needs the goal but is
+  // defined before the context is assembled (the read-only subagent).
+  let lastUserRequest = '';
+
   const runSubagent = async ({ task, files = [], signal: parentSignal }) => {
     const controller = new AbortController();
     const abortChild = () => controller.abort();
@@ -698,6 +702,12 @@ export async function runAgent({
     try {
       const excerpts = files.map((f) => `--- ${f.path} ---\n${f.content}`).join('\n\n');
       const context = excerpts || 'No files were provided.';
+      // What the review is FOR. Without it the subagent judges the excerpts in a
+      // vacuum — "this looks fine" against a goal it was never told.
+      const goal = String(lastUserRequest || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+      const planNote = state.plan?.length
+        ? `\nPlan the main agent is working from:\n${state.plan.map((item) => `- (${item.status}) ${item.content}`).join('\n')}`
+        : '';
       const result = await streamCompletion({
         provider,
         model,
@@ -711,7 +721,9 @@ export async function runAgent({
           },
           {
             role: 'user',
-            content: `Task: ${task}\n\nRead-only workspace context:\n${context}`,
+            content:
+              `The main agent is working on this user request: ${goal || '(not captured)'}${planNote}\n\n` +
+              `Task assigned to you: ${task}\n\nRead-only workspace context:\n${context}`,
           },
         ],
       });
@@ -756,8 +768,16 @@ export async function runAgent({
     const currentRequest = [...priorMessages].reverse().find((m) =>
       m.role === 'user' && !String(m.content || '').startsWith('[system notice]')
     )?.content || '';
-    const memory = redact(memoryForPrompt(workspace.id, 6000, currentRequest));
+    lastUserRequest = currentRequest;
     const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, 2500, 6));
+    // Memory is looked up against the request AND the files this workspace was
+    // last working on: "continue with the retry work" has to find the note about
+    // the module that was just being changed, even though the words do not match.
+    const touched = readRunJournal(workspace.id, 2)
+      .flatMap((run) => run.changed.map((file) => file.path))
+      .slice(0, 8)
+      .join(' ');
+    const memory = redact(memoryForPrompt(workspace.id, 6000, `${currentRequest} ${touched}`.trim()));
     const messages = [
       { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, activity, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
       ...priorMessages,

@@ -238,6 +238,10 @@ test('runAgent wires delegate_task to a bounded child completion with only suppl
     assert.equal(child.tools, undefined, 'the child has no tools and therefore cannot modify the workspace');
     assert.match(JSON.stringify(child.messages), /src\/review\.ts/);
     assert.match(JSON.stringify(child.messages), /value\.trim/);
+    // The reviewer is told what the review is FOR, or it judges the excerpts
+    // against a goal it was never given.
+    assert.match(JSON.stringify(child.messages), /Ask for a second opinion on the handler\./);
+    assert.match(JSON.stringify(child.messages), /Task assigned to you/);
     const parentFollowup = requests.find((r) => r.tools?.length && r.messages.some((m) => m.role === 'tool'));
     assert.ok(parentFollowup);
     assert.match(JSON.stringify(parentFollowup.messages), /empty-input regression test/);

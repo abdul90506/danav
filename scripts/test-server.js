@@ -631,6 +631,21 @@ await test('fetch_url refuses a local address through the live server', async ()
   assert.match(json.output, /Only public web pages/);
 });
 
+await test('an unknown API route answers in JSON, not with the app HTML', async () => {
+  // A client parses every API answer as JSON; Express's default HTML page turned
+  // a typo in a route into "Unexpected token '<'".
+  const res = await api('GET', '/api/does-not-exist');
+  assert.strictEqual(res.status, 404);
+  assert.match(String(res.json?.error || ''), /Unknown API route/);
+  assert.strictEqual(res.text.trim().startsWith('{'), true, 'the body really is JSON');
+});
+
+await test('the SPA catch-all never answers an /api path with the app', async () => {
+  const res = await api('POST', '/api/agent/nope');
+  assert.ok(res.status >= 400, `expected an error status, got ${res.status}`);
+  assert.doesNotMatch(res.text, /<div id="root">/);
+});
+
 server.proc.kill();
 
 // ---------------------------------------------------------------------------

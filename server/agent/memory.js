@@ -100,11 +100,35 @@ function tokenize(text) {
   return new Set(norm(text).split(' ').filter((word) => word.length > 1 && !STOP_WORDS.has(word)));
 }
 
-function scoreNote(note, query, queryTokens) {
+/** How many notes each word appears in — the raw material for weighting. */
+function documentFrequency(notes) {
+  const df = new Map();
+  for (const note of notes) {
+    for (const word of tokenize(`${note.text} ${note.tags.join(' ')}`)) df.set(word, (df.get(word) || 0) + 1);
+  }
+  return df;
+}
+
+function scoreNote(note, query, queryTokens, df = null, total = 1) {
   const noteTokens = tokenize(`${note.text} ${note.tags.join(' ')}`);
+  const tagTokens = tokenize(note.tags.join(' '));
   let lexical = 0;
   for (const word of queryTokens) {
-    if (noteTokens.has(word)) lexical += word.length >= 6 ? 3 : 2;
+    let hit = 0;
+    if (noteTokens.has(word)) hit = word.length >= 6 ? 3 : 2;
+    else if (word.length >= 4) {
+      // A shared stem counts for less than an exact word, but "auth" should
+      // still find the note about authentication.
+      for (const token of noteTokens) {
+        if (token.length > word.length + 2 && token.startsWith(word)) { hit = 1.5; break; }
+      }
+    }
+    if (!hit) continue;
+    // A word that appears in one note says far more about this request than a
+    // word that appears in twenty of them.
+    const idf = df ? 1 + Math.log(1 + total / (1 + (df.get(word) || 0))) * 0.6 : 1;
+    lexical += hit * idf;
+    if (tagTokens.has(word)) lexical += 1.5; // tags are curated, so they count for more
   }
   const phrase = norm(query);
   if (phrase.length >= 8 && norm(note.text).includes(phrase)) lexical += 4;
@@ -121,8 +145,10 @@ export function searchNotes(workspaceId, query, limit = 8) {
   const q = String(query || '').trim();
   const queryTokens = tokenize(q);
   if (!queryTokens.size) return [];
-  return readNotes(workspaceId)
-    .map((note) => scoreNote(note, q, queryTokens))
+  const notes = readNotes(workspaceId);
+  const df = documentFrequency(notes);
+  return notes
+    .map((note) => scoreNote(note, q, queryTokens, df, notes.length))
     .filter((item) => item.lexical > 0)
     .sort((a, b) => b.score - a.score || b.note.updatedAt - a.note.updatedAt)
     .slice(0, Math.max(1, Math.min(20, Math.floor(Number(limit) || 8))))
@@ -197,7 +223,8 @@ export function memoryForPrompt(workspaceId, maxChars = 6000, query = '') {
   if (!notes.length) return '';
   const q = String(query || '');
   const queryTokens = tokenize(q);
-  const ranked = notes.map((note) => scoreNote(note, q, queryTokens));
+  const df = documentFrequency(notes);
+  const ranked = notes.map((note) => scoreNote(note, q, queryTokens, df, notes.length));
   const preferences = ranked
     .filter((item) => item.note.category === 'preference')
     .sort((a, b) => b.score - a.score)

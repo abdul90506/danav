@@ -88,3 +88,33 @@ test('memory deletion and clear remove only the selected workspace notes', async
     assert.ok(a.id);
   });
 });
+
+test('memory ranking: rare words and shared stems beat common ones', async () => {
+  await withDataDir(() => {
+    const ws = 'ws-rank';
+    addNote(ws, 'Run the tests with npm test before every commit.', { category: 'workflow', importance: 3 });
+    addNote(ws, 'Tests are also run in CI with npm test -- --coverage.', { category: 'workflow', importance: 3 });
+    addNote(ws, 'The tests folder has fixtures that take a minute to build.', { category: 'gotcha', importance: 3 });
+    addNote(ws, 'The session cookie is signed by src/auth/session.ts, not the legacy auth store.', { category: 'project', importance: 3, tags: ['auth'] });
+    addNote(ws, 'Deploys go through the release workflow in .github/workflows.', { category: 'workflow', importance: 3 });
+
+    // A rare, specific word must outrank a word that is everywhere.
+    const sessionNotes = searchNotes(ws, 'fix the session cookie', 3).map((n) => n.text);
+    assert.match(sessionNotes[0], /session cookie/);
+
+    // A shared stem still finds the note ("auth" -> authentication / auth store).
+    const authNotes = searchNotes(ws, 'auth store cleanup', 3).map((n) => n.text);
+    assert.ok(authNotes.some((t) => /legacy auth store/.test(t)), JSON.stringify(authNotes));
+
+    // A tag hit counts for more than an ordinary word.
+    const tagged = searchNotes(ws, 'auth', 5).map((n) => n.text);
+    assert.match(tagged[0], /legacy auth store/);
+
+    // Common words alone do not drag in unrelated notes.
+    assert.equal(searchNotes(ws, 'hello there friend', 5).length, 0);
+
+    // The prompt sees the same ranking.
+    const prompt = memoryForPrompt(ws, 6000, 'the session cookie is broken');
+    assert.match(prompt, /session cookie/);
+  });
+});
