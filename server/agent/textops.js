@@ -366,7 +366,28 @@ function tolerantMatch(textLines, needleLines, replace_all) {
  * models routinely lose leading tabs. Anything ambiguous or missing is an
  * error that tells the model exactly what to fix.
  */
-export function applyEdit(content, { old_string, new_string, replace_all = false } = {}) {
+/**
+ * A few lines around each place the text turned up, so an ambiguous match can be
+ * decided in one look instead of another read of the file. The model is told the
+ * 1-based position, because `occurrence` is the one-call fix.
+ */
+function candidateSnippets(text, positions, { context = 2, max = 5 } = {}) {
+  const lines = text.split('\n');
+  const lineOf = (index) => {
+    let line = 1;
+    for (let i = 0; i < index; i++) if (text.charCodeAt(i) === 10) line++;
+    return line;
+  };
+  return positions.slice(0, max).map((index, i) => {
+    const at = lineOf(index);
+    const from = Math.max(0, at - 1 - context);
+    const to = Math.min(lines.length, at + context);
+    const body = lines.slice(from, to).map((l, j) => `      ${i === 0 && j === 0 ? '' : ' '} ${String(from + j + 1).padStart(4)} | ${l.length > 120 ? `${l.slice(0, 119)}…` : l}`);
+    return `  occurrence ${i + 1}: line ${at}\n${body.join('\n')}`;
+  }).join('\n');
+}
+
+export function applyEdit(content, { old_string, new_string, replace_all = false, occurrence } = {}) {
   if (typeof old_string !== 'string' || typeof new_string !== 'string') {
     return fail('invalid', 'old_string and new_string must both be strings.');
   }
@@ -383,13 +404,23 @@ export function applyEdit(content, { old_string, new_string, replace_all = false
   const repl = new_string.replace(/\r\n/g, '\n');
   const restoreEol = (s) => (eol === '\r\n' ? s.replace(/\n/g, '\r\n') : s);
 
-  const idxs = allIndexesOf(text, needle);
+  let idxs = allIndexesOf(text, needle);
+  // `occurrence: 3` picks the third match — the recovery that costs one call, not
+  // another read of the file to copy more context from.
+  const wanted = Number.isInteger(occurrence) ? occurrence : undefined;
+  if (wanted !== undefined && idxs.length > 1) {
+    if (wanted < 1 || wanted > idxs.length) {
+      return fail('ambiguous', `occurrence=${wanted} is out of range: old_string matches ${idxs.length} places in this file.\n${candidateSnippets(text, idxs)}`);
+    }
+    idxs = [idxs[wanted - 1]];
+  }
   if (idxs.length > 1 && !replace_all) {
     const where = idxs.slice(0, 6).map((i) => lineAt(text, i)).join(', ');
     return fail(
       'ambiguous',
       `old_string matches ${idxs.length} places (lines ${where}${idxs.length > 6 ? ', …' : ''}). ` +
-        'Include more surrounding lines so it is unique, or set replace_all=true to change every occurrence.'
+        'Here they are — pick one with occurrence=N (1-based, from the top of the file), include more surrounding lines so it is unique, or set replace_all=true to change every occurrence.\n' +
+        candidateSnippets(text, idxs)
     );
   }
   if (idxs.length >= 1) {

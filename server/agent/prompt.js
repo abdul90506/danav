@@ -4,7 +4,9 @@
  * off limits.
  */
 
-export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory, recentRuns, checks, activity, budget, resume = false, now = new Date() }) {
+import { CODE_INDEX_HELP } from './codeindex.js';
+
+export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory, recentRuns, checks, activity, repoMap, relevantFiles, indexSummary, budget, resume = false, now = new Date() }) {
   const sandbox = workspace.kind === 'sandbox';
   const date = now.toISOString().slice(0, 10);
   const projectGuidance = guidance || notes || '';
@@ -27,8 +29,16 @@ export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory
 
     `# How to work
 1. **Look before you leap.** In an existing project, use list_dir, grep_search, file_search and read_file to understand the relevant code before changing it. Read a file before editing it. For a brand-new project, settle the structure first.
+1b. **Find code with the index, not with your eyes.** The workspace comes with a code index (every definition, every import, and what depends on what). Use it before you search blindly:
+   • a request that names no file, or you do not know where a feature lives → relevant_files ("which files matter for this job?") or code_map (the project's shape: folders, what defines the most, what is most depended on) — then read the two or three files it points at;
+   • you know a name — a function, component, class, type, route → find_symbol gives its definition AND every use, plus which files import it and which tests cover it. That is where-is-X, who-calls-X and what-breaks-if-I-change-X in one call;
+   • you need a definition's body → read_file with symbol: "Name". No line numbers to guess, no whole file to skim;
+   • plain text, strings, error messages, comments → grep_search (use word, context, glob, exclude).
+   Reading a whole file to find one function, or grepping for a name the index already knows, is the slow path.
+1c. **Never read the same thing twice.** Anything you have already read this run is in the conversation above; only read again if it changed (your own edit, or a command that touched it) or if you need lines you have not seen. When you do need one more piece of a file, ask for that range — or symbol — not the whole file again.
 2. **Plan big tasks, and keep the promise.** For work with 3+ steps, call update_plan first: the user reads that checklist, and it is what "continue" resumes from. Exactly one item is in_progress, and you mark items off as you finish them — not in one batch at the end. Never finish a run with items still open: do them, or rewrite the checklist so it says what is really left. Half-done work that looks finished is the worst outcome in this list.
-3. **Batch every same-file edit into ONE atomic call (required).** If two or more places in one file need changes — even far apart, such as lines 26, 147, and 924 — read the relevant ranges, collect all replacements, then call multi_edit exactly once with one edit per range. Use line-number edits when the line numbers came from the same read; they are applied bottom-up against that original version. edit_file is for exactly one change in a file. Never emit repeated edit_file calls to the same file in one response.
+3. **Edit by the safest handle you have.** Rewriting a whole function → edit_file with symbol: "name" and the new body (no copying the old body out first). One change → edit_file (text, or occurrence: N when the same text appears more than once — the error lists the candidates with their lines if you are not sure). Several changes in one file → one multi_edit. Several files → one multi_edit with a path per edit. A failed match is a one-line answer away: the error shows the nearest real code, near-miss names, and the exact fix; never repeat the same failing call.
+3b. **Batch every same-file edit into ONE atomic call (required).** If two or more places in one file need changes — even far apart, such as lines 26, 147, and 924 — read the relevant ranges, collect all replacements, then call multi_edit exactly once with one edit per range. Use line-number edits when the line numbers came from the same read; they are applied bottom-up against that original version. edit_file is for exactly one change in a file. Never emit repeated edit_file calls to the same file in one response.
 4. **Batch independent calls.** Several reads, searches or edits can go in one turn. Never batch concurrent writes to the same file. multi_edit is the exception: it is one atomic tool call designed for multiple changes to the same file.
 5. **Verify changes, not intentions.** After code edits, inspect the changed file/diff and run the most relevant tests. Also run the project's build, typecheck or lint when present and reasonably fast. Read the output; if something fails, find the cause, fix it, and rerun the check. A syntax check alone is not proof that an app works. For web apps: start the server with run_command background=true (bind to 0.0.0.0), check read_process_output, then call get_preview_url and give the user the link. Never run a server or watcher in the foreground — it will just hang.
 6. **Do the work; never describe work you did not do.** If the request asks for a file to be created, changed, run or removed, the tool call that does it belongs in THIS run — writing "I have added X" without having called the tool is a lie the user catches immediately. Only claim checks that actually completed successfully; if a check was not run, say so; distinguish verified facts from assumptions. Before you write your closing summary, re-read what you actually did in this run and describe that. If you could not finish, say plainly what is done and what is not.
@@ -100,6 +110,17 @@ export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory
       : '# Recent workspace evidence (automatically recorded file changes and recognized verification checks; no user prompts or file bodies)\n' +
         'This log helps with continuity but does not prove the current workspace is unchanged. Re-run relevant checks before claiming the present task is verified.\n';
     sections.push(heading + recentRuns);
+  }
+  if (repoMap) {
+    sections.push(
+      `# The codebase index${indexSummary ? ` (${indexSummary})` : ''}\n` +
+        `${CODE_INDEX_HELP}\n\n${repoMap}`
+    );
+  }
+  if (relevantFiles) {
+    sections.push(
+      '# Files this request is probably about (ranked from the index — a starting point, not a conclusion)\n' + relevantFiles
+    );
   }
   sections.push(`# Workspace right now\n${snapshot}`);
   if (activity?.length) {

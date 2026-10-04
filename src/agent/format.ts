@@ -275,6 +275,33 @@ function rawLabel(a: AgentAction): ActionLabel {
         meta: !live && r ? plural(r.count ?? 0, 'note') : undefined,
       });
 
+    case 'find_symbol': {
+      return base('Looking up', 'Looked up', {
+        target: args.name || args.pattern,
+        targetKind: 'text',
+        meta: !live && r ? `${r.definitions || 0} defined · ${r.references || 0} used in ${r.files || 0} file${r.files === 1 ? '' : 's'}` : undefined,
+        expandable: false,
+      });
+    }
+
+    case 'relevant_files': {
+      return base('Ranking files for', 'Ranked files for', {
+        target: args.query,
+        targetKind: 'text',
+        meta: !live && r ? `${r.count} file${r.count === 1 ? '' : 's'}` : undefined,
+        expandable: false,
+      });
+    }
+
+    case 'code_map': {
+      return base('Mapping', 'Mapped', {
+        target: args.path && args.path !== '.' ? args.path : 'the project',
+        targetKind: args.path && args.path !== '.' ? 'dir' : 'text',
+        meta: !live && r ? `${r.count} file${r.count === 1 ? '' : 's'}${r.symbols ? ` · ${r.symbols} definitions` : ''}` : undefined,
+        expandable: false,
+      });
+    }
+
     case 'file_outline':
       return base('Outlining', 'Outlined', {
         target: r?.path || args.path,
@@ -483,6 +510,9 @@ export function collectActivity(messages: Message[], max = 60): string[] {
 const TRAIL_KINDS: Record<string, string> = {
   read_file: 'analyze',
   file_outline: 'analyze',
+  find_symbol: 'analyze',
+  relevant_files: 'explore',
+  code_map: 'explore',
   list_dir: 'explore',
   file_search: 'explore',
   grep_search: 'explore',

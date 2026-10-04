@@ -155,6 +155,10 @@ export interface AgentActionResult {
   recovered?: boolean;
   /** Result of the syntax check run right after a write. */
   check?: { lang: string; ok: boolean; message?: string; path?: string };
+  /** Code-index answers: definitions/usages found, or files ranked. */
+  definitions?: number;
+  references?: number;
+  symbols?: number;
   command?: string;
   exitCode?: number | null;
   durationMs?: number;

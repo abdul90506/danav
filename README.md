@@ -133,6 +133,42 @@ An agent run is dozens of model turns, minutes of wall clock, and a context wind
 - **A long file is written in parts.** A write cut off by the output limit keeps every complete line, tells the model the line the file now ends at and says to continue with `append_file` — so a file of any length is built from parts without a single line repeated.
 - **The checklist is finished, not abandoned.** A run that has set itself a checklist does not get to end with items still open: the model is handed its own open items back once — silently, in the transcript only — and asked to do them, mark them off, or rewrite the list so it says what is really left, before the closing summary is accepted. A stale list is the model's to fix, and the question is only asked while there is real budget left.
 - **Continue picks the run up as if it had never paused.** A run that hits a limit (or is stopped by you) ends with a plain Continue button under the work line — and typing "continue", "carry on" or "aage karo" does the same thing. Either way the same turn carries on in place: no new user bubble, no second assistant message, and the work line keeps reporting the whole job (both halves' time, actions and changed files added together). What the model is given is the point: its own actions from the stopped run are put back into its own message in its own voice ("[my work on this task so far — already done, not to be repeated:]"), the plan, changed files and checks arrive as "what you already did on this task", and the request says nothing else. No "you were stopped", no "resume from step one", no retelling of the task — a model told it was interrupted re-checks everything; a model that simply carries on does the next step.
+### The code index: the agent arrives knowing the project
+
+A coding agent that starts every task by grepping for a name it could have looked up
+spends the run — and the user's money — on finding things. So the workspace is
+indexed before the prompt is written: one listing plus **one search** over the whole
+project (not one read per file, which is what makes this cheap inside a cloud
+sandbox too) yields every definition, every import, and a graph of who depends on
+whom. It is cached per workspace, patched in place by the agent's own writes, and
+marked old by any shell command that could have moved a file.
+
+What that buys, in the agent's own tools:
+
+| Tool | The question it answers |
+| --- | --- |
+| `code_map` | "What shape is this project?" — folders, what defines the most, what is depended on most. One call instead of listing and reading folders. |
+| `find_symbol` | "Where is X defined, who uses it, what breaks if I change it?" — definition with its line and signature, every use grouped by file, the files that import it, and the tests that cover it. A half-remembered name still lands: near misses are listed, not hidden. |
+| `relevant_files` | "Which files matter for this job?" — plain words in, a ranked short list out (*"the theme toggle should remember the last choice"* → `src/theme.ts` first), each hit saying which words matched and which symbols live there. |
+| `read_file symbol:"name"` | The body of one function, component, class or method — no line numbers to guess, no file to skim, and the next definition is never swallowed. |
+| `edit_file symbol:"name"` | Rewrite that definition without copying its old body out first. |
+| `edit_file occurrence:N` | When the same text appears twice: the error lists every candidate with its surrounding lines, so one `occurrence` finishes the job instead of another read of the file. |
+| `grep_search` | Text, strings, error messages: grouped per file with counts, whole-word, with context lines, `glob`/`exclude` filters and paging. |
+
+Three habits come with it, and the prompt states them as rules: find code with the
+index instead of by reading whole files, never read the same thing twice in one run
+(a repeat full read comes back as "unchanged since you read it" instead of burning
+context a second time), and edit by the safest handle available — symbol, then
+`occurrence`, then text — with the failure messages carrying the fix rather than a
+bare complaint.
+
+Two bugs the index work surfaced and fixed in the agent itself: a run that hit its
+step or time limit used to die with a `ReferenceError` on the wrap-up path (the
+counter read `useTools` above its own declaration) instead of landing its work,
+writing the summary and offering Continue; and `server/data` housekeeping aside,
+test files — which quote every name in a codebase — no longer outrank the
+implementation they test in a ranked search or in the project map.
+
 - **It does what was asked — and reads the request charitably.** Typos, broken spelling, Roman Urdu mixed into English, half a sentence: the intent is worked out and acted on, without correcting the user or asking them to rephrase. Extra features, files and refactors nobody asked for are treated as bugs, not bonuses — anything else worth doing is one line at the end, not a surprise commit.
 - **It talks like a colleague, not a status ticker.** Most turns carry no message at all: the action rows already show every file read, check run and folder listed, and a sentence that just restates the row under it is noise. The prompt bans the progress formulas outright ("I am going to check X", "Now I will update Y", "Running a syntax check on W") and asks for a line only when the rows cannot say it: what a real change means for you, a check that failed, a decision the agent took — about 0–3 short lines for a whole run. A run that goes three turns without a word and no visible progress is asked once for a line about where the work stands (twice at the very most, and never an announcement of the next tool call). A run that would end in silence is asked for the closing summary instead. That summary is the last message: what changed, which checks passed or failed, and how to run or see it — short by default, with a longer explanation only when you ask for one. It is told to write that summary directly — a report followed by a shorter version of the same thing is exactly what not to do. Ask for a report, a walkthrough or a deep dive and the answer stays as long as you want.
 - **One expanded thing at a time.** A thought, an action row's detail and a web tool's output all follow the same rule: opening one closes whichever was open before it, and a click anywhere else (or Escape) closes it too — a long transcript never becomes a column of half-open boxes.

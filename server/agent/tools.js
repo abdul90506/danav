@@ -13,12 +13,16 @@ import dns from 'node:dns/promises';
 import path from 'node:path';
 import net from 'node:net';
 import { applyAnyEdits, applyEdit, diffSummary, numberLines, splitLines, stripLineNumberPrefix } from './textops.js';
-import { formatOutline, outline } from './outline.js';
+import { formatOutline, languageOf, outline } from './outline.js';
 import { checkSyntax, syntaxWarning } from './check.js';
 import { addNote, readNotes, removeNotes, searchNotes } from './memory.js';
 import { movingTargets, observeFile, observeListing, observeOwned, observeShellMove } from './policy.js';
 import { peekPartialArgs, salvageWrite, extractStringFields, repairJsonText } from './partial.js';
 import { limits } from './config.js';
+import {
+  cachedIndex, definitionOf, dependentsOf, fastHash, findDefinitions, getIndex, isTestFile,
+  markIndexStale, patchCachedIndex, rankFiles, renderRelevantFiles, renderRepoMap, testsFor,
+} from './codeindex.js';
 import { WorkspaceError } from './workspaces/base.js';
 import { formatBytes, truncateMiddle } from './util.js';
 
@@ -81,6 +85,18 @@ const clampInt = (v, min, max, fallback) => {
 };
 
 const asBool = (v) => v === true || v === 'true' || v === 1;
+
+/** A simple glob (test files, docs, a folder tree) as a regular expression. */
+function globToRe(glob) {
+  const g = String(glob || '').trim();
+  if (!g) return null;
+  const escaped = g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '(?:.*/)?').replace(/\?/g, '[^/]');
+  try {
+    return new RegExp(`(?:^|/)${escaped}$|^${escaped}$`);
+  } catch {
+    return null;
+  }
+}
 
 function isSensitiveAgentPath(value) {
   const normalized = String(value || '').replace(/\\/g, '/').replace(/^\.\//, '');
@@ -336,6 +352,10 @@ export const TOOL_DEFINITIONS = [
         description: 'Several chunks in ONE call, e.g. [[1,60],[200,260]]. Overlapping chunks are merged. Overrides start_line/end_line.',
         items: { type: 'array', items: { type: 'integer' } },
       },
+      symbol: {
+        type: 'string',
+        description: 'Read one definition by NAME (a function, component, class or method) — jumps straight to it and returns its whole body, no line numbers to guess. Near-misses are listed if the name is not found.',
+      },
     },
     ['path']
   ),
@@ -365,8 +385,10 @@ export const TOOL_DEFINITIONS = [
       old_string: { type: 'string', description: 'Exact text to find.' },
       new_string: { type: 'string', description: 'Text to put in its place.' },
       replace_all: { type: 'boolean', description: 'Replace every occurrence. Default false.' },
+      occurrence: { type: 'integer', description: 'When the text appears more than once: which one to change, 1-based, counted from the top of the file. The error message lists the candidates with their context, so this is one call away.' },
+      symbol: { type: 'string', description: 'Replace a whole definition by name: old_string/new_string are then not needed — the named function/component/class/method is swapped for new_string. Use it for rewriting a function without copying its body out first.' },
     },
-    ['path', 'old_string', 'new_string']
+    ['path', 'new_string']
   ),
   fn(
     'multi_edit',
@@ -387,6 +409,8 @@ export const TOOL_DEFINITIONS = [
             old_string: { type: 'string' },
             new_string: { type: 'string' },
             replace_all: { type: 'boolean' },
+            occurrence: { type: 'integer' },
+            symbol: { type: 'string' },
             start_line: { type: 'integer' },
             end_line: { type: 'integer' },
             insert_after_line: { type: 'integer' },
@@ -399,13 +423,17 @@ export const TOOL_DEFINITIONS = [
   ),
   fn(
     'grep_search',
-    'Search file CONTENTS with a regular expression. Returns `file:line: text`. Skips node_modules, .git, build output and binary files. Use glob (e.g. "*.tsx") to narrow by file name.',
+    'Search file CONTENTS with a regular expression. Results are grouped by file with a count per file. Skips node_modules, .git, build output and binary files. For a bare name use find_symbol instead — it is exact and cheap. Use this for text, strings, error messages, patterns, and comments.',
     {
       pattern: { type: 'string', description: 'Regular expression.' },
       path: { ...P.path, description: 'File or folder to search. Default: workspace root.' },
       glob: { type: 'string', description: 'Only files whose name/path matches, e.g. "*.js" or "src/**/*.ts".' },
+      exclude: { type: 'string', description: 'Skip files matching this glob, e.g. "*.test.ts" or "docs/*".' },
       case_insensitive: { type: 'boolean' },
+      word: { type: 'boolean', description: 'Match whole words only (so "get" does not match "budget").' },
+      context: { type: 'integer', description: '0–4: show this many lines before and after each hit. Default 0.' },
       max_results: { type: 'integer', description: 'Default 100, max 300.' },
+      offset: { type: 'integer', description: 'Skip this many matches — page through a big result set instead of narrowing blindly.' },
     },
     ['pattern']
   ),
@@ -414,6 +442,36 @@ export const TOOL_DEFINITIONS = [
     'Find files by NAME. pattern is a glob ("src/**/*.test.ts", "*.css") or a case-insensitive substring of the path.',
     { pattern: { type: 'string' }, path: { ...P.path, description: 'Folder to search. Default: workspace root.' }, max_results: { type: 'integer' } },
     ['pattern']
+  ),
+  fn(
+    'code_map',
+    'The shape of the project as an index: folders, which files define the most, and which files are depended on by the most others. Call this ONCE at the start of work in an unfamiliar codebase — it is cheaper than listing and reading folders, and it says where the code actually lives. Pass a folder to zoom into one part.',
+    {
+      path: { ...P.path, description: 'Folder to describe. Default: the whole workspace.' },
+      limit: { type: 'integer', description: 'How many lines per section. Default 24.' },
+    },
+    []
+  ),
+  fn(
+    'find_symbol',
+    'Look a NAME up in the code index: where it is DEFINED (file, line, signature) and where it is USED. Use this instead of grepping for a function, component, class, type or route name — it answers "where is X?", "who calls X?" and "what breaks if I change X?" in one call, including the test files that cover it. Near-misses are listed when there is no exact definition, so a half-remembered name still lands.',
+    {
+      name: { type: 'string', description: 'Symbol name, e.g. "createPanelStore" or "AuthProvider".' },
+      kind: { type: 'string', description: 'Optional: function, class, component, type, route, test, const.' },
+      mode: { type: 'string', description: '"definitions" (default), "references", or "all".' },
+      path: { ...P.path, description: 'Limit the reference search to this folder or file. Default: whole workspace.' },
+      max_results: { type: 'integer', description: 'Default 20, max 100.' },
+    },
+    ['name']
+  ),
+  fn(
+    'relevant_files',
+    'Which files matter for what you are about to do? Describe the job in your own words ("where is the theme toggle handled", "the agent retry logic", "the login form") and the index ranks the files — paths, their key symbols, how depended-upon they are. Use it when the request names no file, or when you are unsure where a feature lives.',
+    {
+      query: { type: 'string', description: 'What you are looking for, in plain words.' },
+      limit: { type: 'integer', description: 'Default 8, max 20.' },
+    },
+    ['query']
   ),
   fn(
     'replace_in_files',
@@ -579,6 +637,9 @@ const HOUSEKEEPING_INTENT = [
   { re: /^(ls|list|dir|list_files|list_directory|tree)$/i, tool: 'list_dir', command: null, why: 'listing a folder is list_dir' },
   { re: /^(grep|ripgrep|search|search_files|find_in_files)$/i, tool: 'grep_search', command: null, why: 'searching file contents is grep_search' },
   { re: /^(find|find_file|locate|glob)$/i, tool: 'file_search', command: null, why: 'finding a file by name is file_search' },
+  { re: /^(search_symbols?|symbol_search|find_definition|goto_definition|go_to_definition|def|definition|find_references|references|usages|callers|who_calls|find_usages|impact)$/i, tool: 'find_symbol', command: null, why: 'definitions and uses of a name are find_symbol — it reads the code index, so it is exact' },
+  { re: /^(repo_map|project_map|overview|summarize_repo|summarise_repo|architecture|project_overview|explore|list_symbols)$/i, tool: 'code_map', command: null, why: 'the project\'s shape and its definitions are code_map' },
+  { re: /^(relevant|relevant_code|search_code|semantic_search|where_is|locate_code|find_relevant)$/i, tool: 'relevant_files', command: null, why: 'asking which files matter is relevant_files' },
   { re: /^(bash|shell|exec|execute|run|run_shell|terminal|sh|powershell|command)$/i, tool: 'run_command', command: null, why: 'running a command is run_command' },
   { re: /^(save_file|create_file|new_file|touch|write|add_file)$/i, tool: 'write_file', command: null, why: 'writing a file is write_file' },
   { re: /^(patch|modify_file|update_file|replace|substitute)$/i, tool: 'edit_file', command: null, why: 'changing an existing file is edit_file or multi_edit' },
@@ -624,8 +685,8 @@ function editDistance(a, b) {
 }
 
 export const READ_ONLY_TOOLS = new Set([
-  'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'list_processes', 'read_process_output', 'web_search', 'fetch_url', 'search_memory',
-  'image_search', 'delegate_task',
+  'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'code_map', 'find_symbol', 'relevant_files',
+  'list_processes', 'read_process_output', 'web_search', 'fetch_url', 'search_memory', 'image_search', 'delegate_task',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -656,6 +717,9 @@ export function displayArgs(name, rawArgs) {
     case 'edit_file':
     case 'grep_search': pick.pattern = s('pattern'); pick.path = s('path'); pick.glob = s('glob'); break;
     case 'file_search': pick.pattern = s('pattern'); pick.path = s('path'); break;
+    case 'code_map': pick.path = s('path'); break;
+    case 'find_symbol': pick.pattern = s('name'); pick.path = s('path'); break;
+    case 'relevant_files': pick.pattern = s('query'); break;
     case 'run_command': pick.command = s('command', 600); pick.cwd = s('cwd'); pick.background = asBool(a.background) || undefined; break;
     case 'read_process_output':
     case 'stop_process': pick.id = s('id'); break;
@@ -760,6 +824,132 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
     if (!hint) return err;
     const message = `${err?.message || String(err)}${hint}`;
     return err instanceof WorkspaceError ? new WorkspaceError(message, err.code) : new ToolError(message);
+  };
+
+  // ------------------------------------------------------------- code index
+  /**
+   * The index, or null. Never builds one for a tool that does not need it, and
+   * never lets a broken index turn a working tool call into a failure: an agent
+   * without an index is the old agent, which was slow but not wrong.
+   */
+  const indexOrNull = async () => {
+    try {
+      return await getIndex(ws);
+    } catch {
+      return null;
+    }
+  };
+
+  /** Keep a loaded index current with a file we just wrote. Cheap: no scan. */
+  const noteIndexWrite = (abs, text) => {
+    try {
+      patchCachedIndex(ws.id, rel(abs), text);
+    } catch {
+      /* the cache is an optimisation, never a requirement */
+    }
+  };
+
+  /**
+   * What the file you just changed is wired to: who imports it and which tests
+   * cover it. One short line, only when it is worth acting on — it is the
+   * difference between "the edit applied" and "you have just changed something
+   * four other files depend on".
+   */
+  const relatedNote = async (abs) => {
+    const index = cachedIndex(ws.id);
+    if (!index) return '';
+    const file = rel(abs);
+    let deps = [];
+    let tests = [];
+    try {
+      deps = dependentsOf(index, file);
+      // Only tests that really import this file are called tests for it; the
+      // folder fallback is offered separately, as what it is.
+      tests = testsFor(index, file, { strict: true });
+    } catch {
+      return '';
+    }
+    const bits = [];
+    if (deps.length) bits.push(`${deps.length} file${deps.length === 1 ? '' : 's'} import it (${deps.slice(0, 3).join(', ')}${deps.length > 3 ? ', …' : ''})`);
+    if (tests.length) bits.push(`tests: ${tests.slice(0, 3).join(', ')}`);
+    if (!bits.length) return '';
+    return `\n[${file}: ${bits.join('; ')} — re-run what covers this if the change touches shared behaviour.]`;
+  };
+
+  /** A definition's name as the outline sees it, for read_file/edit_file symbol=. */
+  const symbolNameOf = (symbol, lang) => {
+    const def = definitionOf(symbol.text, lang);
+    if (def?.name) return def.name;
+    // A method has no keyword: "sendMessage(text) {" — the identifier before "(".
+    const m = /([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/.exec(symbol.text || '');
+    return m ? m[1] : null;
+  };
+
+  /** Braces and strings, minus strings/comments — enough to find where a body ends. */
+  const stripNoise = (line) =>
+    String(line)
+      .replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, '""')
+      .replace(/\/\/.*$/, '')
+      .replace(/\/\*.*?\*\//g, '');
+
+  /**
+   * The lines a definition occupies.
+   *
+   * Braces when there are braces, indentation when there are not (Python), and
+   * the next definition as the backstop — so `read_file {symbol}` and whole-symbol
+   * replacement always get the complete body and never eat the function below it.
+   */
+  const symbolBlock = (lines, lang, startIdx, nextIdx) => {
+    const cap = Math.min(nextIdx ?? lines.length, lines.length);
+    if (lang === 'python' || lang === 'yaml') {
+      const ind = (l) => l.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
+      const base = ind(lines[startIdx] || '');
+      let end = startIdx;
+      for (let i = startIdx + 1; i < cap; i++) {
+        if (!lines[i].trim()) continue;
+        if (ind(lines[i]) <= base) break;
+        end = i;
+      }
+      return end;
+    }
+    let depth = 0;
+    let opened = false;
+    for (let i = startIdx; i < cap; i++) {
+      for (const ch of stripNoise(lines[i])) {
+        if (ch === '{') { depth += 1; opened = true; } else if (ch === '}') depth -= 1;
+      }
+      if (opened && depth <= 0) return i;
+    }
+    return Math.max(startIdx, cap - 1);
+  };
+
+  /** Locate a symbol by name in one file's text: exact first, then near misses. */
+  const locateSymbol = (text, filePath, query) => {
+    const lang = languageOf(filePath);
+    const lines = splitLines(text);
+    const o = outline(text, filePath);
+    const named = o.symbols.map((s, i) => ({ ...s, name: symbolNameOf(s, lang), index: i }));
+    const want = String(query || '').trim().toLowerCase();
+    const scored = named
+      .map((s) => {
+        const n = (s.name || '').toLowerCase();
+        if (!n) return null;
+        const rank = n === want ? 0 : n.startsWith(want) ? 1 : n.includes(want) || want.includes(n) ? 2 : -1;
+        return rank < 0 ? null : { ...s, rank };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.rank - b.rank || a.line - b.line);
+    if (!scored.length) {
+      return { found: null, candidates: named.filter((s) => s.name).slice(0, 12).map((s) => `${s.name} (L${s.line})`) };
+    }
+    const hit = scored[0];
+    const next = named.find((s) => s.line > hit.line && (s.depth ?? 0) <= (hit.depth ?? 0));
+    const start = hit.line - 1;
+    const end = symbolBlock(lines, lang, start, next ? next.line - 1 : undefined);
+    return {
+      found: { name: hit.name || query, line: hit.line, endLine: end + 1, kind: hit.kind, text: lines.slice(start, end + 1).join('\n'), exact: hit.rank === 0 },
+      candidates: scored.slice(1, 6).filter((s) => s.rank > 0).map((s) => `${s.name} (L${s.line})`),
+    };
   };
 
   const noteChange = (ctx, path, added, removed) => {
@@ -992,6 +1182,24 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       observeFile(ctx.state, abs);
       const lines = splitLines(r.text);
       const total = lines.length;
+
+      // One definition by name: no line numbers to guess, no whole file to skim.
+      const wantSymbol = optStr(args, 'symbol');
+      if (wantSymbol) {
+        const found = locateSymbol(r.text, rel(abs), wantSymbol);
+        if (!found.found) {
+          throw new ToolError(
+            `${rel(abs)} has no definition matching "${wantSymbol}"${found.candidates.length ? `. Definitions in this file: ${found.candidates.join(', ')}` : ' (no definitions could be detected in it — read it with start_line/end_line, or file_outline for its structure)'}.`
+          );
+        }
+        const s = found.found;
+        const body = lines.slice(s.line - 1, s.endLine);
+        const near = found.candidates.length ? `\n[near matches: ${found.candidates.join(', ')}]` : '';
+        return {
+          output: safe(`${rel(abs)} — ${s.kind || 'definition'} \`${s.name}\` (lines ${s.line}-${s.endLine} of ${total})${s.exact ? '' : ' [closest match]'}\n${numberLines(body, s.line)}${near}`),
+          ui: { kind: 'read', path: rel(abs), startLine: s.line, endLine: s.endLine, totalLines: total, symbol: s.name },
+        };
+      }
       if (total === 0) {
         return { output: `${rel(abs)} is empty.`, ui: { kind: 'read', path: rel(abs), startLine: 0, endLine: 0, totalLines: 0 } };
       }
@@ -1023,6 +1231,32 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const body = shown.map(([a0, b0]) => (many ? `── lines ${a0}-${b0} ──\n` : '') + numberLines(lines.slice(a0 - 1, b0), a0)).join('\n\n');
       const first = shown[0][0];
       const last = shown[shown.length - 1][1];
+      /**
+       * The same read twice in one run is pure waste — the text is already above in
+       * the conversation. Once per file, an identical full read comes back as a note
+       * instead; the second time it is asked for, the content is returned, because a
+       * model that insists usually has a reason this shortcut cannot see.
+       */
+      const wholeFile = !many && first === 1 && last >= total;
+      const log = (ctx.state.readLog ||= new Map());
+      const previous = log.get(abs);
+      const hash = fastHash(r.text);
+      const repeat = Boolean(wholeFile && previous && previous.hash === hash && previous.full);
+      const stub = repeat && !previous.reminded;
+      if (previous) {
+        previous.hash = hash;
+        previous.full = previous.full || wholeFile;
+        previous.reminded = previous.reminded || stub;
+        previous.step = previous.step;
+      } else {
+        log.set(abs, { hash, full: wholeFile, reminded: stub });
+      }
+      if (stub) {
+        return {
+          output: safe(`${rel(abs)} is unchanged since you read it in this run (${total} lines) — the text is already in the conversation above; re-reading it would only cost context. Ask for the lines you need again if they are far up: read_file range, or read_file symbol="Name" for one definition.`),
+          ui: { kind: 'read', path: rel(abs), startLine: 1, endLine: total, totalLines: total, repeated: true },
+        };
+      }
       const truncated = !many && last < total && args.end_line === undefined;
       const header = many ? `${rel(abs)} — ${total} lines; ${shown.length} chunks: ${shown.map(([a0, b0]) => `${a0}-${b0}`).join(', ')}` : `${rel(abs)} — lines ${first}-${last} of ${total}`;
       const footer = truncated ? `\n[${total - last} more lines. Continue with read_file start_line=${last + 1}, or call file_outline to jump straight to what you need.]` : '';
@@ -1084,7 +1318,10 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         ui: { kind: 'write', path: rel(abs), created: !existed, added: d.added, removed: d.removed, totalLines: d.totalLines, hunks: trimHunks(d.hunks) },
       };
       if (args._partial) res.ui.partial = true; // rescued from a call that was cut off: the file is not finished, so don't judge it yet
-      return verify(res, abs, content, { skip: Boolean(args._partial) });
+      noteIndexWrite(abs, content);
+      const written = await verify(res, abs, content, { skip: Boolean(args._partial) });
+      if (existed) written.output += await relatedNote(abs);
+      return written;
     },
 
     async append_file(args, ctx) {
@@ -1110,6 +1347,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         ui: { kind: 'append', path: rel(abs), created: !exists, added: d.added, removed: d.removed, totalLines: d.totalLines, hunks: trimHunks(d.hunks) },
       };
       if (args._partial) res.ui.partial = true;
+      noteIndexWrite(abs, next);
       return verify(res, abs, next, { skip: Boolean(args._partial) });
     },
 
@@ -1127,9 +1365,37 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
           new_string = stripLineNumberPrefix(String(new_string ?? '')).text;
         }
       }
-      const r = applyEdit(text, { old_string, new_string, replace_all: asBool(args.replace_all) });
+      /**
+       * Whole-definition replacement: `symbol: "renderRepoMap"` and the new body.
+       * The extent comes from the file itself, so the model never has to reproduce
+       * a function it is about to replace — and never half-matches one.
+       */
+      const wantSymbol = optStr(args, 'symbol');
+      if (wantSymbol && typeof args.old_string !== 'string') {
+        if (typeof new_string !== 'string') throw new ToolError('Missing required argument "new_string" (string) — the replacement text.');
+        const at = locateSymbol(text, rel(abs), wantSymbol);
+        if (!at.found) {
+          throw new ToolError(`${rel(abs)} has no definition matching "${wantSymbol}"${at.candidates.length ? `. Definitions in this file: ${at.candidates.join(', ')}` : ''}.`);
+        }
+        const s = at.found;
+        const out = applyAnyEdits(text, [{ start_line: s.line, end_line: s.endLine, new_string }]);
+        if (!out.ok) throw new ToolError(out.error);
+        await ws.writeText(abs, out.content);
+        noteIndexWrite(abs, out.content);
+        const res = await summarizeEdits([{ abs, old: text, next: out.content, replacements: 1, note: `replaced ${s.kind || 'definition'} ${s.name} (L${s.line}–L${s.endLine})` }], ctx);
+        await verify(res, abs, out.content);
+        res.output = `${res.output}${await relatedNote(abs)}`;
+        return res;
+      }
+      const r = applyEdit(text, {
+        old_string,
+        new_string,
+        replace_all: asBool(args.replace_all) || asBool(args.all),
+        occurrence: args.occurrence !== undefined ? clampInt(args.occurrence, 1, 100_000, undefined) : undefined,
+      });
       if (!r.ok) throw new ToolError(r.error);
       await ws.writeText(abs, r.content);
+      noteIndexWrite(abs, r.content);
       const res = await summarizeEdits([{ abs, old: text, next: r.content, replacements: r.replacements, note: r.note }], ctx);
       await verify(res, abs, r.content);
 
@@ -1140,6 +1406,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       if (n >= 2) {
         res.output += `\nTip: that was separate edit_file call #${n} on ${rel(abs)}. Next time batch them — multi_edit applies MANY edits in ONE call (several places in a file by text or by line numbers, even several files).`;
       }
+      res.output += await relatedNote(abs);
       return res;
     },
 
@@ -1163,18 +1430,34 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
 
       // compute EVERYTHING first: if one edit cannot be applied, nothing is written anywhere
       const plans = [];
+      const notes = [];
       for (const [abs, list] of groups) {
         const { exists, text } = await readExisting(abs);
         if (!exists) throw new ToolError(`${rel(abs)} does not exist. Use write_file to create it.`);
+        // A whole-definition edit inside multi_edit: the extent is worked out here.
+        for (const e of list) {
+          if (e && typeof e === 'object' && optStr(e, 'symbol') && typeof e.old_string !== 'string' && e.start_line === undefined && e.end_line === undefined) {
+            const at = locateSymbol(text, rel(abs), String(e.symbol));
+            if (!at.found) throw new ToolError(`${rel(abs)} has no definition matching "${e.symbol}"${at.candidates.length ? `. Definitions: ${at.candidates.join(', ')}` : ''}.`);
+            e.start_line = at.found.line;
+            e.end_line = at.found.endLine;
+          }
+        }
         const r = applyAnyEdits(text, list);
         if (!r.ok) throw new ToolError(groups.size > 1 ? `${rel(abs)}: ${r.error}` : r.error);
         plans.push({ abs, old: text, next: r.content, edits: list.length, replacements: r.replacements, note: r.notes?.join(' ') });
       }
       for (const pl of plans) {
         await ws.writeText(pl.abs, pl.next);
+        noteIndexWrite(pl.abs, pl.next);
         ctx.state.singleEdits?.delete(pl.abs);
       }
+      for (const pl of plans) {
+        const note = await relatedNote(pl.abs);
+        if (note) notes.push(note.trim());
+      }
       const res = await summarizeEdits(plans, ctx);
+      if (notes.length) res.output += `\n${notes.slice(0, 3).join('\n')}`;
       for (const pl of plans) {
         const before = res.ui.check;
         await verify(res, pl.abs, pl.next);
@@ -1187,19 +1470,74 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const pattern = reqStr(args, 'pattern');
       const abs = await target(optStr(args, 'path') || '.');
       const max = clampInt(args.max_results, 1, 300, 100);
-      const { matches, truncated, literal } = await ws.grep({ pattern, path: abs, glob: optStr(args, 'glob'), ignoreCase: asBool(args.case_insensitive), maxResults: max });
-      const files = new Set(matches.map((m) => m.path));
+      const offset = clampInt(args.offset, 0, 10_000, 0);
+      const ignoreCase = asBool(args.case_insensitive);
+      const wantWord = asBool(args.word);
+      const exclude = optStr(args, 'exclude');
+      const context = clampInt(args.context, 0, 4, 0);
+      const identifier = /^[A-Za-z_$][\w$]*$/.test(pattern);
+      // A whole-word search for a bare name can be expressed in the search itself
+      // (one walk, correct truncation); anything else is filtered afterwards.
+      const effective = wantWord && identifier ? `\\b${pattern}\\b` : pattern;
+      const raw = await ws.grep({ pattern: effective, path: abs, glob: optStr(args, 'glob'), ignoreCase, maxResults: offset + max + 1 });
+      const literal = raw.literal;
+      let matches = raw.matches || [];
+      let wordFiltered = 0;
+      if (wantWord && !identifier) {
+        let re = null;
+        try { re = new RegExp(`(?:^|[^\\w$])(?:${pattern})(?:[^\\w$]|$)`, ignoreCase ? 'i' : ''); } catch { re = null; }
+        if (re) {
+          const before = matches.length;
+          matches = matches.filter((m) => re.test(m.text));
+          wordFiltered = before - matches.length;
+        }
+      }
+      if (exclude) {
+        const re = globToRe(exclude);
+        if (re) matches = matches.filter((m) => !re.test(m.path));
+      }
+      const page = matches.slice(offset, offset + max);
+      const truncated = raw.truncated || matches.length > offset + max;
+      const byFile = new Map();
+      for (const m of page) byFile.set(m.path, (byFile.get(m.path) || 0) + 1);
+
+      // Context lines: read only the files that matched, once each.
+      let bodies = null;
+      if (context > 0 && page.length && page.length <= 150) {
+        bodies = new Map();
+        for (const file of byFile.keys()) {
+          try {
+            const r = await ws.readText(await target(file));
+            if (!r.binary) bodies.set(file, splitLines(r.text));
+          } catch {
+            /* a file that vanished between the search and the read just has no context */
+          }
+        }
+      }
+      const lines = [];
+      for (const m of page) {
+        const body = bodies?.get(m.path);
+        if (body) {
+          for (let i = Math.max(1, m.line - context); i < m.line; i++) lines.push(`${m.path}:${i}| ${body[i - 1] ?? ''}`);
+        }
+        lines.push(`${m.path}:${m.line}: ${m.text}`);
+        if (body) {
+          for (let i = m.line + 1; i <= Math.min(body.length, m.line + context); i++) lines.push(`${m.path}:${i}| ${body[i - 1] ?? ''}`);
+        }
+      }
       const asLiteral = literal
         ? `\n(the pattern is not a valid regular expression, so its characters were matched literally — escape the special ones to search as a regex)`
         : '';
-      const found = matches.length
-        ? `${matches.length}${truncated ? '+' : ''} match${matches.length === 1 ? '' : 'es'} in ${files.size} file${files.size === 1 ? '' : 's'}:\n` +
-          matches.map((m) => `${m.path}:${m.line}: ${m.text}`).join('\n') +
-          (truncated ? '\n… (limit reached; narrow the pattern, path or glob)' : '') +
+      const summary = [...byFile.entries()].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} (${n})`).join(', ');
+      const shown = offset ? `matches ${offset + 1}–${offset + page.length} of ${matches.length}${truncated ? '+' : ''}` : `${page.length}${truncated ? '+' : ''} match${page.length === 1 ? '' : 'es'}`;
+      const found = page.length
+        ? `${shown} in ${byFile.size} file${byFile.size === 1 ? '' : 's'}${summary ? `: ${summary}` : ''}\n` +
+          lines.join('\n') +
+          (truncated ? `\n… (more matches; narrow the pattern, path or glob${offset ? ', or ask for offset=' + (offset + max) : `, or page with offset=${page.length}`})` : '') +
+          (wordFiltered ? `\n(${wordFiltered} partial-word hits were dropped by word=true)` : '') +
           asLiteral
-        : `No matches for ${literal ? 'the literal text' : 'the pattern'} \`${pattern}\` in ${rel(abs)}.${asLiteral}`;
-      const out = found;
-      return { output: safe(out), ui: { kind: 'grep', pattern: clip(pattern, 120), count: matches.length, files: files.size, truncated } };
+        : `No matches for ${literal ? 'the literal text' : 'the pattern'} \`${pattern}\` in ${rel(abs)}.${raw.truncated ? ' (the search hit its own limit before finishing — try a narrower path or glob)' : ''}${asLiteral}`;
+      return { output: safe(found), ui: { kind: 'grep', pattern: clip(pattern, 120), count: page.length, files: byFile.size, truncated } };
     },
 
     async file_search(args) {
@@ -1213,8 +1551,157 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       };
     },
 
+    // ------------------------------------------------------------- the index
+    async code_map(args) {
+      const index = await indexOrNull();
+      if (!index || !Object.keys(index.files || {}).length) {
+        throw new ToolError('No code index is available for this workspace (it may be empty, or nothing readable in it). Use list_dir and file_search instead.');
+      }
+      const scope = (optStr(args, 'path') || '').trim().replace(/^\.\//, '').replace(/\/+$/, '');
+      const limit = clampInt(args.limit, 4, 60, 24);
+      if (scope && scope !== '.') {
+        const prefix = `${scope}/`;
+        const files = Object.values(index.files).filter((f) => f.path.startsWith(prefix) || f.path === scope);
+        if (!files.length) throw new ToolError(`Nothing is indexed under "${scope}". Try code_map without a path for the whole project, or file_search for the name.`);
+        const symbols = files.reduce((n, f) => n + f.symbols.length, 0);
+        const rows = files
+          .filter((f) => f.symbols.length || (index.reverse?.[f.path] || []).length)
+          .slice(0, limit)
+          .map((f) => {
+            const deps = (index.reverse?.[f.path] || []).length;
+            const names = f.symbols.slice(0, 6).map((s) => `${s.name} (L${s.line})`).join(', ');
+            return `  ${f.path}${names ? ` — ${names}` : ''}${f.symbols.length > 6 ? `, +${f.symbols.length - 6} more` : ''}${deps ? ` · imported by ${deps}` : ''}`;
+          });
+        return {
+          output: safe(`${scope} — ${files.length} file${files.length === 1 ? '' : 's'}, ${symbols} definition${symbols === 1 ? '' : 's'}\n${rows.join('\n')}${rows.length < files.length ? `\n… (${files.length - rows.length} more files without definitions)` : ''}\n\nRead one file with read_file (symbol: "name" jumps straight to a definition).`),
+          ui: { kind: 'map', path: scope, count: files.length, symbols },
+        };
+      }
+      const map = renderRepoMap(index, { limit });
+      return { output: safe(`${map}\n\nLook a name up with find_symbol; ask where a job lives with relevant_files; read one definition with read_file symbol="Name".`), ui: { kind: 'map', path: '.', count: Object.keys(index.files).length, symbols: Object.values(index.files).reduce((n, f) => n + f.symbols.length, 0) } };
+    },
+
+    async find_symbol(args, ctx) {
+      const name = reqStr(args, 'name').trim();
+      const index = await indexOrNull();
+      const mode = (optStr(args, 'mode') || 'all').toLowerCase();
+      const kind = optStr(args, 'kind');
+      const max = clampInt(args.max_results, 1, 100, 20);
+      const wantRefs = mode !== 'definitions';
+      const wantDefs = mode !== 'references';
+
+      const defs = index ? findDefinitions(index, name, { kind, limit: max }) : { results: [], exact: false, total: 0 };
+      const sections = [];
+      if (wantDefs && defs.results.length) {
+        const exact = defs.results.filter((d) => d.exact);
+        const near = defs.results.filter((d) => !d.exact);
+        const files = new Set(exact.length ? exact.map((d) => d.path) : defs.results.map((d) => d.path));
+        const head = exact.length
+          ? `Defined in ${files.size} file${files.size === 1 ? '' : 's'}:`
+          : `No exact match for \`${name}\` — closest definitions in the index:`;
+        const rows = (exact.length ? exact : near)
+          .map((d) => `  ${d.path}:${d.line} — ${d.kind} ${d.name}\n      ${d.text}`)
+          .join('\n');
+        const alsoNear = exact.length
+          ? near.filter((n) => !exact.some((e) => e.name === n.name)).slice(0, 4).map((n) => `${n.name} (${n.path}:${n.line})`)
+          : [];
+        sections.push(`${head}\n${rows}${alsoNear.length ? `\n  also close: ${alsoNear.join(', ')}` : ''}`);
+      } else if (wantDefs && !index) {
+        sections.push('(no code index is available; searching the text instead)');
+      } else if (wantDefs) {
+        sections.push(`No definition of \`${name}\` is in the index. Try relevant_files for the area, or grep_search for the text.`);
+      }
+
+      let refCount = 0;
+      let refFiles = 0;
+      if (wantRefs) {
+        const reName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const boundary = /^[A-Za-z_$][\w$]*$/.test(name) ? `\\b${reName}\\b` : reName;
+        const scope = optStr(args, 'path');
+        let refs = { matches: [], truncated: false };
+        try {
+          refs = await ws.grep({ pattern: boundary, path: scope ? await target(scope) : ws.root, maxResults: 300 });
+        } catch {
+          refs = { matches: [], truncated: false };
+        }
+        const defLines = new Set((defs.exactCount ? defs.results.filter((d) => d.exact) : defs.results).map((d) => `${d.path}:${d.line}`));
+        const byFile = new Map();
+        for (const m of refs.matches || []) {
+          if (defLines.has(`${m.path}:${m.line}`)) continue;
+          if (!byFile.has(m.path)) byFile.set(m.path, []);
+          byFile.get(m.path).push(m);
+        }
+        refCount = [...byFile.values()].reduce((n, l) => n + l.length, 0);
+        refFiles = byFile.size;
+        if (refCount) {
+          const rows = [...byFile.entries()]
+            .sort((a, b) => b[1].length - a[1].length)
+            .slice(0, max)
+            .map(([file, list]) => `  ${file} — ${list.length} use${list.length === 1 ? '' : 's'}: ${list.slice(0, 3).map((m) => `L${m.line}`).join(', ')}${list.length > 3 ? ', …' : ''}`);
+          sections.push(`Used in ${refFiles} file${refFiles === 1 ? '' : 's'} (${refCount} place${refCount === 1 ? '' : 's'})${refs.truncated ? '+' : ''}:\n${rows.join('\n')}${byFile.size > max ? `\n  … ${byFile.size - max} more files` : ''}`);
+        } else if (wantDefs && defs.results.length) {
+          sections.push(`No other uses of \`${name}\` were found${scope ? ` under ${scope}` : ''} — it looks unused elsewhere.`);
+        }
+      }
+
+      // What a change here would touch, and what would prove it still works.
+      if (index && defs.results.length) {
+        const file = defs.results[0].path;
+        const deps = dependentsOf(index, file).filter((p) => !p.includes('node_modules'));
+        const tests = testsFor(index, file, { strict: true });
+        const nearby = tests.length ? [] : testsFor(index, file);
+        const bits = [];
+        if (deps.length) bits.push(`imported by ${deps.length}: ${deps.slice(0, 5).join(', ')}${deps.length > 5 ? ', …' : ''}`);
+        if (tests.length) bits.push(`tests covering it: ${tests.join(', ')}`);
+        else if (nearby.length) bits.push(`no test imports it; test files in the same area: ${nearby.join(', ')}`);
+        if (bits.length) sections.push(`Impact of changing ${file}:\n  ${bits.join('\n  ')}`);
+      }
+
+      const out = sections.join('\n\n');
+      return {
+        output: safe(out || `Nothing found for \`${name}\`.`),
+        ui: { kind: 'symbol', name: clip(name, 80), definitions: defs.results.length, references: refCount, files: refFiles },
+      };
+    },
+
+    async relevant_files(args) {
+      const query = reqStr(args, 'query');
+      const index = await indexOrNull();
+      if (!index) throw new ToolError('No code index is available for this workspace. Use file_search or grep_search instead.');
+      const limit = clampInt(args.limit, 1, 20, 8);
+      const asksForTests = /\btest|spec\b/i.test(query);
+      const hits = rankFiles(index, query, {
+        limit,
+        // Tests are usually noise unless tests are what was asked for: they quote
+        // every name in the codebase, so without a real penalty they win by volume.
+        boost: (f) => (isTestFile(f) && !asksForTests ? 0.35 : 1),
+      });
+      if (!hits.length) {
+        const map = renderRepoMap(index);
+        return {
+          output: safe(`Nothing in the index matches "${query}". Here is the project's shape instead:\n${map}`),
+          ui: { kind: 'match', query: clip(query, 100), count: 0 },
+        };
+      }
+      const body = renderRelevantFiles(index, query, { limit });
+      const tests = [...new Set(hits.flatMap((h) => testsFor(index, h.path)))].slice(0, 4);
+      return {
+        output: safe(`Most relevant files for "${query}":\n${body}${tests.length ? `\n\nTests near these: ${tests.join(', ')}` : ''}\n\nRead what you need (read_file, symbol: "name" for one definition) before editing.`),
+        ui: { kind: 'match', query: clip(query, 100), count: hits.length },
+      };
+    },
+
     // --------------------------------------------------------------- commands
     async run_command(args, ctx) {
+      /**
+       * The shell is the agent's way to move, delete and generate files, and the
+       * index cannot see any of it. Anything that looks like it touches the tree
+       * marks the index as old; the next lookup rebuilds it (one listing and one
+       * search) instead of answering from a map of a project that is gone.
+       */
+      if (/\b(rm|mv|cp|mkdir|touch|git|npm|yarn|pnpm|npx|pip|make|cargo|sed|tee)\b/.test(String(args.command || ''))) {
+        try { markIndexStale(ws.id); } catch { /* the cache is best effort */ }
+      }
       const command = reqStr(args, 'command').trim();
       const background = asBool(args.background);
       const cwd = optStr(args, 'cwd') ? await target(args.cwd) : undefined;

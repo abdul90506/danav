@@ -12,6 +12,7 @@ import { requestApproval, cancelApprovalsFor } from './approvals.js';
 import { limits } from './config.js';
 import { LlmError, streamCompletion } from './llm.js';
 import { buildSystemPrompt, formatSnapshot } from './prompt.js';
+import { getIndex, primeIndex, renderRelevantFiles, renderRepoMap } from './codeindex.js';
 import { detectChecks, formatChecksHint } from './verify.js';
 import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun } from './journal.js';
@@ -805,8 +806,34 @@ export async function runAgent({
     } catch {
       /* detection is a courtesy; a workspace it cannot read is not a failure */
     }
+    /**
+     * The code index, built (or re-used) before the prompt is written.
+     *
+     * This is what turns "here is a folder listing, go find the code" into "here
+     * is the shape of the project and the files this request is probably about".
+     * It is also primed into the cache here, so the tools of this run — and the
+     * write tools patching it as they go — share one copy instead of each paying
+     * for a scan. A workspace where it cannot be built is simply the old agent.
+     */
+    let repoMap = '';
+    let relevantFiles = '';
+    let indexSummary = '';
+    try {
+      const index = await getIndex(workspace);
+      if (index && Object.keys(index.files || {}).length) {
+        primeIndex(workspace, index);
+        const files = Object.keys(index.files).length;
+        const symbols = Object.values(index.files).reduce((n, f) => n + (f.symbols?.length || 0), 0);
+        repoMap = renderRepoMap(index);
+        relevantFiles = renderRelevantFiles(index, currentRequest, { limit: 8 });
+        indexSummary = `${files} files, ${symbols} definitions${index.truncated ? ', partial' : ''}`;
+      }
+    } catch {
+      /* the index is an optimisation: never a reason for a run to fail */
+    }
+
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, activity, resume, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
+      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, activity, repoMap, relevantFiles, indexSummary, resume, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
       ...priorMessages,
     ];
 
@@ -894,7 +921,6 @@ export async function runAgent({
       if (prune.pruned) send({ status: 'Trimming old context…' });
 
       stats.steps++;
-      if (wrapUp && useTools) wrapUpToolStepsUsed++;
       const live = new Map(); // tool-call slot -> { uiId, lastSent, lastKey }
       /**
        * Wrap-up means "stop starting things", not "stop being able to finish them".
@@ -904,6 +930,14 @@ export async function runAgent({
        */
       const canLand = wrapUp === 'step_limit' && wrapUpToolStepsUsed < WRAP_UP_TOOL_STEPS;
       const useTools = !wrapUp || canLand;
+      /**
+       * Counted AFTER the decision, not before it: reading `useTools` above its own
+       * declaration is a temporal-dead-zone ReferenceError, and it landed exactly
+       * where it hurt most — the step-limit wrap-up threw instead of finishing the
+       * file and writing the summary, so a run that ran out of steps died as an
+       * error rather than pausing with a Continue.
+       */
+      if (wrapUp && useTools) wrapUpToolStepsUsed++;
 
       /**
        * The one live writer for this call. Created through a single promise, so a call can never end

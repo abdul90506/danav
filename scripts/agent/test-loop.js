@@ -603,7 +603,7 @@ test('terminal output streams into the action while the command runs', async () 
 
 test('repeated identical failures: recovery hint, then a forced wrap-up without tools', async () => {
   const { events, result, requests } = await agentRun({ model: 'fake-fail' });
-  assert.equal(result.stopReason, 'repeated_failures');
+  assert.equal(result.stopReason, 'repeated_failures', 'the reason survives the wrap-up');
   const ends = agentEvents(events, 'action_end');
   assert.equal(ends.length, 4);
   assert.ok(ends.every((a) => a.status === 'error'));
@@ -615,14 +615,26 @@ test('repeated identical failures: recovery hint, then a forced wrap-up without 
   assertConsistentTranscript(requests.at(-1).messages);
 });
 
-test('step limit: the run wraps up with a summary instead of looping forever', async () => {
+test('step limit: the run lands its work, then wraps up with a summary instead of looping forever', async () => {
+  /*
+    This path used to *crash*: the wrap-up counter read `useTools` above its own
+    declaration, so a run that hit a limit — the exact moment the Continue button
+    exists for — died with a ReferenceError instead of finishing its file and
+    saying where it stopped. The test now pins the whole contract: the limit is
+    respected, up to a few landing steps are allowed past it, and the run ends
+    with words and with the tools off.
+  */
   process.env.DANAV_AGENT_MAX_STEPS = '3';
   try {
     const { events, result, requests } = await agentRun({ model: 'fake-loop' });
-    assert.equal(result.stopReason, 'step_limit');
-    assert.equal(agentEvents(events, 'action_end').length, 3);
-    assert.equal(requests.at(-1).tools, undefined);
-    assert.match(requests.at(-1).messages.at(-1).content, /continue/);
+    assert.equal(result.stopReason, 'step_limit', 'the run reports the limit, not an error');
+    const ends = agentEvents(events, 'action_end').length;
+    assert.ok(ends >= 3, `the model ran at least its budget (${ends})`);
+    assert.ok(ends <= 6, `and only a few landing steps past it, never a runaway (${ends})`);
+    assert.equal(requests.at(-1).tools, undefined, 'the closing round has no tools');
+    // The request that carries the closing round ends with the last tool result —
+    // that is the input the wrap-up answer is written from, not a missing summary.
+    assert.match(String(requests.at(-1).messages.at(-1).content), /round-\d|\[exit code/, 'the wrap-up round starts from real output');
   } finally {
     delete process.env.DANAV_AGENT_MAX_STEPS;
   }
@@ -1377,7 +1389,9 @@ test('a call that keeps answering the same thing stops the run instead of spinni
   })() });
 
   assert.equal(result.stopReason, 'no_progress', 'the loop stopped itself');
-  assert.ok(requests.length <= 6, `it did not grind through the whole budget (${requests.length} requests)`);
+  // Six rounds of the repeated call plus the one round that writes the closing
+  // answer with the tools off (see the wrap-up path in loop.js).
+  assert.ok(requests.length <= 8, `it did not grind through the whole budget (${requests.length} requests)`);
   const modelView = requests.map((r) => JSON.stringify(r.messages)).join('\n');
   assert.match(modelView, /\[NO PROGRESS\]/, 'the model was told the call gave it nothing new');
   // The user-facing explanation for a stopped run comes from the frontend's
@@ -1577,6 +1591,44 @@ test('a run that goes quiet is asked to narrate, and a talkative one is left alo
   const chatty = await agentRun({ model: 'fake-batch', history: [{ role: 'user', content: 'set the project up' }] });
   const chattyView = chatty.requests.map((r) => JSON.stringify(r.messages)).join('\n');
   assert.ok(!/without a word to the user/.test(chattyView), 'no nagging when the model already explains itself');
+});
+
+test('the prompt arrives already knowing the project, and the request it has to answer', async () => {
+  /*
+    The blind-start problem: the agent used to be handed a two-level folder listing
+    and nothing else, so every task began by searching for things the index already
+    knows. This is the wiring that fixes it — the index is built before the prompt,
+    and the prompt carries the project's shape plus the files this request is about.
+  */
+  const root = tmp('danav-loop-index-');
+  const write = (rel, text) => {
+    const file = path.join(root, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  };
+  write('src/theme.ts', 'export function toggleTheme(current) {\n  return current === "dark" ? "light" : "dark";\n}\n');
+  write('src/panel.ts', 'export const createPanelStore = () => ({});\n');
+  write('src/App.tsx', 'import { toggleTheme } from "./theme";\nimport { createPanelStore } from "./panel";\nexport function App() { return [toggleTheme("light"), createPanelStore()]; }\n');
+  const ws = new LocalWorkspace({ id: 'ws-index-loop', kind: 'local', name: 'indexed', root, autoRun: true });
+  try {
+    const run = await agentRun({
+      model: 'fake-quiet',
+      workspace: ws,
+      history: [{ role: 'user', content: 'the theme toggle should remember the last choice' }],
+    });
+    const system = String(run.requests[0].messages[0].content);
+
+    assert.match(system, /# The codebase index \(\d+ files, \d+ definitions\)/, 'the index summary is stated');
+    assert.match(system, /# The codebase index[\s\S]*Folders:/, 'with the project\'s shape');
+    assert.match(system, /Most depended on:/, 'including what is most depended on');
+    assert.match(system, /# Files this request is probably about/, 'and the files the request is about');
+    assert.match(system, /src\/theme\.ts[\s\S]{0,200}toggleTheme/, 'the ranked file names the symbol that matched');
+    assert.match(system, /Find code with the index, not with your eyes/, 'the prompt teaches the index tools');
+    assert.match(system, /Never read the same thing twice/, 'and the no-repeat rule');
+    assert.match(system, /Edit by the safest handle you have/, 'edits get their recovery paths named');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('a run that would end without a word is asked for the closing summary', async () => {
