@@ -85,6 +85,44 @@ export async function detectChecks(workspace) {
   if ((pyproject && /pytest|tool\.pytest/i.test(pyproject)) || (requirements && /pytest/i.test(requirements))) {
     add('pytest', 'python3 -m pytest -q');
   }
+  /**
+   * How much is there to check, and — when the project declares no test script —
+   * what the test command probably is.
+   *
+   * A model that has to guess between `node --test`, `node --test test/`,
+   * `npx vitest` and `npx jest` guesses wrong often enough to waste a round trip.
+   * The runners are named in the project's own dependencies, and Node has had a
+   * built-in runner since 18, so when test files exist and nothing has claimed the
+   * job the command is inferred and labelled as inferred.
+   */
+  let testFiles = 0;
+  try {
+    for (const glob of ['*.test.*', '*.spec.*', '*_test.*', 'test_*.py']) {
+      const search = await workspace.findFiles({ pattern: glob, path: workspace.root, maxResults: 5 });
+      testFiles += (search.files || []).length;
+    }
+  } catch {
+    /* counting tests is a courtesy, never a failure */
+  }
+
+  const deps = (() => {
+    try {
+      const parsed = JSON.parse(pkg || '{}');
+      return { ...(parsed.dependencies || {}), ...(parsed.devDependencies || {}) };
+    } catch {
+      return {};
+    }
+  })();
+  const hasTestCommand = commands.some((c) => /(^|\s)(jest|vitest|mocha|pytest|rspec)\b|(^|\s)test(\s|$)/i.test(c));
+  if (testFiles && !hasTestCommand) {
+    if (deps.vitest) add('vitest, from your dependencies', 'npx vitest run');
+    else if (deps.jest) add('jest, from your dependencies', 'npx jest');
+    else if (deps.ava) add('ava, from your dependencies', 'npx ava');
+    else if (deps.mocha) add('mocha, from your dependencies', 'npx mocha');
+    else if (pkg) add("Node's built-in test runner — no test script is declared, so this is inferred", 'node --test');
+    else add('pytest, inferred from test files (if it is installed)', 'python3 -m pytest -q');
+  }
+
   if (await readRoot(workspace, 'Cargo.toml', 60_000)) {
     add('cargo test', 'cargo test');
     add('cargo build', 'cargo build');
@@ -96,17 +134,6 @@ export async function detectChecks(workspace) {
 
   if (!lines.length) return { lines: [], commands: [] };
 
-  // How much is there to check: a repo with tests deserves a different nudge than
-  // an empty folder that happens to have a package.json.
-  let testFiles = 0;
-  try {
-    for (const glob of ['*.test.*', '*.spec.*', '*_test.*', 'test_*.py']) {
-      const search = await workspace.findFiles({ pattern: glob, path: workspace.root, maxResults: 5 });
-      testFiles += (search.files || []).length;
-    }
-  } catch {
-    /* counting tests is a courtesy, never a failure */
-  }
   if (testFiles) {
     lines.push(`- Test files exist in this workspace (${testFiles}${testFiles >= 5 ? '+' : ''}) — run the ones that cover what you changed.`);
   }
@@ -120,8 +147,10 @@ export function formatChecksHint(checks) {
   return (
     '# How this project checks itself\n' +
     'Detected from the workspace. Run the relevant one before you call code work done, and fix what it reports ' +
-    'instead of describing it as a known issue. A new project with no checks of its own is the exception: write ' +
-    'the check you can actually run (a small test file, or the app started and its output inspected).\n' +
+    'instead of describing it as a known issue. **run_checks runs them all in one call** — fastest first, stopping at ' +
+    'the first real failure and handing back its error lines — or run one directly with run_command when you only ' +
+    'want that one. A new project with no checks of its own is the exception: write the check you can actually run ' +
+    '(a small test file, or the app started and its output inspected).\n' +
     checks.lines.join('\n')
   );
 }

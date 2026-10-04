@@ -18,6 +18,7 @@ import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
 import { buildToolset, pickFailureLines, READ_ONLY_TOOLS, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
 import { createRedactor } from '../../server/agent/util.js';
 import { formatRepoState, gitBlame, readRepoState } from '../../server/agent/githistory.js';
+import { detectChecks, formatChecksHint } from '../../server/agent/verify.js';
 
 const { test } = globalThis.__agentTest;
 console.log('\n[git + checks]');
@@ -286,6 +287,35 @@ test('run_checks says when everything passes, and only= narrows it', async () =>
     const missing = await run('run_checks', { only: 'playwright' });
     assert.match(missing.output, /Error: No detected check matches "playwright"/);
     assert.match(missing.output, /npm test/, 'and it names the checks that do exist');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a project that declares no test script gets the command inferred, and it runs', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-checks-inferred-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'inferred', version: '1.0.0' }));
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'src', 'thing.test.js'),
+      "const test = require('node:test');\nconst assert = require('node:assert');\ntest('adds', () => assert.equal(1 + 1, 2));\n"
+    );
+    const ws = new LocalWorkspace({ id: 'ws-checks-inferred', kind: 'local', name: 'inferred', root, autoRun: true });
+    await ws.init();
+    const { run } = toolsetFor(ws);
+
+    // The prompt block says where the command came from, so the model is not
+    // guessing at a runner it cannot see.
+    const hint = formatChecksHint(await detectChecks(ws));
+    assert.match(hint, /node --test/);
+    assert.match(hint, /inferred/);
+    assert.match(hint, /run_checks runs them all in one call/, 'and names the one call that runs them');
+
+    const res = await run('run_checks', {});
+    assert.match(res.output, /node --test/);
+    assert.equal(res.ok, true, `the inferred runner really passes: ${res.output}`);
+    assert.match(res.output, /All 1 check passed/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -235,6 +235,11 @@ A failing check comes back as information — its errors, and the checks that di
 the fix loop continues from there; passing checks come back one line each with their own
 summary ("Tests 42 passed").
 
+A project that declares no test script still gets one: when test files exist, the runner is
+read out of the project's own dependencies (vitest, jest, ava, mocha) or taken from Node's
+built-in `node --test`, labelled as inferred so the model knows where the command came from
+instead of guessing between four runners.
+
 Then the loop holds the model to it. If a run is about to finish having changed files and
 having run none of the project's checks, the model is handed the exact commands once — in
 the transcript only, so the chat shows nothing new — and told to run them or to say plainly
