@@ -303,8 +303,8 @@ function rawLabel(a: AgentAction): ActionLabel {
       if (!live && r?.timedOut) bits.push('timed out');
       else if (!live && r?.aborted) bits.push('stopped');
       else if (exitFailed) bits.push(`exit ${code}`);
-      const dur = live ? undefined : formatDuration(a.durationMs ?? r?.durationMs);
-      if (dur) bits.push(dur);
+      // No per-command seconds here: how long the run took is said once, at the
+      // end of the turn, and a stopwatch after every row is just noise.
       return base('Running', 'Ran', {
         target: command,
         targetKind: 'command',
@@ -366,14 +366,29 @@ function rawLabel(a: AgentAction): ActionLabel {
   }
 }
 
-/** The one-line footer after a run: "Changed 3 files +120 −14". */
-export function changedSummary(changed?: Array<{ path: string; added: number; removed: number }>) {
-  if (!changed || changed.length === 0) return undefined;
-  return {
-    files: changed.length,
-    added: changed.reduce((n, c) => n + c.added, 0),
-    removed: changed.reduce((n, c) => n + c.removed, 0),
-  };
+/**
+ * The single line under a finished turn: how long it took, how much it did, and
+ * what it changed. Plain text, one tone — no badges, no coloured counters.
+ */
+export function workedSummary(run?: {
+  durationMs?: number;
+  toolCalls?: number;
+  changed?: Array<{ path: string; added: number; removed: number }>;
+}): string | undefined {
+  if (!run) return undefined;
+  const bits: string[] = [];
+  const time = formatDuration(run.durationMs);
+  if (time) bits.push(`Worked for ${time}`);
+  if (run.toolCalls) bits.push(`${run.toolCalls} action${run.toolCalls === 1 ? '' : 's'}`);
+  const changed = run.changed || [];
+  if (changed.length) {
+    const added = changed.reduce((n, c) => n + c.added, 0);
+    const removed = changed.reduce((n, c) => n + c.removed, 0);
+    const files = `${changed.length} file${changed.length === 1 ? '' : 's'}`;
+    const counts = [added ? `+${added}` : '', removed ? `−${removed}` : ''].filter(Boolean).join(' ');
+    bits.push(counts ? `${files} ${counts}` : files);
+  }
+  return bits.length ? bits.join(' · ') : undefined;
 }
 
 export function stopNotice(reason?: string): string | undefined {

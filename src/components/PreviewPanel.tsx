@@ -257,10 +257,10 @@ const PreviewPanelInner: React.FC<PreviewPanelProps> = ({
       {/* A hairline of a bar: title, host and three buttons on one 24px row. */}
       <div className="flex items-center gap-1.5 h-6 px-2 border-b border-zinc-200/80 dark:border-zinc-800">
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-        <span className="shrink-0 max-w-[45%] truncate text-[11.5px] font-medium leading-none text-zinc-900 dark:text-zinc-100">
+        <span className="shrink-0 max-w-[45%] truncate text-[12px] font-medium leading-none text-zinc-900 dark:text-zinc-100">
           {title || 'Preview'}
         </span>
-        <span className="flex-1 min-w-0 truncate text-[10.5px] leading-none text-zinc-400">{host}</span>
+        <span className="flex-1 min-w-0 truncate text-[11px] leading-none text-zinc-400">{host}</span>
 
         <div className="flex items-center gap-px shrink-0">
           <button

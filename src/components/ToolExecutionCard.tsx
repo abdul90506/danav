@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useCallback, useRef } from 'react';
 import { Search, Globe, Image as ImageIcon, Film, ChevronDown, AlertCircle } from 'lucide-react';
 import { ToolExecution } from '../types';
 import { MovieCard } from './MovieCard';
+import { createPanelStore, usePanelOpen } from './panels';
+import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 
 interface ToolExecutionCardProps {
   tool: ToolExecution;
@@ -17,10 +19,52 @@ interface ToolExecutionCardProps {
  * finishes it settles into "N results" / "Page read" / a failure, and can be
  * expanded to inspect the raw output the model actually read.
  */
+/**
+ * One web-tool card open at a time, chat-wide.
+ *
+ * The card opens itself while the tool is running — that is the moment its
+ * detail is worth watching — and closes again when the tool settles, so a long
+ * run of searches does not leave a stack of open panels behind it. A card the
+ * user opened by hand stays open. This is the same rule the action rows and the
+ * thinking box follow, and it is the same store, so opening one of these closes
+ * whatever else was revealed.
+ */
+const toolStore = createPanelStore();
+
 export const ToolExecutionCard: React.FC<ToolExecutionCardProps> = ({ tool, onWatch }) => {
-  // The newest tool result is the interesting one, so a card opens as it starts
-  // and only one stays open — the same rule the action rows follow.
-  const [expanded, setExpanded] = useState(true);
+  const isRunningTool = tool.status === 'running';
+  const expanded = usePanelOpen(toolStore, tool.id);
+  const cardRef = useRef<HTMLDivElement>(null);
+  /** Opened by us while it ran, so we may close it again; false once the user clicks. */
+  const autoOpenedRef = useRef(false);
+  const pinnedRef = useRef(false);
+  useDismissOnOutside(cardRef, expanded, useCallback(() => toolStore.close(), []));
+
+  // While the tool runs, this card is the open one. When it settles, it closes
+  // again — unless the user opened it themselves, in which case it is theirs.
+  React.useEffect(() => {
+    if (isRunningTool) {
+      if (!autoOpenedRef.current) {
+        autoOpenedRef.current = true;
+        pinnedRef.current = false;
+        toolStore.set(tool.id);
+      }
+      return;
+    }
+    if (autoOpenedRef.current) {
+      autoOpenedRef.current = false;
+      if (!pinnedRef.current && toolStore.get() === tool.id) toolStore.close();
+    }
+  }, [isRunningTool, tool.id]);
+
+  const toggle = useCallback(() => {
+    if (toolStore.get() === tool.id) {
+      toolStore.close();
+      return;
+    }
+    pinnedRef.current = true;
+    toolStore.set(tool.id);
+  }, [tool.id]);
 
   const isRunning = tool.status === 'running';
   const isError = tool.status === 'done' && tool.ok === false;
@@ -55,10 +99,11 @@ export const ToolExecutionCard: React.FC<ToolExecutionCardProps> = ({ tool, onWa
       : undefined;
 
   return (
-    <div className="mb-2 select-none">
+    <div ref={cardRef} className="mb-2 select-none">
       <button
         type="button"
-        onClick={() => (hasDetail || hasImages) && setExpanded((v) => !v)}
+        aria-expanded={(hasDetail || hasImages) ? expanded : undefined}
+        onClick={() => (hasDetail || hasImages) && toggle()}
         className={`inline-flex items-center gap-1.5 max-w-full py-1 text-xs font-medium transition-opacity ${
           hasDetail || hasImages ? 'cursor-pointer group/tool' : 'cursor-default'
         }`}

@@ -46,7 +46,15 @@ export function createPanelStore(): PanelStore {
   };
 }
 
-/** `isOpen` for one panel id; the whole store re-renders only its subscribers. */
+/**
+ * `isOpen` for one panel id; the whole store re-renders only its subscribers.
+ *
+ * The third argument is the server snapshot: without it React refuses to render
+ * this component anywhere that is not a live browser — `renderToStaticMarkup` in
+ * the test suite is the one we hit, and any future pre-render would hit it too.
+ * The store lives outside React, so the server reading is simply "closed".
+ */
 export function usePanelOpen(store: PanelStore, id: string): boolean {
-  return useSyncExternalStore(store.subscribe, store.get) === id;
+  const openId = useSyncExternalStore(store.subscribe, store.get, () => null);
+  return openId === id;
 }

@@ -200,7 +200,7 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search models..."
             autoFocus
-            className="w-full bg-transparent text-[11.5px] text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 outline-none border-none focus:outline-none focus:ring-0 p-0"
+            className="w-full bg-transparent text-[12px] text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 outline-none border-none focus:outline-none focus:ring-0 p-0"
           />
           {search && (
             <button
@@ -219,14 +219,14 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('all')}
-              className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-md text-[10.5px] font-medium transition-colors shrink-0 cursor-pointer ${
+              className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors shrink-0 cursor-pointer ${
                 activeTab === 'all'
                   ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shadow-sm'
                   : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
               }`}
             >
               <span>All</span>
-              <span className="opacity-60 text-[9.5px]">({totalModelsCount})</span>
+              <span className="opacity-60 text-[10px]">({totalModelsCount})</span>
             </button>
             {providers.map((p) => {
               const isTabActive = activeTab === p.id;
@@ -236,14 +236,14 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                   key={p.id}
                   type="button"
                   onClick={() => setActiveTab(p.id)}
-                  className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-md text-[10.5px] font-medium transition-colors shrink-0 cursor-pointer ${
+                  className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors shrink-0 cursor-pointer ${
                     isTabActive
                       ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shadow-sm'
                       : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
                   }`}
                 >
                   <span className="truncate max-w-[80px]">{p.name}</span>
-                  <span className="opacity-60 text-[9.5px]">({count})</span>
+                  <span className="opacity-60 text-[10px]">({count})</span>
                 </button>
               );
             })}
@@ -280,17 +280,17 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
               >
                 <div className="min-w-0 pr-1.5 flex-1">
                   <div className="flex items-center gap-1 flex-wrap">
-                    <span className="truncate font-medium text-[11.5px] text-zinc-900 dark:text-zinc-100">
+                    <span className="truncate font-medium text-[12px] text-zinc-900 dark:text-zinc-100">
                       {cleanDisplayName}
                     </span>
                     {hasThinking && (
-                      <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[9px] bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-300 font-medium shrink-0">
+                      <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[10px] bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-300 font-medium shrink-0">
                         <Brain className="w-2.5 h-2.5" />
                         Think
                       </span>
                     )}
                     {isFast && (
-                      <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[9px] bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-300 font-medium shrink-0">
+                      <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[10px] bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-300 font-medium shrink-0">
                         <Zap className="w-2.5 h-2.5" />
                         Fast
                       </span>
@@ -745,7 +745,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                     setModelDropdownOpen(!modelDropdownOpen);
                     setThinkingDropdownOpen(false);
                   }}
-                  className="flex items-center gap-1 h-7 px-2 text-[11.5px] rounded-lg font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer max-w-[150px] sm:max-w-[200px]"
+                  className="flex items-center gap-1 h-7 px-2 text-[12px] rounded-lg font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer max-w-[150px] sm:max-w-[200px]"
                   title="Select Model"
                 >
                   <Sparkles className="w-3 h-3 text-zinc-400 shrink-0" />
@@ -774,7 +774,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                     setThinkingDropdownOpen(!thinkingDropdownOpen);
                     setModelDropdownOpen(false);
                   }}
-                  className="flex items-center gap-1 h-7 px-2 text-[11.5px] rounded-lg font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer"
+                  className="flex items-center gap-1 h-7 px-2 text-[12px] rounded-lg font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer"
                   title="Reasoning Depth"
                 >
                   <Brain className="w-3 h-3 text-zinc-400 shrink-0" />
@@ -808,7 +808,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                           <Brain className={`w-3 h-3 shrink-0 ${opt.iconClass}`} />
                           <div>
                             <div className="font-medium text-xs">{opt.level}</div>
-                            <div className="text-[9.5px] text-zinc-400">{opt.desc}</div>
+                            <div className="text-[10px] text-zinc-400">{opt.desc}</div>
                           </div>
                         </div>
                         {thinkingLevel === opt.level && (
@@ -945,7 +945,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                 <Brain className={`w-3 h-3 shrink-0 ${opt.iconClass}`} />
                 <div>
                   <div className="font-medium text-xs">{opt.level}</div>
-                  <div className="text-[9.5px] text-zinc-400">{opt.desc}</div>
+                  <div className="text-[10px] text-zinc-400">{opt.desc}</div>
                 </div>
               </div>
               {thinkingLevel === opt.level && (
@@ -1100,7 +1100,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                     setModelDropdownOpen(!modelDropdownOpen);
                     setThinkingDropdownOpen(false);
                   }}
-                  className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[11.5px] font-medium border border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer max-w-[200px]"
+                  className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px] font-medium border border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer max-w-[200px]"
                   title="Select Model"
                 >
                   <Sparkles className="w-3.5 h-3.5 text-zinc-400 shrink-0" />

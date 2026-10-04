@@ -86,7 +86,7 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
         disabled={busy}
         aria-pressed={enabled}
         title={enabled ? 'Agent mode is on — it can create files and run commands in a workspace' : 'Turn on Agent mode: let the AI build things in a workspace'}
-        className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[11.5px] font-medium border transition-colors disabled:cursor-default ${pill}`}
+        className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px] font-medium border transition-colors disabled:cursor-default ${pill}`}
       >
         <Bot className="w-3.5 h-3.5" />
         <span>Agent</span>
@@ -97,7 +97,7 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
           <button
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
-            className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[11.5px] font-medium border transition-colors ${
+            className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px] font-medium border transition-colors ${
               active
                 ? 'text-zinc-700 dark:text-zinc-200 border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 hover:bg-zinc-100 dark:hover:bg-zinc-800'
                 : 'text-amber-700 dark:text-amber-300 border-amber-300/70 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-500/10'
@@ -129,7 +129,7 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
                       <KindIcon kind={w.kind} className="w-3.5 h-3.5 shrink-0 text-zinc-400" />
                       <span className="flex-1 min-w-0">
                         <span className="block truncate text-zinc-800 dark:text-zinc-100 font-medium">{w.name}</span>
-                        <span className="block truncate text-[10.5px] text-zinc-400">
+                        <span className="block truncate text-[11px] text-zinc-400">
                           {w.kind === 'sandbox' ? 'Cloud sandbox' : 'This machine'} · {w.root}
                         </span>
                       </span>
@@ -143,7 +143,7 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
                           onDelete(w.id);
                           setConfirmDelete(null);
                         }}
-                        className="px-1.5 h-6 rounded-md text-[10.5px] font-medium text-white bg-rose-600 hover:bg-rose-700"
+                        className="px-1.5 h-6 rounded-md text-[11px] font-medium text-white bg-rose-600 hover:bg-rose-700"
                       >
                         {w.kind === 'sandbox' ? 'Delete sandbox' : 'Remove'}
                       </button>
@@ -153,7 +153,7 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
                         disabled={busy}
                         onClick={() => setConfirmDelete(w.id)}
                         title={w.kind === 'sandbox' ? 'Delete this workspace and its sandbox' : 'Remove from the list (your files stay on disk)'}
-                        className="p-1.5 rounded-md text-zinc-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                        className="p-1.5 rounded-md text-zinc-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 touch-reveal focus:opacity-100 transition-opacity"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -220,7 +220,7 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
           type="button"
           onClick={onToggleFiles}
           aria-pressed={filesOpen}
-          className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[11.5px] font-medium border transition-colors ${
+          className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px] font-medium border transition-colors ${
             filesOpen
               ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 border-zinc-300 dark:border-zinc-700'
               : 'bg-white/70 dark:bg-zinc-900/60 text-zinc-500 dark:text-zinc-400 border-zinc-200 dark:border-zinc-800 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800'
@@ -242,7 +242,7 @@ export const AgentControls: React.FC<AgentControlsProps> = ({
           type="button"
           onClick={onOpenSandboxes}
           title={`${dot.title} — open the sandbox manager`}
-          className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[11.5px] font-medium border border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+          className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px] font-medium border border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
           data-testid="sandbox-status-pill"
         >
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot.className} ${sandboxState === 'running' ? 'animate-pulse' : ''}`} />

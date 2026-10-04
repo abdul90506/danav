@@ -88,17 +88,28 @@ const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
       )}
 
       {r?.todos && r.todos.length > 0 && (
-        <ul className="space-y-1 text-[12.5px]">
+        <ul className="space-y-1 text-[12px]">
           {r.todos.map((t, i) => (
             <li key={i} className="flex items-start gap-1.5">
+              {/* The plan is plain: the shape of the marker carries the status,
+                  not a colour. Done is checked and dark, the one being worked on
+                  is filled and bold, the rest wait in grey. */}
               {t.status === 'completed' ? (
-                <CircleCheck className="w-3.5 h-3.5 mt-[3px] shrink-0 text-emerald-500" />
+                <CircleCheck className="w-3.5 h-3.5 mt-[3px] shrink-0 text-zinc-500 dark:text-zinc-400" />
               ) : t.status === 'in_progress' ? (
-                <CircleDot className="w-3.5 h-3.5 mt-[3px] shrink-0 text-sky-500" />
+                <CircleDot className="w-3.5 h-3.5 mt-[3px] shrink-0 text-zinc-800 dark:text-zinc-100" />
               ) : (
-                <Circle className="w-3.5 h-3.5 mt-[3px] shrink-0 text-zinc-400" />
+                <Circle className="w-3.5 h-3.5 mt-[3px] shrink-0 text-zinc-300 dark:text-zinc-600" />
               )}
-              <span className={t.status === 'completed' ? 'text-zinc-400 line-through' : 'text-zinc-700 dark:text-zinc-300'}>
+              <span
+                className={
+                  t.status === 'completed'
+                    ? 'text-zinc-400 line-through'
+                    : t.status === 'in_progress'
+                      ? 'font-medium text-zinc-900 dark:text-zinc-100'
+                      : 'text-zinc-600 dark:text-zinc-400'
+                }
+              >
                 {t.content}
               </span>
             </li>
@@ -228,23 +239,29 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
         >
           {labelContent}
 
-          {label.lines && <span className="shrink-0 font-mono text-[11.5px] text-zinc-400 dark:text-zinc-500">{label.lines}</span>}
+          {label.lines && <span className="shrink-0 font-mono text-[12px] text-zinc-400 dark:text-zinc-500">{label.lines}</span>}
+          {/*
+            Line counts and small facts stay plain: the same grey as the rest of
+            the row, no pills, no green-and-red counters. A failure is the one
+            thing that earns a colour (below), because that is information rather
+            than decoration.
+          */}
           {label.added !== undefined && (
             <AnimatedCount
               value={label.added}
               sign="+"
-              className="shrink-0 font-mono text-[12px] tabular-nums text-emerald-600 dark:text-emerald-400"
+              className="shrink-0 font-mono text-[12px] tabular-nums text-zinc-500 dark:text-zinc-400"
             />
           )}
           {label.removed !== undefined && label.removed > 0 && (
             <AnimatedCount
               value={label.removed}
               sign="−"
-              className="shrink-0 font-mono text-[12px] tabular-nums text-rose-500 dark:text-rose-400"
+              className="shrink-0 font-mono text-[12px] tabular-nums text-zinc-500 dark:text-zinc-400"
             />
           )}
           {label.chips?.map((c) => (
-            <span key={c} className="shrink-0 font-mono text-[11px] text-zinc-500 dark:text-zinc-400 px-1.5 rounded bg-zinc-100 dark:bg-zinc-800">
+            <span key={c} className="shrink-0 font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
               {c}
             </span>
           ))}
@@ -270,7 +287,7 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
                 <button
                   type="button"
                   onClick={() => onOpenPreview(previewUrl, action.result?.title)}
-                  className="inline-flex items-center gap-1.5 pl-2 pr-1.5 h-6 rounded-md rounded-r-none text-[11.5px] font-medium bg-emerald-50 dark:bg-emerald-500/10 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/80 dark:border-emerald-500/30 border-r-0 transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1.5 pl-2 pr-1.5 h-6 rounded-md rounded-r-none text-[12px] font-medium bg-emerald-50 dark:bg-emerald-500/10 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-200/80 dark:border-emerald-500/30 border-r-0 transition-colors cursor-pointer"
                   title="Open it in the panel next to the chat"
                   data-testid="open-preview-panel"
                 >
@@ -306,15 +323,15 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
         {awaiting && onApproval && (
           <span className="shrink-0 inline-flex items-center gap-1 ml-1">
             <button type="button" onClick={() => onApproval(action, true, false)}
-              className="px-2 h-6 rounded-md text-[11.5px] font-medium bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
+              className="px-2 h-6 rounded-md text-[12px] font-medium bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
               Allow
             </button>
             <button type="button" onClick={() => onApproval(action, true, true)}
-              className="px-2 h-6 rounded-md text-[11.5px] text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+              className="px-2 h-6 rounded-md text-[12px] text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800">
               Always allow
             </button>
             <button type="button" onClick={() => onApproval(action, false, false)}
-              className="px-2 h-6 rounded-md text-[11.5px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">
+              className="px-2 h-6 rounded-md text-[12px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">
               Deny
             </button>
           </span>
@@ -322,7 +339,7 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
       </div>
 
       {isWorking(action) && action.progress?.tail && action.progress.tail.length > 0 && (
-        <div className="ml-0.5 pl-3 border-l-2 border-zinc-200/80 dark:border-zinc-800 font-mono text-[11.5px] leading-[1.15rem] text-zinc-400 dark:text-zinc-500" data-testid="live-tail">
+        <div className="ml-0.5 pl-3 border-l-2 border-zinc-200/80 dark:border-zinc-800 font-mono text-[12px] leading-[1.15rem] text-zinc-400 dark:text-zinc-500" data-testid="live-tail">
           {action.progress.tail.map((l, i) => (
             <div key={i} className="truncate whitespace-pre">{l || ' '}</div>
           ))}
@@ -330,7 +347,7 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
       )}
 
       {tail.length > 0 && (
-        <div className="ml-0.5 pl-3 border-l-2 border-zinc-200/80 dark:border-zinc-800 font-mono text-[11.5px] leading-[1.15rem] text-zinc-400 dark:text-zinc-500">
+        <div className="ml-0.5 pl-3 border-l-2 border-zinc-200/80 dark:border-zinc-800 font-mono text-[12px] leading-[1.15rem] text-zinc-400 dark:text-zinc-500">
           {tail.map((l, i) => (
             <div key={i} className="truncate">{l || ' '}</div>
           ))}

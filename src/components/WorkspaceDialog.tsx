@@ -91,7 +91,7 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
         {title}
         {kind === value && <Check className="w-3.5 h-3.5 ml-auto" />}
       </div>
-      <p className="mt-1 text-[11.5px] leading-snug text-zinc-500 dark:text-zinc-400">{desc}</p>
+      <p className="mt-1 text-[12px] leading-snug text-zinc-500 dark:text-zinc-400">{desc}</p>
     </button>
   );
 
@@ -160,17 +160,17 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
                   Folder <span className="font-normal text-zinc-400">(optional)</span>
                 </label>
                 <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder={`${defaultDir}/${name.trim() ? name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-') : 'my-project'}`} className={`${field} font-mono text-[12px]`} data-testid="ws-folder" />
-                <p className="mt-1.5 text-[11.5px] text-zinc-500 dark:text-zinc-400">
+                <p className="mt-1.5 text-[12px] text-zinc-500 dark:text-zinc-400">
                   {config?.local.allowAnyPath
                     ? 'Any absolute folder works. Leave empty to create a new one.'
                     : `Leave empty to create a new folder in ${defaultDir}. To open any folder, start Danav with DANAV_ALLOW_ANY_LOCAL_PATH=1.`}
                 </p>
               </div>
-              <label className="flex items-start gap-2 text-[12.5px] text-zinc-700 dark:text-zinc-300 cursor-pointer">
+              <label className="flex items-start gap-2 text-[12px] text-zinc-700 dark:text-zinc-300 cursor-pointer">
                 <input type="checkbox" checked={askFirst} onChange={(e) => setAskFirst(e.target.checked)} className="mt-0.5 accent-zinc-800" />
                 <span>
                   Ask me before running commands
-                  <span className="block text-[11.5px] text-zinc-400">Recommended — commands run as you, on your real machine.</span>
+                  <span className="block text-[12px] text-zinc-400">Recommended — commands run as you, on your real machine.</span>
                 </span>
               </label>
             </div>
@@ -184,13 +184,13 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
         </div>
 
         <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900">
-          <button onClick={onClose} disabled={busy} className="h-8 px-3 rounded-lg text-[12.5px] text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+          <button onClick={onClose} disabled={busy} className="h-8 px-3 rounded-lg text-[12px] text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800">
             Cancel
           </button>
           <button
             onClick={submit}
             disabled={busy}
-            className="h-8 px-4 rounded-lg text-[12.5px] font-medium bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 inline-flex items-center gap-1.5 disabled:opacity-70"
+            className="h-8 px-4 rounded-lg text-[12px] font-medium bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 inline-flex items-center gap-1.5 disabled:opacity-70"
             data-testid="ws-create"
           >
             {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}

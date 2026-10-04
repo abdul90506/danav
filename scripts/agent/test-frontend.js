@@ -375,7 +375,7 @@ test('the preview panel renders a divider you can drag', async () => {
     // two-line header ate a real slice of a 640px-wide preview.
     assert.match(html, /h-6 px-2 border-b/, 'the header is the thin single-row bar');
     assert.doesNotMatch(html, /py-2\.5/, 'no roomy padding left in the header');
-    assert.match(html, /text-\[11\.5px\]/, 'the title is small');
+    assert.match(html, /text-\[12px\]/, 'the title is small');
     assert.doesNotMatch(html, /text-\[13px\] font-medium text-zinc-900/, 'the old large title is gone');
     // The frame fills the panel, so the embedded page re-flows to whatever
     // width the divider lands on.
@@ -804,9 +804,10 @@ test('wording: commands — running, success, non-zero exit, timeout, background
   const running = fmt.actionLabel(act({ tool: 'run_command', status: 'running', args: { command: 'npm install' } }));
   assert.deepEqual([running.verb, running.target, running.targetKind], ['Running', 'npm install', 'command']);
   const ok = fmt.actionLabel(act({ tool: 'run_command', output: 'done', durationMs: 2300, result: { kind: 'command', command: 'npm test', exitCode: 0 } }));
-  assert.deepEqual([ok.verb, ok.meta, ok.exitFailed, ok.expandable], ['Ran', '2.3s', false, true]);
+  // No stopwatch on the row any more: the turn's own time is said once, at the end.
+  assert.deepEqual([ok.verb, ok.meta, ok.exitFailed, ok.expandable], ['Ran', undefined, false, true]);
   const bad = fmt.actionLabel(act({ tool: 'run_command', status: 'error', error: 'x', output: 'boom', durationMs: 1000, result: { kind: 'command', command: 'npm test', exitCode: 1 } }));
-  assert.deepEqual([bad.verb, bad.meta, bad.exitFailed], ['Ran', 'exit 1 · 1.0s', true], 'a failing command ran; the exit code is the news');
+  assert.deepEqual([bad.verb, bad.meta, bad.exitFailed], ['Ran', 'exit 1', true], 'a failing command ran; the exit code is the news');
   const timeout = fmt.actionLabel(act({ tool: 'run_command', status: 'error', result: { kind: 'command', command: 'sleep 9', exitCode: 124, timedOut: true } }));
   assert.match(timeout.meta, /timed out/);
   const bg = fmt.actionLabel(act({ tool: 'run_command', args: { background: true }, result: { kind: 'background', command: 'vite --host', id: 'bg-1', ports: [5173] } }));
@@ -899,7 +900,7 @@ test('wording: search, list, web, plan and the rest', () => {
   assert.equal(fmt.actionLabel(act({ tool: 'mystery_tool' })).verb, 'Ran');
 });
 
-test('formatRanges / formatDuration / changedSummary / stopNotice', () => {
+test('formatRanges / formatDuration / workedSummary / stopNotice', () => {
   assert.equal(fmt.formatRanges([[3, 3]]), 'L3');
   assert.equal(fmt.formatRanges([[3, 9]]), 'L3–L9');
   assert.equal(fmt.formatRanges([]), undefined);
@@ -907,8 +908,12 @@ test('formatRanges / formatDuration / changedSummary / stopNotice', () => {
   assert.equal(fmt.formatDuration(2345), '2.3s');
   assert.equal(fmt.formatDuration(42_000), '42s');
   assert.equal(fmt.formatDuration(125_000), '2m 5s');
-  assert.deepEqual(fmt.changedSummary([{ path: 'a', added: 5, removed: 1 }, { path: 'b', added: 2, removed: 0 }]), { files: 2, added: 7, removed: 1 });
-  assert.equal(fmt.changedSummary([]), undefined);
+  assert.equal(
+    fmt.workedSummary({ durationMs: 32_000, toolCalls: 8, changed: [{ path: 'a', added: 5, removed: 1 }, { path: 'b', added: 2, removed: 0 }] }),
+    'Worked for 32s · 8 actions · 2 files +7 −1'
+  );
+  assert.equal(fmt.workedSummary({ durationMs: 300, toolCalls: 1 }), '1 action', 'no stopwatch under half a second');
+  assert.equal(fmt.workedSummary({}), undefined);
   assert.match(fmt.stopNotice('step_limit'), /continue/);
   assert.match(fmt.stopNotice('no_progress'), /same call|same answer/i);
   assert.equal(fmt.stopNotice('completed'), undefined);

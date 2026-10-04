@@ -44,7 +44,7 @@ export const MovieCard: React.FC<MovieCardProps> = ({ movie, onWatch }) => {
         <button
           type="button"
           onClick={() => onWatch(movie.id, movie.media_type, movie.title)}
-          className="absolute inset-0 bg-black/55 backdrop-blur-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+          className="absolute inset-0 bg-black/55 backdrop-blur-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer touch-reveal"
           title={`Watch ${movie.title}`}
         >
           <div className="w-11 h-11 rounded-full bg-red-600 text-white flex items-center justify-center shadow-lg transform group-hover:scale-110 transition-transform">

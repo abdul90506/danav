@@ -228,7 +228,7 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
                   </div>
                   {server.badge && (
                     <span
-                      className={`text-[9px] mt-0.5 px-1 py-0.2 rounded font-mono truncate max-w-full ${
+                      className={`text-[10px] mt-0.5 px-1 py-0.2 rounded font-mono truncate max-w-full ${
                         isActive
                           ? 'bg-black/30 text-white/90'
                           : 'bg-white/5 text-zinc-400'

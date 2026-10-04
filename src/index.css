@@ -8,6 +8,21 @@
   min-height: 0;
 }
 
+/*
+  Hover is not a thing every device has. A control that only fades in when the
+  pointer is over it (Copy, Regenerate, a workspace's remove button, a movie's
+  play overlay) is simply invisible on a phone — the tap target is there, but
+  nobody can see it. Where the pointer cannot hover, keep those on screen.
+
+  The rule sits after the Tailwind layers on purpose: it has the same
+  specificity as `opacity-0`, so it has to come later to win.
+*/
+@media (hover: none) {
+  .touch-reveal {
+    opacity: 1;
+  }
+}
+
 .safe-bottom {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
@@ -151,8 +166,8 @@
 
 /*
  * Headings and tables are in `em`, not `rem`, so the whole block scales as one
- * piece with `--chat-font` instead of leaving big headings over shrinking body
- * text in a narrow column.
+ * piece with the prose it sits in, instead of leaving big headings over
+ * shrinking body text in a narrow column.
  */
 .markdown-body h1,
 .markdown-body h2,

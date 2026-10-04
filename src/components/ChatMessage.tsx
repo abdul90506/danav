@@ -11,8 +11,9 @@ import { normalizeMessageContent } from '../utils/markdownNormalize';
 import { isPreviewUrl, previewHost } from '../utils/previewUrl';
 import { AgentActionRow } from './AgentActionRow';
 import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from './thinkingAccordion';
-import { changedSummary, isLive, stopNotice } from '../agent/format';
+import { isLive, stopNotice, workedSummary } from '../agent/format';
 import { useThrottledValue } from '../utils/throttledValue';
+import { useElapsedSeconds } from '../utils/useElapsedSeconds';
 
 interface ChatMessageProps {
   message: Message;
@@ -66,16 +67,32 @@ interface ThinkingSectionProps {
   thinkingContent: string;
   isStillThinking: boolean;
   thinkingDuration?: number;
+  /** How many reasoning rounds this turn had, when more than one. */
+  rounds?: number;
 }
 
+/**
+ * One small row for the whole turn's reasoning.
+ *
+ * The model reasons in several rounds between tool calls, and each round used to
+ * render its own "Thought for 5s" row: a long run turned into a column of them,
+ * each one saying almost nothing. What the user wants to see is one quiet line
+ * that says the turn thought for a while, and the detail behind it if they ask.
+ * The rows are merged here: the durations add up, the rounds are kept in order
+ * inside one box, and only one of these is ever open in the whole chat.
+ */
 const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   id,
   thinkingContent,
   isStillThinking,
   thinkingDuration,
+  rounds,
 }) => {
   // One thought open at a time, chat-wide: opening this one closes the others.
-  const openId = useSyncExternalStore(subscribeThinkingAccordion, getOpenThinkingId);
+  // The third argument is the server snapshot — without it React refuses to
+  // render this anywhere that is not a live browser (the test renderer, and any
+  // pre-render), which is exactly the bug the first audit run turned up.
+  const openId = useSyncExternalStore(subscribeThinkingAccordion, getOpenThinkingId, () => null);
   const isExpanded = openId === id;
 
   const thinkBoxRef = useRef<HTMLDivElement>(null);
@@ -182,10 +199,11 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
           }`}
         />
         {isStillThinking ? (
-          <span className="thinking-shimmer text-xs tracking-wide">Thinking...</span>
+          <span className="thinking-shimmer text-xs tracking-wide">Thinking…</span>
         ) : (
-          <span className="text-xs tracking-wide text-zinc-700 dark:text-zinc-200 group-hover/think:text-zinc-900 dark:group-hover/think:text-zinc-50 transition-colors">
+          <span className="text-xs tracking-wide text-zinc-500 dark:text-zinc-400 group-hover/think:text-zinc-800 dark:group-hover/think:text-zinc-200 transition-colors">
             Thought for {durationSec}s
+            {rounds && rounds > 1 ? <span className="text-zinc-400 dark:text-zinc-500"> · {rounds} rounds</span> : null}
           </span>
         )}
         <ChevronDown
@@ -195,15 +213,16 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
         />
       </button>
 
-      {/* Expanded Thinking Box with its own scroll container */}
+      {/* The reasoning, in a small box of its own — quiet, plain, and never taller
+          than a short paragraph, so reading it stays optional. */}
       {isExpanded && (
-        <div className="relative mt-1.5 animate-in fade-in duration-150">
+        <div className="relative mt-1 animate-in fade-in duration-150">
           <div
             ref={thinkBoxRef}
             onScroll={handleThinkBoxScroll}
-            className="panel-scroll max-h-64 overflow-y-auto overscroll-y-contain px-3.5 py-3 rounded-r-xl border-l-2 border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900/60 text-zinc-800 dark:text-zinc-200 text-sm leading-6 font-normal font-sans whitespace-pre-wrap select-text"
+            className="panel-scroll max-h-56 overflow-y-auto overscroll-y-contain pl-3 py-0.5 border-l border-zinc-200 dark:border-zinc-800 text-[13px] leading-[1.65] text-zinc-500 dark:text-zinc-400 font-sans whitespace-pre-wrap select-text"
           >
-            {streamLines ? (
+            {streamLines && !isStillThinking ? (
               <span className="stream-lines">
                 {streamLines.map((line, i) => (
                   <span key={i} className="stream-line block">
@@ -392,7 +411,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
         </div>
 
         {/* Action icons at the corner (nukar) below user message on hover */}
-        <div className="flex items-center gap-0.5 mt-1 mr-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+        <div className="flex items-center gap-0.5 mt-1 mr-1.5 opacity-0 group-hover:opacity-100 touch-reveal focus-within:opacity-100 transition-opacity">
           {onEditUserMessage && (
             <button
               onClick={() => {
@@ -718,7 +737,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
     },
     th({ children }: any) {
       return (
-        <th className="px-4 py-2.5 text-[12.5px] font-semibold tracking-wide text-zinc-900 dark:text-zinc-100 select-none whitespace-nowrap text-left border-b border-zinc-200 dark:border-zinc-700/80 break-normal [word-break:normal]">
+        <th className="px-4 py-2.5 text-[12px] font-semibold tracking-wide text-zinc-900 dark:text-zinc-100 select-none whitespace-nowrap text-left border-b border-zinc-200 dark:border-zinc-700/80 break-normal [word-break:normal]">
           {children}
         </th>
       );
@@ -746,6 +765,26 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
   // `Boolean(message.isGenerating)`.
   const isWorking = Boolean(message.isGenerating);
 
+  /**
+   * All the turn's reasoning as one row.
+   *
+   * Reasoning arrives in several rounds — one before each burst of tool calls —
+   * and the last one is the live one. They are merged: durations added up, rounds
+   * concatenated in order (newest last, which is where the box is scrolled to),
+   * and rendered once at the top of the turn instead of once per round.
+   */
+  const thinkingAggregate = (() => {
+    const parts = blocks.filter((b) => b.type === 'thinking');
+    if (!parts.length) return null;
+    const content = parts
+      .map((b) => b.content)
+      .join('\n\n')
+      .slice(-60_000);
+    const duration = parts.reduce((sum, b) => sum + (b.duration || 0), 0);
+    const stillThinking = parts.some((b) => b.isStillThinking) && !message.error;
+    return { id: `think-${message.id}`, content, duration, stillThinking, rounds: parts.length };
+  })();
+
   /** thinking / narration / action rows, in order; consecutive actions share one tight group */
   const renderAgentTimeline = () => {
     const out: React.ReactNode[] = [];
@@ -769,16 +808,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
       }
       flush();
       if (block.type === 'thinking') {
-        out.push(
-          <div key={block.id} className="my-1">
-            <ThinkingSection
-              id={block.id}
-              thinkingContent={block.content}
-              isStillThinking={Boolean(block.isStillThinking && !message.error)}
-              thinkingDuration={block.duration}
-            />
-          </div>
-        );
+        // Rendered once, above the actions — see thinkingAggregate.
       } else if (block.type === 'text') {
         out.push(
           block.notice ? (
@@ -798,8 +828,29 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
       }
     }
     flush();
+    if (thinkingAggregate) {
+      out.unshift(
+        <div key={thinkingAggregate.id} className="my-1">
+          <ThinkingSection
+            id={thinkingAggregate.id}
+            thinkingContent={thinkingAggregate.content}
+            isStillThinking={thinkingAggregate.stillThinking}
+            thinkingDuration={thinkingAggregate.duration || undefined}
+            rounds={thinkingAggregate.rounds}
+          />
+        </div>
+      );
+    }
     return out;
   };
+
+  /**
+   * One clock for the whole turn. While it runs it appears on the working line;
+   * when it finishes the same number is what the footer reports, so the work time
+   * is stated once, in one place, instead of after every command.
+   */
+  const firstActionAt = blocks.find((b) => b.type === 'action')?.action.startedAt;
+  const elapsedSeconds = useElapsedSeconds(Boolean(message.isGenerating) && !message.error, firstActionAt ?? null);
 
   // "Working…" fills the quiet moments between steps (the model is deciding what to do next).
   const lastBlock = blocks[blocks.length - 1];
@@ -812,26 +863,23 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
       (lastBlock.type === 'text' && Boolean(lastBlock.notice)));
   const workingText = message.agentStatus && message.agentStatus !== 'Working…' ? message.agentStatus : 'Working…';
 
-  const summary = !message.isGenerating ? changedSummary(message.agentRun?.changed) : undefined;
+  const runLine = !message.isGenerating ? workedSummary(message.agentRun) : undefined;
   const notice = !message.isGenerating ? stopNotice(message.agentRun?.stopReason) : undefined;
   const runFooter =
-    summary || notice ? (
-      <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-zinc-400 dark:text-zinc-500 select-none" data-testid="agent-run-footer">
-        {summary && (
-          <span>
-            Changed {summary.files} file{summary.files === 1 ? '' : 's'}{' '}
-            {summary.added > 0 && <span className="font-mono text-emerald-600 dark:text-emerald-400">+{summary.added}</span>}
-            {summary.added > 0 && summary.removed > 0 && ' '}
-            {summary.removed > 0 && <span className="font-mono text-rose-500 dark:text-rose-400">−{summary.removed}</span>}
-          </span>
-        )}
-        {notice && <span>{notice}</span>}
+    runLine || notice ? (
+      <div
+        className="mt-2.5 text-[12px] leading-5 text-zinc-400 dark:text-zinc-500 select-none"
+        data-testid="agent-run-footer"
+      >
+        {runLine ? <span>{runLine}</span> : null}
+        {runLine && notice ? <span className="text-zinc-300 dark:text-zinc-600"> · </span> : null}
+        {notice ? <span>{notice}</span> : null}
       </div>
     ) : null;
 
   // Assistant / AI Message: left-aligned, natural flow
   return (
-    <div className="flex justify-start w-full group mb-6 text-left">
+    <div className="flex justify-start w-full group text-left">
       <div className="w-full text-zinc-900 dark:text-zinc-100">
         {/* Timeline blocks: tools and thinking rendered in chronological sequence */}
         {blocks.length > 0 && !isAgentTimeline && (
@@ -847,6 +895,9 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
                 );
               }
               if (block.type === 'thinking') {
+                // Same rule as the agent timeline: one row for the whole turn, all
+                // the reasoning rounds merged into it.
+                if (block.id !== blocks.find((b) => b.type === 'thinking')?.id) return null;
                 const stillThinking = Boolean(
                   (block.isStillThinking ?? isStillThinking) && !message.error
                 );
@@ -854,9 +905,10 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
                   <ThinkingSection
                     key={block.id}
                     id={block.id}
-                    thinkingContent={block.content}
+                    thinkingContent={thinkingAggregate?.content ?? block.content}
                     isStillThinking={stillThinking}
-                    thinkingDuration={block.duration}
+                    thinkingDuration={thinkingAggregate?.duration || block.duration}
+                    rounds={thinkingAggregate?.rounds}
                   />
                 );
               }
@@ -872,6 +924,9 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
             {showWorking && (
               <div className="mt-1 text-[13px] leading-6 select-none">
                 <span className="agent-shimmer">{workingText}</span>
+                {elapsedSeconds >= 2 && (
+                  <span className="ml-1.5 text-[12px] text-zinc-400 dark:text-zinc-500">{elapsedSeconds}s</span>
+                )}
               </div>
             )}
             {runFooter}
@@ -918,7 +973,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
 
         {/* Action icons below AI response: Copy + Regenerate + Continue on hover (ONLY shown when NOT working!) */}
         {!isWorking && safeMessageContent.trim() && (
-          <div className="flex items-center gap-1 mt-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity select-none pointer-events-auto">
+          <div className="flex items-center gap-1 mt-2 opacity-0 group-hover:opacity-100 touch-reveal focus-within:opacity-100 transition-opacity select-none pointer-events-auto">
             {safeMessageContent.trim() && (
               <button
                 type="button"

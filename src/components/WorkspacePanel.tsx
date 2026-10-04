@@ -118,7 +118,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
     const entries = tree[dir];
     if (!entries) return null;
     if (entries.length === 0 && depth === 0) {
-      return <div className="px-4 py-6 text-[12.5px] text-zinc-400">This workspace is empty. Ask the agent to build something.</div>;
+      return <div className="px-4 py-6 text-[12px] text-zinc-400">This workspace is empty. Ask the agent to build something.</div>;
     }
     return entries.map((e) => {
       const isDir = e.type === 'dir';
@@ -129,7 +129,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
           <button
             type="button"
             onClick={() => (isDir ? toggleDir(e.path) : openFile(e.path))}
-            className="w-full flex items-center gap-1.5 pr-3 py-[3px] text-left text-[12.5px] hover:bg-zinc-100 dark:hover:bg-zinc-800/70 rounded-md"
+            className="w-full flex items-center gap-1.5 pr-3 py-[3px] text-left text-[12px] hover:bg-zinc-100 dark:hover:bg-zinc-800/70 rounded-md"
             style={{ paddingLeft: 10 + depth * 14 }}
           >
             {isDir ? (
@@ -144,7 +144,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
               </>
             )}
             <span className="truncate text-zinc-700 dark:text-zinc-200">{name}</span>
-            {!isDir && e.size !== undefined && <span className="ml-auto pl-2 text-[10.5px] text-zinc-400 shrink-0">{e.size < 1024 ? `${e.size} B` : `${(e.size / 1024).toFixed(1)} KB`}</span>}
+            {!isDir && e.size !== undefined && <span className="ml-auto pl-2 text-[11px] text-zinc-400 shrink-0">{e.size < 1024 ? `${e.size} B` : `${(e.size / 1024).toFixed(1)} KB`}</span>}
           </button>
           {expanded && renderDir(e.path, depth + 1)}
         </React.Fragment>
@@ -177,7 +177,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
             {file && <FileTypeIcon path={file.path} />}
             <span className="truncate">{file ? file.path : workspace.name}</span>
           </div>
-          <div className="text-[10.5px] text-zinc-400 truncate">{file ? `${file.size} bytes${file.truncated ? ' · truncated' : ''}` : workspace.root}</div>
+          <div className="text-[11px] text-zinc-400 truncate">{file ? `${file.size} bytes${file.truncated ? ' · truncated' : ''}` : workspace.root}</div>
         </div>
         <button
           onClick={() => {
@@ -189,7 +189,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
           data-testid="memory-toggle"
         >
           <Brain className="w-3.5 h-3.5" />
-          {notes.length > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-[3px] rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-[9px] leading-[14px] text-center font-medium">{notes.length}</span>}
+          {notes.length > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-[3px] rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-[10px] leading-[14px] text-center font-medium">{notes.length}</span>}
         </button>
         <button onClick={refresh} className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800" title="Refresh">
           {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
@@ -203,7 +203,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
 
       <div className="flex-1 min-h-0 overflow-auto panel-scroll">
         {view === 'memory' && !file ? (
-          <div className="p-3 text-[12.5px]" data-testid="memory-view">
+          <div className="p-3 text-[12px]" data-testid="memory-view">
             <p className="text-zinc-500 dark:text-zinc-400 leading-relaxed mb-3">
               Durable workspace notes. Relevant notes and preferences are surfaced at the start of a run; older notes can be searched when needed. Check or delete anything that is stale.
             </p>
@@ -220,7 +220,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
                   </div>
                   <button
                     onClick={async () => setNotes((await deleteMemoryNote(workspace.id, n.id)).notes)}
-                    className="shrink-0 p-1 rounded text-zinc-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    className="shrink-0 p-1 rounded text-zinc-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 touch-reveal focus:opacity-100"
                     title="Forget this"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -230,7 +230,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
             </ul>
             <div className="mt-5 mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Recent verified work</div>
             {runs.length === 0 ? (
-              <div className="text-[11.5px] text-zinc-400 py-2">No completed changes or checks recorded yet.</div>
+              <div className="text-[12px] text-zinc-400 py-2">No completed changes or checks recorded yet.</div>
             ) : (
               <ul className="space-y-1.5">
                 {runs.map((run) => (
@@ -239,7 +239,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
                       <span>{new Date(run.at).toLocaleString()}</span>
                       <span className={run.stopReason === 'completed' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}>{run.stopReason}</span>
                     </div>
-                    {!!run.changed.length && <div className="mt-1 text-[11.5px] text-zinc-600 dark:text-zinc-300 break-words">{run.changed.slice(0, 4).map((f) => f.path).join(' · ')}{run.changed.length > 4 ? ` · +${run.changed.length - 4} more` : ''}</div>}
+                    {!!run.changed.length && <div className="mt-1 text-[12px] text-zinc-600 dark:text-zinc-300 break-words">{run.changed.slice(0, 4).map((f) => f.path).join(' · ')}{run.changed.length > 4 ? ` · +${run.changed.length - 4} more` : ''}</div>}
                     {!!run.checks.length && <div className="mt-1 flex flex-wrap gap-1">{run.checks.slice(0, 4).map((check, i) => <span key={`${check.name}-${i}`} className={`px-1.5 py-0.5 rounded text-[10px] ${check.passed ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'}`}>{check.name} {check.passed ? 'passed' : check.aborted ? 'stopped' : check.timedOut ? 'timed out' : `failed${check.exitCode !== undefined ? ` (${check.exitCode})` : ''}`}</span>)}</div>}
                     {run.failures > 0 && <div className="mt-1 text-[10px] text-rose-500">{run.failures} tool failure{run.failures === 1 ? '' : 's'}</div>}
                   </li>
@@ -247,16 +247,16 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
               </ul>
             )}
             {notes.length > 1 && (
-              <button onClick={async () => setNotes((await clearMemory(workspace.id)).notes)} className="mt-3 text-[11.5px] text-zinc-400 hover:text-rose-500">
+              <button onClick={async () => setNotes((await clearMemory(workspace.id)).notes)} className="mt-3 text-[12px] text-zinc-400 hover:text-rose-500">
                 Forget all notes
               </button>
             )}
           </div>
         ) : file ? (
           fileLoading ? (
-            <div className="p-4 text-[12.5px] text-zinc-400">Loading…</div>
+            <div className="p-4 text-[12px] text-zinc-400">Loading…</div>
           ) : file.binary ? (
-            <div className="p-4 text-[12.5px] text-zinc-400">This is a binary file — it can't be shown as text.</div>
+            <div className="p-4 text-[12px] text-zinc-400">This is a binary file — it can't be shown as text.</div>
           ) : (
             <div className="py-2 text-[12px] leading-[1.35rem] font-mono" data-testid="file-viewer">
               {shown.map((l, i) => (

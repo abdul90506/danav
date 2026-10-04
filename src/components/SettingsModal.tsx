@@ -889,7 +889,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                                 {m.name || m.id}
                               </span>
                               {m.supportsThinking && (
-                                <span className="flex items-center gap-0.5 text-[9px] px-1 py-0.2 rounded bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300">
+                                <span className="flex items-center gap-0.5 text-[10px] px-1 py-0.2 rounded bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300">
                                   <Brain className="w-2.5 h-2.5" />
                                   <span>Reasoning</span>
                                 </span>

@@ -50,7 +50,7 @@ const STATE_STYLE: Record<SandboxState, { dot: string; text: string; label: stri
 };
 
 const btn =
-  'inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11.5px] font-medium border transition-colors disabled:opacity-50 disabled:cursor-default';
+  'inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[12px] font-medium border transition-colors disabled:opacity-50 disabled:cursor-default';
 
 /**
  * Every sandbox in the Novita account — not just the ones this app still
@@ -198,7 +198,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-200/80 dark:border-zinc-800">
           <div className="min-w-0">
             <h2 className="text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">Sandboxes</h2>
-            <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 truncate">
+            <p className="text-[12px] text-zinc-500 dark:text-zinc-400 truncate">
               Everything in your Novita account — including ones Danav no longer tracks.
             </p>
           </div>
@@ -226,7 +226,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
         {/* What the auto-pause policy actually does — otherwise a sleeping
             sandbox looks like a bug. */}
         <div className="px-5 py-2.5 border-b border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/60">
-          <div className="flex items-start gap-2 text-[11.5px] leading-snug text-zinc-600 dark:text-zinc-300">
+          <div className="flex items-start gap-2 text-[12px] leading-snug text-zinc-600 dark:text-zinc-300">
             <Zap className="w-3.5 h-3.5 mt-[1px] shrink-0 text-amber-500" />
             <p>
               Sandboxes bill while <span className="font-medium">running</span>. Danav pauses the ones it manages after{' '}
@@ -235,7 +235,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
             </p>
           </div>
           {totals.orphans > 0 && (
-            <div className="flex items-start gap-2 mt-1.5 text-[11.5px] leading-snug text-amber-700 dark:text-amber-400">
+            <div className="flex items-start gap-2 mt-1.5 text-[12px] leading-snug text-amber-700 dark:text-amber-400">
               <AlertTriangle className="w-3.5 h-3.5 mt-[1px] shrink-0" />
               <p>
                 {totals.orphans} running sandbox{totals.orphans === 1 ? '' : 'es'} belong to no workspace here. They are never
@@ -259,13 +259,13 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
 
         <div className="flex-1 min-h-0 overflow-y-auto panel-scroll p-3 space-y-2">
           {!configured && (
-            <div className="p-4 text-center text-[12.5px] text-zinc-500 dark:text-zinc-400">
+            <div className="p-4 text-center text-[12px] text-zinc-500 dark:text-zinc-400">
               No Novita API key yet. Create a cloud workspace first — the key is asked for there.
             </div>
           )}
 
           {configured && !loading && shown.length === 0 && (
-            <div className="p-6 text-center text-[12.5px] text-zinc-400">
+            <div className="p-6 text-center text-[12px] text-zinc-400">
               {filter === 'all' ? 'No sandboxes in this account.' : `No ${filter} sandboxes.`}
             </div>
           )}
@@ -289,7 +289,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
                   <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot} ${s.state === 'running' ? 'animate-pulse' : ''}`} />
                   <span className={`text-[12px] font-medium shrink-0 ${style.text}`}>{style.label}</span>
 
-                  <span className="flex items-center gap-1.5 min-w-0 text-[12.5px] text-zinc-800 dark:text-zinc-100">
+                  <span className="flex items-center gap-1.5 min-w-0 text-[12px] text-zinc-800 dark:text-zinc-100">
                     {s.isDanav ? (
                       <Cloud className="w-3.5 h-3.5 shrink-0 text-zinc-400" />
                     ) : (

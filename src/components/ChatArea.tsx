@@ -237,8 +237,10 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
               </p>
             </div>
           ) : (
-            // Messages Stream: User right-aligned, AI left-aligned
-            <div className="space-y-3">
+            // Messages Stream: User right-aligned, AI left-aligned.
+            // The rhythm between turns is set here, in one place — ChatMessage no
+            // longer adds a margin of its own.
+            <div className="space-y-5">
               {messages.map((message) => (
                 <ChatMessage
                   key={message.id}
