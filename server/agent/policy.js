@@ -71,6 +71,37 @@ export function observeOwned(state, abs) {
   if (abs) ledgerOf(state)?.owned.add(abs);
 }
 
+/**
+ * A move the shell performed is a file the run now owns under a new name: the
+ * destination inherits whatever the source was known by, and the old path stops
+ * existing. Without this, moving a file with `mv` and then touching it again
+ * would look like touching a stranger.
+ */
+export async function observeShellMove(ws, state, from, to) {
+  const led = ledgerOf(state);
+  if (!led || !ws) return null;
+  const absFrom = await resolveIn(ws, from);
+  const absTo = await resolveIn(ws, to);
+  if (!absFrom || !absTo || absFrom === absTo) return null;
+  const stTo = await ws.stat(absTo).catch(() => null);
+  if (!stTo?.type) return null; // the move did not land where we expected
+  // `mv file folder` puts the file INSIDE the folder, not on top of it.
+  const landed =
+    stTo.type === 'dir' && (await ws.stat(absFrom).catch(() => null))?.type === 'file'
+      ? ws.pathApi.join(absTo, ws.pathApi.basename(absFrom))
+      : absTo;
+  // Whatever it landed on, the run put it there: it knows the file by construction
+  // and must not have to read it back before touching it again.
+  led.owned.add(landed);
+  if (led.seen.has(absFrom)) led.seen.add(landed);
+  const depth = led.listed.get(absFrom);
+  if (depth) led.listed.set(landed, Math.max(led.listed.get(landed) || 0, depth));
+  led.seen.delete(absFrom);
+  led.owned.delete(absFrom);
+  led.listed.delete(absFrom);
+  return landed;
+}
+
 // ---------------------------------------------------------------------------
 // The gate
 // ---------------------------------------------------------------------------
@@ -91,6 +122,13 @@ const REMOVING_COMMAND = [
   /\bgit\s+clean\b/i,
   /\bgit\s+rm\b/i,
 ];
+
+/**
+ * Commands that move or rename things. Anchored to a command position (start, or
+ * after a `;`/`&&`/`|`/`sudo`) so that a call like `node -e "os.rename(...)"` is
+ * not mistaken for the shell's own `mv`.
+ */
+const MOVING_COMMAND = /(?:^|[|&;]\s*|\bsudo\s+|\bgit\s+)\s*(?:mv|move|ren|rename|Move-Item)\b/i;
 
 /**
  * The paths a removing command names. Heuristic on purpose: it only has to
@@ -121,6 +159,35 @@ const isRootPath = (ws, abs) => {
   const r = toPosix(String(ws.root || '')).replace(/\/+$/, '');
   return !a || a === '/' || /^[a-z]:$/i.test(a) || a === r;
 };
+
+/** The move words themselves, so the parser never mistakes one for a path. */
+const MOVE_WORDS = /^(mv|move|ren|rename|Move-Item|sudo|git)$/i;
+
+/**
+ * The source/destination pairs a moving command names, or [] when it cannot be
+ * read confidently. The same rule as removals: a glob, a substitution or a
+ * redirection is skipped rather than guessed at, so an unrecognised command is
+ * never blocked by mistake.
+ */
+export function movingTargets(command) {
+  const text = String(command || '');
+  if (!MOVING_COMMAND.test(text)) return [];
+  const pairs = [];
+  for (const segment of text.split(/&&|\|\||;|\|/)) {
+    if (!MOVING_COMMAND.test(segment.trim())) continue;
+    const operands = [];
+    for (const raw of segment.trim().split(/\s+/)) {
+      const token = raw.replace(/^["']|["']$/g, '').replace(/[;,]$/, '');
+      if (!token || token.startsWith('-') || MOVE_WORDS.test(token)) continue;
+      if (/[|&;<>]/.test(token)) continue;
+      if (/[$`*?{}()!]/.test(token)) continue;
+      operands.push(token);
+    }
+    // `mv [-flags] source... destination`
+    if (operands.length >= 2) pairs.push({ from: operands[0], to: operands[operands.length - 1] });
+  }
+  return pairs.slice(0, 8);
+}
 
 const resolveIn = async (ws, p) => {
   try {
@@ -193,19 +260,52 @@ export async function checkAction({ workspace: ws, state, name, args }) {
   const led = ledgerOf(state);
   if (!led || !ws || !args) return null;
 
-  if (name === 'move_file') {
-    const abs = await resolveIn(ws, String(args.from || ''));
-    if (!abs) return null;
-    const st = await ws.stat(abs).catch(() => null);
-    if (!st?.type || known(led, abs)) return null;
-    const shown = ws.displayPath(abs);
-    return refusal(
-      `Refused: nothing was moved. \`${shown}\` has not been opened in this run — read it, or list the folder it is in, so you know you are moving the right thing.`,
-      { kind: 'move', from: shown, to: toPosix(String(args.to || '')), blocked: true }
-    );
-  }
-
   if (name === 'run_command') {
+    // A move is a removal's quiet cousin: the file that disappears is replaced
+    // by one under a new name, and moving ONTO a file throws that file away.
+    // Both halves get the same question the delete path asks.
+    const moves = movingTargets(args.command);
+    if (moves.length) {
+      const needFiles = [];
+      const needFolders = [];
+      const clobbered = [];
+      let rootSource = '';
+      for (const { from, to } of moves) {
+        const absFrom = await resolveIn(ws, from);
+        if (!absFrom) continue;
+        if (isRootPath(ws, absFrom)) {
+          rootSource = from;
+          continue;
+        }
+        const stFrom = await ws.stat(absFrom).catch(() => null);
+        if (!stFrom?.type) continue; // nothing there: the shell's own error is the honest answer
+        const shownFrom = ws.displayPath(absFrom);
+        if (stFrom.type === 'file') {
+          if (!known(led, absFrom)) needFiles.push(`read \`${shownFrom}\``);
+        } else if (!led.listed.has(absFrom)) {
+          needFolders.push(`list \`${shownFrom}/\``);
+        }
+        const absTo = await resolveIn(ws, to);
+        if (!absTo || absTo === absFrom) continue;
+        const stTo = await ws.stat(absTo).catch(() => null);
+        if (stTo?.type === 'file' && !known(led, absTo)) clobbered.push(`read \`${ws.displayPath(absTo)}\``);
+      }
+      if (rootSource) {
+        return refusal(
+          `Refused: the command was not run. \`${rootSource}\` is the workspace itself, so moving or renaming it is not something a tool call gets to decide. ` +
+            `Move the files or folders you mean instead.`,
+          { kind: 'command', command: String(args.command || ''), blocked: true }
+        );
+      }
+      const ask = [...new Set([...needFolders, ...needFiles, ...clobbered])];
+      if (ask.length) {
+        return refusal(
+          `Refused: nothing was moved. This command renames or replaces something that has not been inspected in this run — ${ask.join(', ')} first, ` +
+            `so the file you move is the one you mean and the file you land on is one you have already seen.`,
+          { kind: 'command', command: String(args.command || ''), blocked: true }
+        );
+      }
+    }
     const targets = removalTargets(args.command);
     if (!targets.length) return null;
     const unseen = [];

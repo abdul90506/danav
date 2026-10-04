@@ -164,13 +164,34 @@ test('the agent may remove what it created itself', async () => {
   assert.equal(await gate('run_command', remove('scratch')), null);
 });
 
-test('moving a file it has never seen is refused too', async () => {
-  const { gate, read } = await setup({ 'a.txt': 'a\n' });
-  const blocked = await gate('move_file', { from: 'a.txt', to: 'b.txt' });
+test('a move is refused for a file that was never opened, and for a destination that was', async () => {
+  const { gate, read } = await setup({ 'a.txt': 'a\n', 'keep.txt': 'precious\n' });
+
+  // The source: nothing moved that the run has never seen.
+  const blocked = await gate('run_command', { command: 'mv a.txt b.txt' });
   assert.ok(blocked);
-  assert.match(blocked.message, /has not been opened in this run/);
+  assert.match(blocked.message, /has not been inspected in this run/);
+  assert.match(blocked.message, /read `a.txt`/);
+
+  // The destination matters just as much: `mv a.txt keep.txt` throws keep.txt away.
   await read('a.txt');
-  assert.equal(await gate('move_file', { from: 'a.txt', to: 'b.txt' }), null);
+  const clobber = await gate('run_command', { command: 'mv a.txt keep.txt' });
+  assert.ok(clobber, 'moving onto an unread file is refused');
+  assert.match(clobber.message, /read `keep.txt`/);
+
+  // Once both sides have been looked at, the move goes through.
+  await read('keep.txt');
+  assert.equal(await gate('run_command', { command: 'mv a.txt keep.txt' }), null);
+  assert.equal(await gate('run_command', { command: 'mv a.txt b.txt' }), null);
+
+  // A directory has to have been listed, not just named.
+  const dirMove = await gate('run_command', { command: 'mv somewhere b.txt' });
+  assert.equal(dirMove, null, 'a source that is not there is the shell\'s business');
+
+  // ...and the workspace itself is never the operand.
+  const root = await gate('run_command', { command: 'mv . b.txt' });
+  assert.ok(root);
+  assert.match(root.message, /workspace itself/);
 });
 
 test('a shell command that removes un-inspected files is refused', async () => {

@@ -1261,7 +1261,7 @@ export async function runAgent({
             const message =
               `This ${name} call arrived without a usable "path", so nothing was written where you meant.${lost}\n` +
               `The body is NOT lost: ${parked.lines} complete lines are saved at ${parked.path}.\n` +
-              `Call move_file with from="${parked.path}" and to="<the path you meant>" to put it in place — do NOT send the body again. ` +
+              `Move it into place with run_command — \`mv "${parked.path}" <the path you meant>\` (or "move" on Windows) — do NOT send the body again. ` +
               `Then continue from the file's last line.\n(Original error: ${argError})`;
             res = {
               ok: false,

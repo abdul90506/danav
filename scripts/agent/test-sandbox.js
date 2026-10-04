@@ -107,7 +107,7 @@ if (args.includes('--sandbox')) {
       // No create_dir tool: the parents come from writing the file.
       assert.equal((await run('write_file', { path: 'tmpdir/a/b/f.txt', content: 'x\n' })).ok, true);
       assert.equal((await ws.stat(ws.resolve('tmpdir/a/b'))).type, 'dir');
-      assert.equal((await run('move_file', { from: 'tmpdir/a/b/f.txt', to: 'moved/f.txt' })).ok, true);
+      assert.equal((await run('run_command', { command: 'mkdir -p moved && mv tmpdir/a/b/f.txt moved/f.txt' })).ok, true);
       assert.equal((await ws.stat(ws.resolve('moved/f.txt'))).type, 'file');
       // Deleting is a shell command now; the loop's gate is what refuses a target
       // nobody has looked at, and test-policy pins that down.

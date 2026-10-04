@@ -240,9 +240,9 @@ test('delete / move, and writes inside .git are refused', async () => {
   assert.equal(gone.ok, true);
   assert.equal(fs.existsSync(path.join(dir, 'd')), false, 'the folder and its contents are gone');
   await run('write_file', { path: 'a.txt', content: 'x\n' });
-  const mv = await run('move_file', { from: 'a.txt', to: 'sub/b.txt' });
-  assert.equal(mv.ui.kind, 'move');
-  assert.ok(fs.existsSync(path.join(dir, 'sub/b.txt')));
+  const mv = await run('run_command', { command: 'mkdir -p sub && mv a.txt sub/b.txt' });
+  assert.equal(mv.ok, true, mv.output);
+  assert.ok(fs.existsSync(path.join(dir, 'sub/b.txt')), 'the shell move landed');
   // Folders have no tool of their own any more: creating one is a side effect of
   // writing a file into it, and the retired name is answered with the redirect.
   assert.equal(toolsetHas('create_dir'), false);
@@ -1201,18 +1201,19 @@ test('run_command understands "timeout" as timeout_seconds', async () => {
   assert.equal(r.failedSoft, true, 'a killed command is information, not a failure streak');
 });
 
-test('move_file records the file it produced, so the run knows what it made', async () => {
+test('a move made with the shell is still the run\'s own file', async () => {
   const { run, ws, ctx } = await setup();
   await ws.writeText(await ws.resolve('.danav-recovered/draft.txt'), 'restored page\nsecond line\n');
 
-  const moved = await run('move_file', { from: '.danav-recovered/draft.txt', to: 'index.html' });
-  assert.equal(moved.ok, true);
-  assert.equal(moved.ui.to, 'index.html');
+  const moved = await run('run_command', { command: 'mv .danav-recovered/draft.txt index.html' });
+  assert.equal(moved.ok, true, moved.output);
   assert.equal(ctx.state.changed.has('index.html'), true, 'the new file is part of this run');
   assert.match((await ws.readText(await ws.resolve('index.html'))).text, /restored page/);
+  // ...and the run knows the file without having to read it back.
+  assert.equal(ctx.state.ledger.owned.has(await ws.resolve('index.html')), true);
 
   // a rename onto an existing file is a change too, but it is not a new file
   ctx.state.changed.clear();
-  await run('move_file', { from: 'index.html', to: 'index.html.bak' });
+  await run('run_command', { command: 'mv index.html index.html.bak' });
   assert.equal(ctx.state.changed.has('index.html.bak'), true);
 });

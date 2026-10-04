@@ -881,7 +881,8 @@ export const App: React.FC = () => {
                 }
           )
         );
-      const MUTATING = new Set(['write_file', 'edit_file', 'multi_edit', 'delete_file', 'move_file', 'create_dir', 'run_command']);
+      // Anything that can change a file on disk: the tool calls, or a command that does.
+      const MUTATING = new Set(['write_file', 'edit_file', 'multi_edit', 'run_command']);
       let settledMutations = 0;
       /**
        * The docked preview follows the agent. Two things move it on: the agent

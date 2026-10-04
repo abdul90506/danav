@@ -59,7 +59,7 @@ test('peekPartialArgs: other tools keep the small display arguments, and unfinis
   assert.equal(peekPartialArgs('run_command', '{"command": "npm install && npm ru').args.command, undefined);
   assert.equal(peekPartialArgs('run_command', '{"command": "npm install", "background": true}').args.command, 'npm install');
   assert.equal(peekPartialArgs('read_file', '{"file_path": "x/y.js"').args.path, 'x/y.js');
-  assert.equal(peekPartialArgs('move_file', '{"from": "a", "to": "b"}').args.to, 'b');
+  assert.equal(peekPartialArgs('edit_file', '{"path": "a.js", "old_string": "x"}').args.path, 'a.js');
   assert.equal(peekPartialArgs('web_search', '{"query": "vite proxy"').args.query, 'vite proxy');
   assert.equal(peekPartialArgs('list_dir', '{}').progress, undefined);
 });

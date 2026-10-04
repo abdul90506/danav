@@ -1509,7 +1509,7 @@ test('a write with no path keeps its body and asks for the destination', async (
   const text = (r) => r.messages.map((m) => String(m.content || '')).join('\n');
   const modelView = requests.map(text).join('\n');
   assert.match(modelView, /without a usable "path"/, 'the model was told what went wrong');
-  assert.match(modelView, /move_file with from="\.danav-recovered\//, 'and exactly how to fix it');
+  assert.match(modelView, /mv "\.danav-recovered\//, 'and exactly how to fix it');
   assert.match(modelView, /do NOT send the body again/, 'the body is not to be re-written');
   // The body was written once: no assistant turn repeats it after the loss.
   const resent = requests.filter((r) => r.messages.some((m) => m.role === 'assistant' && String(m.content || '').includes('<h1>Hello, world</h1>'))).length;

@@ -75,9 +75,6 @@ const FAILED: Record<string, string> = {
   file_outline: "Couldn't outline",
   remember: "Couldn't save a note:",
   forget: "Couldn't forget",
-  delete_file: "Couldn't delete",
-  move_file: "Couldn't move",
-  create_dir: "Couldn't create folder",
   list_dir: "Couldn't list",
   grep_search: 'Search failed:',
   file_search: 'Search failed:',
@@ -271,25 +268,6 @@ function rawLabel(a: AgentAction): ActionLabel {
         meta: !live && r ? plural(r.count ?? 0, 'symbol') : undefined,
       });
 
-    case 'delete_file':
-      return base('Deleting', 'Deleted', {
-        target: r?.path || args.path,
-        targetKind: r?.isDir ? 'dir' : 'file',
-        // What a recursive delete actually covered — the one thing you cannot
-        // see from the outside, and the reason the run makes it look first.
-        meta: !live && r?.isDir && typeof r.files === 'number' ? plural(r.files, 'file') : undefined,
-      });
-
-    case 'move_file':
-      return base('Moving', 'Moved', {
-        target: `${r?.from || args.from || ''} → ${r?.to || args.to || ''}`,
-        targetKind: 'file',
-        iconPath: r?.to || args.to,
-      });
-
-    case 'create_dir':
-      return base('Creating folder', 'Created folder', { target: r?.path || args.path, targetKind: 'dir' });
-
     case 'grep_search':
       return base('Searching', 'Searched', {
         target: r?.pattern || args.pattern,
@@ -447,12 +425,6 @@ export function collectActivity(messages: Message[], max = 60): string[] {
           break;
         case 'replace_in_files':
           if (a.status === 'done' && !r?.dryRun) lines.push(`replaced "${r?.pattern}" with "${r?.replacement}" in ${r?.fileCount ?? '?'} files`);
-          break;
-        case 'delete_file':
-          if (a.status === 'done') lines.push(`deleted ${r?.path || a.args?.path}`);
-          break;
-        case 'move_file':
-          if (a.status === 'done') lines.push(`moved ${r?.from} → ${r?.to}`);
           break;
         case 'run_command':
           lines.push(`ran \`${(r?.command || a.args?.command || '').slice(0, 160)}\` → ${r?.kind === 'background' ? `background ${r?.id || ''}` : `exit ${r?.exitCode ?? '?'}`}`);

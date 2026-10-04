@@ -193,8 +193,8 @@ export const scenarios = {
       return { text: 'Writing the page.', toolCalls: [{ name: 'write_file', args: { content: HTML } }] };
     }
     const parked = /(\.danav-recovered\/[\w-]+\.[A-Za-z0-9]+)/.exec(messages.map((m) => String(m.content || '')).join('\n'))?.[1];
-    if (parked && !messages.some((m) => m.role === 'tool' && /Moved |moved /.test(String(m.content)))) {
-      return { text: 'Using the file I already wrote.', toolCalls: [{ name: 'move_file', args: { from: parked, to: 'index.html' } }] };
+    if (parked && !messages.some((m) => m.role === 'tool' && /exit code 0/.test(String(m.content)))) {
+      return { text: 'Using the file I already wrote.', toolCalls: [{ name: 'run_command', args: { command: `mv ${parked} index.html` } }] };
     }
     return { text: 'Recovered and moved into place.' };
   },

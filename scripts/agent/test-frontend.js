@@ -783,8 +783,6 @@ test('wording: "Creating index.html +37" while streaming, "Created … +77" / "R
   assert.deepEqual([live.verb, live.target, live.added, live.removed, live.expandable], ['Creating', 'index.html', 37, 12, false]);
   const created = fmt.actionLabel(act({ result: { kind: 'write', path: 'index.html', created: true, added: 77, removed: 0, hunks: [{ newStart: 1, lines: [] }] } }));
   assert.deepEqual([created.verb, created.added, created.removed, created.expandable], ['Created', 77, undefined, true]);
-  const moved = fmt.actionLabel(act({ tool: 'move_file', result: { kind: 'move', from: 'a.txt', to: 'src/b.css' } }));
-  assert.deepEqual([moved.target, moved.iconPath], ['a.txt → src/b.css', 'src/b.css'], 'a move shows the destination file icon');
   const rewrote = fmt.actionLabel(act({ result: { kind: 'write', path: 'index.html', created: false, added: 77, removed: 98 } }));
   assert.deepEqual([rewrote.verb, rewrote.added, rewrote.removed], ['Rewrote', 77, 98]);
 });

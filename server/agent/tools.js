@@ -16,7 +16,7 @@ import { applyAnyEdits, applyEdit, diffSummary, numberLines, splitLines, stripLi
 import { formatOutline, outline } from './outline.js';
 import { checkSyntax, syntaxWarning } from './check.js';
 import { addNote, readNotes, removeNotes, searchNotes } from './memory.js';
-import { observeFile, observeListing, observeOwned } from './policy.js';
+import { movingTargets, observeFile, observeListing, observeOwned, observeShellMove } from './policy.js';
 import { peekPartialArgs, salvageWrite, extractStringFields, repairJsonText } from './partial.js';
 import { limits } from './config.js';
 import { WorkspaceError } from './workspaces/base.js';
@@ -397,7 +397,6 @@ export const TOOL_DEFINITIONS = [
     },
     ['edits']
   ),
-  fn('move_file', 'Move or rename a file or folder.', { from: { type: 'string' }, to: { type: 'string' } }, ['from', 'to']),
   fn(
     'grep_search',
     'Search file CONTENTS with a regular expression. Returns `file:line: text`. Skips node_modules, .git, build output and binary files. Use glob (e.g. "*.tsx") to narrow by file name.',
@@ -538,6 +537,10 @@ export const RETIRED_TOOLS = new Map([
     'write_file already creates every missing folder on its way to the file, so just write the file where you want it (or use run_command with "mkdir -p <path>" for an empty folder).',
   ],
   [
+    'move_file',
+    'moving and renaming are shell jobs now: run_command with "mv <from> <to>" (or "move" / "ren" on Windows). The destination is stamped as created when it lands, and the look-before-you-leap rule covers both halves — the file you move and the file you land on must have been inspected in this run.',
+  ],
+  [
     'delete_file',
     'removing things is a shell job now. Use run_command: "rm -f <file>", "rm -rf <folder>", or the platform equivalent ("del" / "rmdir /s" on Windows). The same look-before-you-leap rule guards it, so list or read what you are removing first. Never remove the workspace itself.',
   ],
@@ -574,7 +577,6 @@ export function displayArgs(name, rawArgs) {
     case 'file_outline':
     case 'write_file':
     case 'edit_file':
-    case 'move_file': pick.from = s('from'); pick.to = s('to'); break;
     case 'grep_search': pick.pattern = s('pattern'); pick.path = s('path'); pick.glob = s('glob'); break;
     case 'file_search': pick.pattern = s('pattern'); pick.path = s('path'); break;
     case 'run_command': pick.command = s('command', 600); pick.cwd = s('cwd'); pick.background = asBool(a.background) || undefined; break;
@@ -1104,22 +1106,6 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       return res;
     },
 
-    async move_file(args, ctx) {
-      const from = await target(reqStr(args, 'from'));
-      const to = await target(reqStr(args, 'to'));
-      guardWrite(to);
-      const landed = await ws.stat(to);
-      await ws.move(from, to);
-      ctx.state.ledger?.seen.delete(from);
-      ctx.state.ledger?.owned.delete(from);
-      observeOwned(ctx.state, to); // the agent knows exactly what landed there
-      // A file that appeared here is part of what this run produced — that is how
-      // a body recovered from a mangled write reaches the run's own change list.
-      if (!landed.type) noteChange(ctx, rel(to), 0, 0);
-      return { output: `Moved ${rel(from)} → ${rel(to)}.`, ui: { kind: 'move', from: rel(from), to: rel(to) } };
-    },
-
-    // ----------------------------------------------------------------- search
     async grep_search(args) {
       const pattern = reqStr(args, 'pattern');
       const abs = await target(optStr(args, 'path') || '.');
@@ -1227,6 +1213,21 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         };
       }
 
+      // Read the moving command BEFORE it runs: afterwards a destination that was
+      // created and one that was replaced look exactly the same.
+      const shellMoves = args.background || !command ? [] : movingTargets(command);
+      const destExisted = [];
+      for (const { to } of shellMoves) {
+        let abs = null;
+        try {
+          abs = await target(to);
+        } catch {
+          destExisted.push(true); // a path we cannot resolve is not one we claim to have made
+          continue;
+        }
+        destExisted.push(Boolean((await ws.stat(abs).catch(() => null))?.type));
+      }
+
       const seconds = clampInt(args.timeout_seconds, 1, Math.floor(limits.maxCommandTimeoutMs() / 1000), Math.floor(limits.commandTimeoutMs() / 1000));
       const r = await ws.exec(command, {
         cwd,
@@ -1235,6 +1236,15 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         onData: (chunk) => ctx.emit({ outputAppend: safe(chunk) }),
       });
       const output = safe(r.output);
+      // The run keeps track of what it has looked at, and of what it produced: a
+      // file the shell just moved is one of those things, under its new name.
+      if (r.exitCode === 0 && !r.timedOut && !r.aborted) {
+        for (let i = 0; i < shellMoves.length; i++) {
+          const { from, to } = shellMoves[i];
+          const landed = await observeShellMove(ws, ctx.state, from, to).catch(() => null);
+          if (landed && !destExisted[i]) noteChange(ctx, rel(landed), 0, 0);
+        }
+      }
       const body = truncateMiddle(output.trimEnd(), limits.maxOutputChars, 'output');
       const status = r.aborted
         ? '[stopped by the user]'
