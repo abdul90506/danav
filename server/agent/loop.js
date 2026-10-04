@@ -493,6 +493,32 @@ function verificationLabel(command) {
   return null;
 }
 
+/**
+ * A cheap fingerprint of a tool result.
+ *
+ * Used to recognize a run that is going in circles: the same call, the same
+ * answer, over and over. A hash keeps that check free even for a 30 000-character
+ * command output.
+ */
+function hashText(text) {
+  let h = 0x811c9dc5;
+  const s = String(text ?? '');
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/** Tools whose whole point is to be called again (a server produces new output). */
+const POLLING_TOOLS = new Set(['read_process_output', 'list_processes', 'get_preview_url']);
+
+/**
+ * Files whose change deserves a check before the run calls itself finished.
+ * A document, a data file or a config is not something you "run"; code is.
+ */
+const CODE_FILE = /\.(?:[cm]?js|jsx|tsx?|mjs|cjs|py|rb|go|rs|java|kt|kts|cs|php|c|h|cc|cpp|hpp|swift|scala|sh|bash|zsh|ps1|vue|svelte|astro|html|htm|css|scss|sass|less)$/i;
+
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
@@ -604,13 +630,18 @@ export async function runAgent({
     const memory = redact(memoryForPrompt(workspace.id, 6000, currentRequest));
     const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, 2500, 6));
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, activity }) },
+      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, activity, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
       ...priorMessages,
     ];
 
     const failCounts = new Map();
+    /** name+args -> the result hash of the last time it ran, to spot a loop. */
+    const callMemory = new Map();
+    /** Budget warnings are each said once; a second one would only be noise. */
+    const budgetNotices = new Set();
     let wrapUp = null; // set once a budget runs out or the model keeps failing
     let nudged = false;
+    let verifyNudged = false;
 
     // ---- rounds -------------------------------------------------------------
     for (;;) {
@@ -630,6 +661,36 @@ export async function runAgent({
         });
       }
       stopReason = wrapUp || stopReason;
+
+      // How much of the run's budget is left, said out loud while there is still
+      // time to act on it. A model that cannot see the end of its budget spends
+      // it exploring and then runs out mid-change; the same model told "8 steps
+      // left" finishes the file, runs the check and reports.
+      if (!wrapUp) {
+        const stepsUsed = stats.steps;
+        const msLeft = deadline - Date.now();
+        const runMs = Math.max(1, deadline - startedAt);
+        const notice = (key, text, { visible = false } = {}) => {
+          if (budgetNotices.has(key)) return;
+          budgetNotices.add(key);
+          messages.push({ role: 'user', content: `[system notice] ${text}${key.endsWith('_low') ? ' Stop starting new work: finish and verify what is in progress, then write your answer.' : ''}` });
+          // The half-way ones are a nudge for the model, and a passing status line
+          // for the user. The last-chance ones are worth a row in the chat: they
+          // explain why the run is about to wrap itself up.
+          if (visible) send({ agent: { type: 'notice', message: text } });
+          else send({ status: text });
+        };
+        if (stepsUsed >= Math.max(maxSteps - 5, Math.floor(maxSteps * 0.85))) {
+          notice('steps_low', `${Math.max(0, maxSteps - stepsUsed)} of the ${maxSteps} steps for one run remain — finishing and verifying what is already in progress.`, { visible: true });
+        } else if (stepsUsed >= Math.ceil(maxSteps / 2)) {
+          notice('steps_half', `Step ${stepsUsed} of ${maxSteps} done — keeping the rest of this run focused.`);
+        }
+        if (msLeft <= runMs * 0.15) {
+          notice('time_low', `About ${Math.max(1, Math.round(msLeft / 60_000))} minute(s) of this run remain — wrapping up the current change.`, { visible: true });
+        } else if (msLeft <= runMs * 0.5) {
+          notice('time_half', `Half of this run's time allowance is used. Keep the remaining work focused on the user's actual request.`);
+        }
+      }
 
       const prune = pruneMessages(messages, limits.contextChars());
       if (prune.pruned) send({ status: 'Trimming old context…' });
@@ -747,6 +808,16 @@ export async function runAgent({
             onThinking: (t) => send({ thinking: t }),
             onToolDelta: (_i, slot) => onDelta(slot),
             onRetry: ({ delayMs, reason }) => send({ status: `Provider busy (${reason}) — retrying in ${Math.round(delayMs / 1000)}s…` }),
+            onStreamRestart: () => {
+              // The answer is being read again from the start: settle anything the
+              // chat still shows for the abandoned attempt, so no row keeps
+              // spinning for a call that will never run.
+              for (const st of live.values()) {
+                send({ agent: { type: 'action_end', id: st.uiId, status: 'error', ok: false, error: 'Interrupted' } });
+              }
+              live.clear();
+              send({ agent: { type: 'notice', message: 'The connection dropped mid-answer — asking the provider again.' } });
+            },
           });
           break;
         } catch (err) {
@@ -768,14 +839,50 @@ export async function runAgent({
       // ---- the model is done talking -----------------------------------------
       if (calls.length === 0) {
         const said = round.text.trim();
-        if (!said && !wrapUp && stats.toolCalls > 0 && !nudged) {
-          // It acted and then fell silent. The user must not be left guessing.
+
+        // Nothing at all: no answer and no tool call. This happens with a
+        // reasoning model that spent its whole turn thinking, or a provider that
+        // returned an empty choice — and it used to end the run in silence.
+        if (!said && !wrapUp && !nudged) {
           nudged = true;
           messages.push({
             role: 'user',
-            content: '[system notice] You finished without a message. Briefly tell the user, in their language, what you did and the result.',
+            content: stats.toolCalls > 0
+              ? '[system notice] You finished without a message. Briefly tell the user, in their language, what you did and the result.'
+              : "[system notice] Your last response was empty — it had no answer and no tool call. Answer the user's request now in words, or call the tools you need. Do not reply with nothing.",
           });
           continue;
+        }
+
+        // It changed code and never checked any of it. Asking once — before the
+        // turn closes — is the difference between "wrote the file" and "wrote
+        // the file and ran it", which is the whole quality bar of this agent.
+        const changedCode = [...state.changed.keys()].filter((filePath) => CODE_FILE.test(filePath));
+        if (
+          said && !wrapUp && !verifyNudged && changedCode.length > 0 && state.checks.length === 0 &&
+          stats.steps + 1 < maxSteps && Date.now() < deadline
+        ) {
+          verifyNudged = true;
+          const shown = changedCode.slice(0, 3).map((f) => `\`${f}\``).join(', ');
+          send({
+            agent: {
+              type: 'notice',
+              message: `No check has been run for ${changedCode.length === 1 ? '' : 'any of '}the changed file(s) — asking the model to verify before it finishes.`,
+            },
+          });
+          messages.push({
+            role: 'user',
+            content:
+              `[system notice] You changed ${changedCode.length} code file(s) (${shown}) but ran no check. ` +
+              "Run the project's most relevant verification now — its test, build, typecheck, linter, or the program itself — and read the output. " +
+              'If this project genuinely has no way to check itself, or the check is too slow or impossible here, say exactly that in your answer instead.',
+          });
+          continue;
+        }
+
+        if (!said) {
+          // Still nothing: never end a run without a word to the user.
+          send({ agent: { type: 'notice', message: 'The model returned an empty response. Send the request again, or try another model.' } });
         }
         break;
       }
@@ -1033,6 +1140,28 @@ export async function runAgent({
       const settle = ({ name, modelId, modelIds, rawArgs, res }) => {
         let output = truncateMiddle(String(res.output ?? ''), limits.maxOutputChars, 'output');
         let stop = false;
+
+        // Going in circles: the exact same call, returning the exact same result.
+        // A failing call is already handled below; this catches the run that keeps
+        // *succeeding* at the same thing — re-reading one file, re-running one
+        // search — while the user waits for progress that is not coming.
+        if (res.ok && !POLLING_TOOLS.has(name)) {
+          const signature = `${name}:${rawArgs}`;
+          const resultHash = hashText(output);
+          const previous = callMemory.get(signature);
+          if (previous && previous.hash === resultHash) {
+            previous.count += 1;
+            output +=
+              `\n[NO PROGRESS] This is repeat #${previous.count} of this exact call, and it returned the identical result. ` +
+              'Nothing has changed since the last time. Do something different — act on what you already have, or explain what is blocking you.';
+            if (previous.count >= 4 && !wrapUp) {
+              wrapUp = 'no_progress';
+              stop = true;
+            }
+          } else {
+            callMemory.set(signature, { hash: resultHash, count: 1 });
+          }
+        }
         if (!res.ok && !res.failedSoft && !res.denied) {
           const key = `${name}:${rawArgs}`;
           const n = (failCounts.get(key) || 0) + 1;
@@ -1063,7 +1192,10 @@ export async function runAgent({
         if (stop) {
           messages.push({
             role: 'user',
-            content: '[system notice] You keep repeating a call that fails. Stop calling tools. Explain to the user what you were trying to do, what failed, and what they could try.',
+            content:
+              wrapUp === 'no_progress'
+                ? '[system notice] You keep calling the same thing and getting the same answer back, so this run is not moving. Stop calling tools and tell the user what you were trying to find out, what you already know, and what you would need to go further.'
+                : '[system notice] You keep repeating a call that fails. Stop calling tools. Explain to the user what you were trying to do, what failed, and what they could try.',
           });
         }
         return stop;

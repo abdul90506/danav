@@ -897,6 +897,7 @@ test('formatRanges / formatDuration / changedSummary / stopNotice', () => {
   assert.deepEqual(fmt.changedSummary([{ path: 'a', added: 5, removed: 1 }, { path: 'b', added: 2, removed: 0 }]), { files: 2, added: 7, removed: 1 });
   assert.equal(fmt.changedSummary([]), undefined);
   assert.match(fmt.stopNotice('step_limit'), /continue/);
+  assert.match(fmt.stopNotice('no_progress'), /same call|same answer/i);
   assert.equal(fmt.stopNotice('completed'), undefined);
 });
 
@@ -965,8 +966,12 @@ test('data path: runAgentTurn turns a real SSE run into ordered blocks (and Stop
     assert.deepEqual(types, [
       'thinking', 'text', 'action:update_plan', 'action:write_file', 'action:write_file',
       'text', 'action:read_file', 'action:multi_edit', 'action:edit_file',
-      'action:run_command', 'action:grep_search', 'action:list_dir', 'text',
+      'action:run_command', 'action:grep_search', 'action:list_dir',
+      // the model's answer, the run's note that no check had been run, and the
+      // answer it gave after being asked to verify
+      'text', 'text', 'text',
     ]);
+    assert.match(finished.snap.blocks.at(-2).content, /no check has been run/i);
     assert.ok(finished.snap.blocks.filter((b) => b.type === 'action').every((b) => b.action.status === 'done'));
     assert.equal(finished.snap.blocks[0].isStillThinking, false);
     assert.match(finished.snap.content, /^I'll set up a small landing page\.\n\nNow a couple of refinements\.\n\nDone! I created index\.html/);

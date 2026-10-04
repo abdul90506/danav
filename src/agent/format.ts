@@ -394,6 +394,8 @@ export function stopNotice(reason?: string): string | undefined {
       return 'Reached the time limit for one run — reply "continue" to keep going.';
     case 'repeated_failures':
       return 'Stopped after the same step kept failing.';
+    case 'no_progress':
+      return 'Stopped: the same call kept returning the same answer.';
     default:
       return undefined;
   }

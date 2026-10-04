@@ -75,6 +75,13 @@ test('a live update always carries a number for BOTH counters', async () => {
   }
 });
 
+/** Everything the user saw in the chat, in order: the streamed answer. */
+const saidSoFar = (events) => events.filter((e) => typeof e.content === 'string').map((e) => e.content).join('');
+
+/** The one-line notices the run showed the user. */
+const noticesSeen = (events) =>
+  events.filter((e) => e.agent?.type === 'notice').map((e) => String(e.agent.message || ''));
+
 async function agentRun({ model = 'fake-build', autoRun = true, history, signal, onEvent, workspace } = {}) {
   const l = await getLlm();
   l.requests.length = 0;
@@ -182,7 +189,13 @@ test('happy path: plan, write, read, multi-edit, edit, command, search, list —
   assert.equal(changed['index.html'].added, countLines(HTML) + 1);
   assert.equal(changed['index.html'].removed, 1);
   assert.equal(changed['style.css'].added, countLines(CSS) + 3);
-  assert.equal(end.steps, 4);
+  assert.equal(end.steps, 5, 'three working rounds, the answer, and one verification round');
+
+  // the model finished without a check of its own accord, so the run asked once
+  assert.ok(
+    noticesSeen(events).some((n) => /no check has been run/i.test(n)),
+    'the run asked for a check before accepting the answer'
+  );
 
   // the 2nd and 3rd calls of a round are announced as queued; the 1st goes straight to running
   const queuedIds = events.filter((e) => e.agent?.patch?.status === 'queued').map((e) => e.agent.id);
@@ -1302,5 +1315,100 @@ test('routes: "always allow" flips the workspace to auto-run', async () => {
     assert.equal(list.json.workspaces.find((w) => w.id === ws.id).autoRun, true);
   } finally {
     await app.stop();
+  }
+});
+
+// ===========================================================================
+// Recovery and self-awareness of a run: a dropped answer, an empty turn, a
+// call that answers nothing new, and code that was never checked.
+// ===========================================================================
+
+test('a dropped answer is picked up without repeating what was already read', async () => {
+  // The connection dies mid-answer (a proxy, a flaky network) and the provider
+  // writes the same opening again. The user must end up with the whole answer,
+  // each part exactly once — losing it, or showing it twice, both read as broken.
+  const { events, requests } = await agentRun({ model: 'fake-drop', history: [{ role: 'user', content: 'say the sentence' }] });
+  assert.equal(requests.length, 2, 'the request was repeated once');
+
+  const streamed = saidSoFar(events);
+  assert.equal(streamed, 'First half of the answer. Second half of the answer.');
+  assert.equal((streamed.match(/First half/g) || []).length, 1, 'the repeated opening was not shown twice');
+
+  const notices = noticesSeen(events);
+  assert.ok(notices.some((n) => /asking the provider again/i.test(n)), `expected a notice about the retry, got ${JSON.stringify(notices)}`);
+});
+
+test('a provider that keeps dropping leaves the partial answer and the run lives on', async () => {
+  const { events, result } = await agentRun({ model: 'fake-drop-always', history: [{ role: 'user', content: 'say the sentence' }] });
+  const streamed = saidSoFar(events);
+  assert.match(streamed, /Only this much/);
+  assert.match(streamed, /connection to the provider dropped/i, 'the user is told why the answer stops');
+  assert.notEqual(result.stopReason, 'error');
+  assert.ok(events.some((e) => e.agent?.type === 'run_end'), 'the run still ended properly');
+});
+
+test('an empty response is never the end of the run in silence', async () => {
+  // A reasoning model that spent its whole turn thinking, or an endpoint that
+  // returned an empty choice: no answer, no tool call. This used to end the run
+  // with a blank assistant message.
+  const { events, requests } = await agentRun({ model: 'fake-empty-first', history: [{ role: 'user', content: 'hello there' }] });
+  assert.equal(saidSoFar(events), 'Here is the answer you asked for.');
+  assert.equal(requests.length, 2, 'the empty turn was retried instead of ending the run');
+  assert.match(JSON.stringify(requests[1].messages), /empty/i, 'the model was told what it did wrong');
+
+  // ...and if it keeps returning nothing, the user is told rather than left with silence
+  const always = await agentRun({ model: 'fake-empty-always', history: [{ role: 'user', content: 'hello there' }] });
+  assert.match(noticesSeen(always.events).join(' | '), /empty/i, 'a message, not silence');
+});
+
+test('a call that keeps answering the same thing stops the run instead of spinning', async () => {
+  const { events, result, requests } = await agentRun({ model: 'fake-no-progress', history: [{ role: 'user', content: 'look at notes.txt' }], workspace: (() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-np-'));
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'fixed content\n');
+    return new LocalWorkspace({ id: 'ws-np', kind: 'local', name: 'np', root: dir, autoRun: true });
+  })() });
+
+  assert.equal(result.stopReason, 'no_progress', 'the loop stopped itself');
+  assert.ok(requests.length <= 6, `it did not grind through the whole budget (${requests.length} requests)`);
+  const modelView = requests.map((r) => JSON.stringify(r.messages)).join('\n');
+  assert.match(modelView, /\[NO PROGRESS\]/, 'the model was told the call gave it nothing new');
+  // The user-facing explanation for a stopped run comes from the frontend's
+  // stopNotice(stopReason), which is covered in the frontend suite — what matters
+  // here is that the run reports a reason at all, and it reached the journal.
+  assert.equal(events.find((e) => e.agent?.type === 'run_end').agent.stopReason, 'no_progress');
+});
+
+test('code that was changed but never checked is verified before the run ends', async () => {
+  const { events, result, ws } = await agentRun({ model: 'fake-unverified', history: [{ role: 'user', content: 'write app.js' }] });
+  assert.ok(fs.existsSync(path.join(ws.root, 'app.js')), 'the file was written');
+  assert.equal(result.stopReason, 'completed');
+  assert.ok(
+    noticesSeen(events).some((n) => /no check has been run/i.test(n)),
+    'the user can see why the model is still working'
+  );
+  const commands = events.filter((e) => e.agent?.type === 'action_start' && e.agent.tool === 'run_command');
+  assert.ok(commands.length >= 1, 'a real check ran after the nudge');
+  assert.match(saidSoFar(events), /verified/i, 'the run ended with the check it ran');
+});
+
+test('each budget warning is said once, and the prompt states the budget', async () => {
+  const previous = process.env.DANAV_AGENT_MAX_STEPS;
+  process.env.DANAV_AGENT_MAX_STEPS = '12';
+  try {
+    const { events, requests } = await agentRun({ model: 'fake-loop', history: [{ role: 'user', content: 'keep going' }] });
+    const notices = noticesSeen(events);
+    assert.equal(notices.length, new Set(notices).size, 'no notice is repeated');
+    assert.ok(notices.some((n) => /steps for one run remain/i.test(n)), `a low-steps warning arrived: ${JSON.stringify(notices)}`);
+
+    const lastMessages = requests[requests.length - 1].messages.map((m) => String(m.content)).join('\n');
+    assert.match(lastMessages, /steps for one run remain/, 'the model was told the budget is nearly gone');
+
+    const system = String(requests[0].messages[0].content);
+    assert.match(system, /up to 12 model turns/, 'the prompt states the real step budget');
+    assert.match(system, /documentation true/i);
+    assert.match(system, /context as finite/i);
+  } finally {
+    if (previous === undefined) delete process.env.DANAV_AGENT_MAX_STEPS;
+    else process.env.DANAV_AGENT_MAX_STEPS = previous;
   }
 });

@@ -131,6 +131,45 @@ export const scenarios = {
     return { text: 'I saw the errors and will stop here.' };
   },
 
+  /**
+   * The connection dies in the middle of the answer, and the retry writes the
+   * same opening again — only the unseen tail should reach the user.
+   */
+  drop: ({ requestIdx }) => ({
+    text: 'First half of the answer. Second half of the answer.',
+    dropAfterChars: requestIdx === 0 ? 'First half of the answer. '.length : 0,
+  }),
+
+  /** Both the answer and its retry are cut off: the run keeps what arrived. */
+  dropAlways: () => ({
+    text: 'Only this much of the answer ever arrived.',
+    dropAfterChars: 'Only this much'.length,
+  }),
+
+  /** No text and no tools on the first try, then a real answer. */
+  emptyFirst: ({ requestIdx }) => (requestIdx === 0 ? { text: '' } : { text: 'Here is the answer you asked for.' }),
+
+  /** Never says anything at all — a provider that returns empty choices. */
+  emptyAlways: () => ({ text: '' }),
+
+  /** Re-reads the same unchanged file until the loop notices nothing is moving. */
+  noProgress: ({ roundIdx }) =>
+    roundIdx < 7
+      ? { text: 'Checking the file again.', toolCalls: [{ name: 'read_file', args: { path: 'notes.txt' } }] }
+      : { text: 'The file has not changed; stopping the loop.' },
+
+  /** Writes a file and then tries to finish without ever checking it. */
+  unverified: ({ roundIdx, messages }) => {
+    if (roundIdx === 0) return { text: 'Writing the file.', toolCalls: [{ name: 'write_file', args: { path: 'app.js', content: 'export const answer = 42;\n' } }] };
+    const nudged = messages.some((m) => m.role === 'user' && String(m.content).includes('ran no check'));
+    const checked = messages.some((m) => m.role === 'tool' && /answer|42/.test(String(m.content)));
+    if (nudged && !checked) {
+      return { text: 'Checking it now.', toolCalls: [{ name: 'run_command', args: { command: 'node -e "import(\'./app.js\').then(m => console.log(m.answer))"' } }] };
+    }
+    if (checked) return { text: 'The check printed 42 — verified.' };
+    return { text: 'All done — app.js is written.' };
+  },
+
   loop: ({ roundIdx }) => ({
     text: `step ${roundIdx + 1}`,
     toolCalls: [{ name: 'run_command', args: { command: `echo round-${roundIdx}` } }],
@@ -333,6 +372,12 @@ const byModel = {
   'fake-check': scenarios.check,
   'fake-delegate': scenarios.delegate,
   'fake-gate': scenarios.gate,
+  'fake-drop': scenarios.drop,
+  'fake-drop-always': scenarios.dropAlways,
+  'fake-empty-first': scenarios.emptyFirst,
+  'fake-empty-always': scenarios.emptyAlways,
+  'fake-no-progress': scenarios.noProgress,
+  'fake-unverified': scenarios.unverified,
 };
 
 export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {
@@ -369,17 +414,21 @@ export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {
       }
     }
 
+    const requestIdx = requests.length - 1;
     const scenario = byModel[payload.model] || scenarios.build;
     const roundIdx = payload.messages.filter((m) => m.role === 'assistant' && m.tool_calls?.length).length;
     const withTools = Array.isArray(payload.tools) && payload.tools.length > 0;
     const isDelegatedChild = payload.model === 'fake-delegate'
       && String(payload.messages?.[0]?.content || '').includes('read-only software-review subagent');
     const round = isDelegatedChild
-      ? scenario({ roundIdx, messages: payload.messages })
-      : withTools ? scenario({ roundIdx, messages: payload.messages }) : { text: 'Wrapping up without using more tools.' };
+      ? scenario({ roundIdx, messages: payload.messages, requestIdx })
+      : withTools ? scenario({ roundIdx, messages: payload.messages, requestIdx }) : { text: 'Wrapping up without using more tools.' };
     const delay = round.delayMs ?? chunkDelayMs;
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+    // Flush immediately: a real provider (and any proxy) does, and a dropped
+    // connection can only be observed as a drop if the reply had really started.
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
     const write = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
     const chunk = (delta, finish) => ({ id: 'chatcmpl-fake', object: 'chat.completion.chunk', model: payload.model, choices: [{ index: 0, delta, finish_reason: finish ?? null }] });
     const aborted = () => res.destroyed || res.writableEnded;
@@ -394,10 +443,18 @@ export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {
       }
     }
     if (round.text) {
+      let written = 0;
       for (const part of pieces(round.text, 6)) {
         if (aborted()) return;
         write(chunk({ content: part }));
+        written += part.length;
         if (delay) await sleep(delay);
+        // Simulates the connection dying mid-answer (a proxy, a flaky network).
+        if (round.dropAfterChars && written >= round.dropAfterChars) {
+          await sleep(5); // let the frames above reach the client before the wire dies
+          res.destroy();
+          return;
+        }
       }
     }
     let i = 0;
