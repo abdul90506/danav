@@ -91,8 +91,16 @@ export function recordRun(workspaceId, raw) {
 
 const normalizeQuery = (s) => String(s || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 
-/** Query-aware summary for the model; never includes user prompts, outputs, or secrets. */
-export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, limit = 8) {
+/**
+ * Query-aware summary for the model; never includes user prompts, outputs, or secrets.
+ *
+ * `resume` changes the telling, not the facts. A run being picked up mid-task must
+ * read as work in progress — "the checklist you set is still open", "a write was
+ * rolled back" — never as "a previous run was stopped". A model told it was
+ * interrupted starts by re-checking the world; a model told what it already did
+ * carries on from there.
+ */
+export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, limit = 8, { resume = false } = {}) {
   const runs = readRunJournal(workspaceId, MAX_RUNS);
   if (!runs.length) return '';
   const words = new Set(normalizeQuery(query).split(' ').filter((w) => w.length > 2));
@@ -124,16 +132,24 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   const open = plan.filter((t) => t.status !== 'completed');
   const how = newest?.stopReason === 'aborted' ? 'the user stopped it' : `it ended with ${String(newest?.stopReason || '').replace(/_/g, ' ')}`;
   const planLines = open.length
-    ? [
-        `- the previous run left this checklist unfinished (${newest.stopReason === 'completed' ? 'it reported itself finished anyway' : how}):`,
-        ...plan.map((t) => `  ${t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]'} ${t.content}`),
-        '  If the user asks to continue, resume from the first open step rather than starting over; anything marked [x] is already done and must not be redone.',
-      ]
+    ? resume
+      ? [
+          '- the checklist you set for this task, as you left it:',
+          ...plan.map((t) => `  ${t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]'} ${t.content}`),
+          '  The [x] items are done — do not redo them. Carry on with the next one.',
+        ]
+      : [
+          `- the previous run left this checklist unfinished (${newest.stopReason === 'completed' ? 'it reported itself finished anyway' : how}):`,
+          ...plan.map((t) => `  ${t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]'} ${t.content}`),
+          '  If the user asks to continue, resume from the first open step rather than starting over; anything marked [x] is already done and must not be redone.',
+        ]
     : [];
   const rolled = newest?.interrupted || [];
   const interruptedLines = rolled.length
     ? [
-        `- when that run stopped, a write to ${rolled.map((p) => `\`${p}\``).join(', ')} was still in flight and was rolled back: ${rolled.length === 1 ? 'that file is' : 'those files are'} exactly as ${rolled.length === 1 ? 'it was' : 'they were'} before — nothing from that write is on disk.`,
+        resume
+          ? `- a write to ${rolled.map((p) => `\`${p}\``).join(', ')} was rolled back: ${rolled.length === 1 ? 'that file is' : 'those files are'} exactly as ${rolled.length === 1 ? 'it was' : 'they were'} before — nothing from that write is on disk, so ${rolled.length === 1 ? 'it needs' : 'they need'} writing again.`
+          : `- when that run stopped, a write to ${rolled.map((p) => `\`${p}\``).join(', ')} was still in flight and was rolled back: ${rolled.length === 1 ? 'that file is' : 'those files are'} exactly as ${rolled.length === 1 ? 'it was' : 'they were'} before — nothing from that write is on disk.`,
       ]
     : [];
 
@@ -147,7 +163,9 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
     const checks = run.checks.length
       ? `checks: ${run.checks.slice(0, 4).map((c) => `${c.name} ${c.passed ? 'passed' : c.aborted ? 'stopped' : c.timedOut ? 'timed out' : `failed${c.exitCode !== undefined ? ` (exit ${c.exitCode})` : ''}`}`).join(', ')}`
       : '';
-    const parts = [new Date(run.at).toISOString().slice(0, 10), run.stopReason, changed, checks, run.failures ? `${run.failures} tool failure${run.failures === 1 ? '' : 's'}` : '']
+    // A resumed task is not told which runs stopped, or why: what matters is what
+    // they changed and what they checked.
+    const parts = [new Date(run.at).toISOString().slice(0, 10), resume ? '' : run.stopReason, changed, checks, run.failures ? `${run.failures} tool failure${run.failures === 1 ? '' : 's'}` : '']
       .filter(Boolean);
     const line = `- ${parts.join(' · ')}`;
     const remaining = cap - used - (lines.length ? 1 : 0);

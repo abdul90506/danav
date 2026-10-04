@@ -4,7 +4,7 @@
  * off limits.
  */
 
-export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory, recentRuns, checks, activity, budget, now = new Date() }) {
+export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory, recentRuns, checks, activity, budget, resume = false, now = new Date() }) {
   const sandbox = workspace.kind === 'sandbox';
   const date = now.toISOString().slice(0, 10);
   const projectGuidance = guidance || notes || '';
@@ -91,11 +91,15 @@ export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory
   }
   if (checks) sections.push(checks);
   if (recentRuns) {
-    sections.push(
-      '# Recent workspace evidence (automatically recorded file changes and recognized verification checks; no user prompts or file bodies)\n' +
-      'This log helps with continuity but does not prove the current workspace is unchanged. Re-run relevant checks before claiming the present task is verified.\n' +
-      recentRuns
-    );
+    // On a resumed task the same evidence reads as the work in hand, not as a
+    // history lesson: the model is mid-task, and a task it is in the middle of
+    // does not need to be re-explored from the top.
+    const heading = resume
+      ? '# What you already did on this task (automatically recorded file changes and recognized checks; no user prompts or file bodies)\n' +
+        'You are partway through this task. This is your own work so far. Do not re-analyze what is listed here, do not repeat what is already done, and do not start over — pick up the next open step and finish it.\n'
+      : '# Recent workspace evidence (automatically recorded file changes and recognized verification checks; no user prompts or file bodies)\n' +
+        'This log helps with continuity but does not prove the current workspace is unchanged. Re-run relevant checks before claiming the present task is verified.\n';
+    sections.push(heading + recentRuns);
   }
   sections.push(`# Workspace right now\n${snapshot}`);
   if (activity?.length) {

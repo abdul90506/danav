@@ -68,17 +68,27 @@ import { buildMessageContent } from './utils/messageContent';
 import { savePreviewAccessCode } from './services/previewAuth';
 
 /**
- * What a resume says to the model.
+ * What a resumed turn says to the model: nothing but the fact that it should go on.
  *
- * It is a note, not a user message: the task itself is already in the transcript
- * above, and the server hands over the plan, the files that changed and the checks
- * that already ran. Saying it this way is what stops the model treating "continue"
- * as a fresh request — there is nothing to rephrase and nothing to start over.
+ * The important part is what is NOT here — no "you were stopped", no "resume from
+ * step one", no retelling of the task. A model told it was interrupted starts by
+ * re-checking the world; a model that simply carries on does the next step. Its own
+ * work so far is in the message right above this one, in its own voice (see
+ * workSoFar below), and the server adds the plan and the files it already changed.
  */
-const RESUME_NOTE =
-  '[continue] The previous run stopped before the task was finished. The journal above has the plan, ' +
-  'the files already changed and the checks already run. Resume from the first unfinished step: do not ' +
-  'redo work that is already done, do not start over, and finish the task the user asked for.';
+const RESUME_NOTE = '[continue]';
+
+/** A small, plain cue that the user typed a continuation rather than a new request. */
+const isContinuationText = (text: string): boolean => {
+  const t = String(text || '').trim().toLowerCase().replace(/[.!?\s]+$/g, '');
+  if (!t || t.length > 30) return false;
+  return [
+    'continue', 'carry on', 'go on', 'keep going', 'keep going please', 'proceed',
+    'resume', 'finish it', 'finish the task', 'finish this', 'complete it', 'go ahead',
+    'aage karo', 'aage badho', 'continue karo', 'kar do', 'karte raho', 'chalo aage',
+    'baqi karo', 'baki karo', 'poora karo', 'pura karo', 'mukammal karo',
+  ].includes(t);
+};
 
 export const App: React.FC = () => {
   // Theme state
@@ -818,6 +828,20 @@ export const App: React.FC = () => {
 
     const existingMessages = baseMessages || activeConversation.messages;
 
+    /**
+     * "continue", "carry on", "aage karo" — the user asking for the rest of the
+     * work, not a new job. In agent mode that is a resume of the turn that stopped:
+     * it carries on in the same message, with the same work line, and no bubble is
+     * added for the word "continue".
+     */
+    if (!isResume && activeConversation.agentMode && isContinuationText(rawText)) {
+      const lastAgentTurn = [...existingMessages].reverse().find((m) => m.role === 'assistant' && m.agent && !m.isGenerating);
+      if (lastAgentTurn) {
+        void handleSendMessage(undefined, undefined, webSearchEnabled, existingMessages, lastAgentTurn.id);
+        return;
+      }
+    }
+
     if (!activeProvider) {
       showNotice('No provider is configured yet — open Settings → Providers & Models to add one.');
       return;
@@ -932,14 +956,40 @@ export const App: React.FC = () => {
 
     // Messages history to send. Each turn is rebuilt from what was stored, so
     // an image attached three turns ago is still sent with its own message.
+    /**
+     * What the model is shown as its own past work when a run is picked up.
+     *
+     * The transcript only ever carries text, so the actions of the stopped run —
+     * every read, edit and command — would otherwise be invisible, and the model
+     * would start the task over by re-analyzing everything. This puts them back in
+     * its own message, in its own voice, with the note that they are already done.
+     */
+    const workSoFar = isResume
+      ? (() => {
+          const lines = collectActivity(resumeSource ? [resumeSource] : []);
+          if (!lines.length) return '';
+          return `\n\n[my work on this task so far — already done, not to be repeated:]\n${lines.join('\n')}`;
+        })()
+      : '';
+
     const historyPayload: Array<{ role: 'user' | 'assistant' | 'system'; content: ChatMessageContent }> = [
-      ...existingMessages
-        // On a resume the assistant turn being continued is already in the list:
-        // the model sees its own last message, then the instruction to carry on.
-        .map((m) => ({
+      ...existingMessages.map((m, i) => {
+        const last = i === existingMessages.length - 1;
+        const content = buildMessageContent(m.content, m.attachments);
+        /**
+         * The turn being continued gets its own actions appended, so the model sees
+         * a single uninterrupted stretch of its own work instead of a gap where the
+         * tool calls used to be.
+         */
+        if (isResume && last && m.id === assistantMessageId && workSoFar) {
+          const text = typeof content === 'string' ? content : m.content;
+          return { role: m.role as 'assistant', content: `${text}${workSoFar}` };
+        }
+        return {
           role: m.role === 'tool' ? ('user' as const) : (m.role as 'user' | 'assistant' | 'system'),
-          content: buildMessageContent(m.content, m.attachments),
-        })),
+          content,
+        };
+      }),
       {
         role: 'user' as const,
         content: isResume ? RESUME_NOTE : buildMessageContent(augmentedPrompt, currentAttachments),

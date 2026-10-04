@@ -788,7 +788,7 @@ export async function runAgent({
       !String(m.content || '').startsWith('[continue]')
     )?.content || '';
     lastUserRequest = currentRequest;
-    const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, 2500, 6));
+    const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, 2500, 6, { resume }));
     // Memory is looked up against the request AND the files this workspace was
     // last working on: "continue with the retry work" has to find the note about
     // the module that was just being changed, even though the words do not match.
@@ -806,7 +806,7 @@ export async function runAgent({
       /* detection is a courtesy; a workspace it cannot read is not a failure */
     }
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, activity, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
+      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, activity, resume, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
       ...priorMessages,
     ];
 
