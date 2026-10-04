@@ -84,8 +84,16 @@ if (args.includes('--sandbox')) {
       assert.ok(!gi.output.includes('index.html'));
       const one = await run('grep_search', { pattern: 'answer', path: 'app/src/util.js' });
       assert.match(one.output, /app\/src\/util\.js:1:/);
+      // An unclosed group is not a regex: it is searched literally, and the result
+      // says so rather than reporting the pattern as simply absent.
       const badRe = await run('grep_search', { pattern: '(unclosed' });
-      assert.equal(badRe.ok, false);
+      assert.equal(badRe.ok, true);
+      assert.match(badRe.output, /not a valid regular expression/);
+      assert.match(badRe.output, /literal/);
+      // A path with a typo is answered with the names that exist, in the cloud too.
+      const typo = await run('read_file', { path: 'app/src/utilz.js' });
+      assert.equal(typo.ok, false);
+      assert.match(typo.output, /Did you mean "app\/src\/util\.js"\?/);
       const f = await run('file_search', { pattern: '*.js' });
       assert.match(f.output, /app\/src\/util\.js/);
       assert.ok(!f.output.includes('node_modules'));

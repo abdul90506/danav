@@ -621,13 +621,16 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
     const dir = path.dirname(abs);
     const base = String(path.basename(abs) || '').toLowerCase();
     if (!base) return [];
-    let names = [];
+    let entries = [];
     try {
-      const { entries } = await ws.listTree(dir, { depth: 1, maxEntries: 300 });
-      names = entries.map((e) => `${e.path}${e.type === 'dir' ? '/' : ''}`);
+      entries = (await ws.listTree(dir, { depth: 1, maxEntries: 300 })).entries;
     } catch {
       return []; // the folder is not there either: nothing useful to suggest
     }
+    // Scored by their own name, but suggested workspace-relative — "util.js"
+    // would send the model to the root instead of app/src/util.js.
+    const shown = ws.displayPath(dir);
+    const prefix = shown && shown !== '.' && shown !== '/' ? `${shown.replace(/\/$/, '')}/` : '';
     const stem = (s) => s.replace(/\/$/, '').replace(/\.[^.]+$/, '').toLowerCase();
     const want = stem(base);
     const score = (name) => {
@@ -639,12 +642,13 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       if (want.length >= 4 && (ns.includes(want) || want.includes(ns))) return 3;
       return closeEnough(ns, want, 2) ? 4 : -1;
     };
-    return names
-      .map((n) => ({ n, s: score(n) }))
+    return entries
+      .map((e) => ({ own: `${e.path}${e.type === 'dir' ? '/' : ''}`, full: `${prefix}${e.path}${e.type === 'dir' ? '/' : ''}` }))
+      .map((x) => ({ ...x, s: score(x.own) }))
       .filter((x) => x.s >= 0)
       .sort((a, b) => a.s - b.s)
       .slice(0, limit)
-      .map((x) => x.n);
+      .map((x) => x.full);
   };
 
   /** " Did you mean x or y?" — empty when nothing close exists. */
@@ -1126,10 +1130,14 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const from = await target(reqStr(args, 'from'));
       const to = await target(reqStr(args, 'to'));
       guardWrite(to);
+      const landed = await ws.stat(to);
       await ws.move(from, to);
       ctx.state.ledger?.seen.delete(from);
       ctx.state.ledger?.owned.delete(from);
       observeOwned(ctx.state, to); // the agent knows exactly what landed there
+      // A file that appeared here is part of what this run produced — that is how
+      // a body recovered from a mangled write reaches the run's own change list.
+      if (!landed.type) noteChange(ctx, rel(to), 0, 0);
       return { output: `Moved ${rel(from)} → ${rel(to)}.`, ui: { kind: 'move', from: rel(from), to: rel(to) } };
     },
 

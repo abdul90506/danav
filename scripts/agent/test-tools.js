@@ -1129,11 +1129,16 @@ test('a path with a typo is answered with the names that exist', async () => {
   await ws.writeText(await ws.resolve('app.js'), 'x\n');
   await ws.writeText(await ws.resolve('notes.txt'), 'x\n');
   await ws.mkdirp(await ws.resolve('src'));
+  await ws.writeText(await ws.resolve('src/app.js'), 'y\n');
 
   const miss = await run('read_file', { path: 'app.ts' });
   assert.equal(miss.ok, false);
   assert.match(miss.error, /File not found: app\.ts/);
   assert.match(miss.error, /Did you mean "app\.js"\?/);
+
+  // inside a folder the suggestion stays a full, workspace-relative path
+  const nested = await run('read_file', { path: 'src/app.ts' });
+  assert.match(nested.error, /Did you mean "src\/app\.js"\?/);
 
   const dir = await run('list_dir', { path: 'sr' });
   assert.equal(dir.ok, false);
@@ -1178,4 +1183,20 @@ test('run_command understands "timeout" as timeout_seconds', async () => {
   assert.equal(r.ui.timedOut, true, 'the timeout was applied');
   assert.match(r.output, /timed out after 1s/);
   assert.equal(r.failedSoft, true, 'a killed command is information, not a failure streak');
+});
+
+test('move_file records the file it produced, so the run knows what it made', async () => {
+  const { run, ws, ctx } = await setup();
+  await ws.writeText(await ws.resolve('.danav-recovered/draft.txt'), 'restored page\nsecond line\n');
+
+  const moved = await run('move_file', { from: '.danav-recovered/draft.txt', to: 'index.html' });
+  assert.equal(moved.ok, true);
+  assert.equal(moved.ui.to, 'index.html');
+  assert.equal(ctx.state.changed.has('index.html'), true, 'the new file is part of this run');
+  assert.match((await ws.readText(await ws.resolve('index.html'))).text, /restored page/);
+
+  // a rename onto an existing file is a change too, but it is not a new file
+  ctx.state.changed.clear();
+  await run('move_file', { from: 'index.html', to: 'index.html.bak' });
+  assert.equal(ctx.state.changed.has('index.html.bak'), true);
 });
