@@ -12,8 +12,9 @@ import { isPreviewUrl, previewHost } from '../utils/previewUrl';
 import { AgentActionRow } from './AgentActionRow';
 import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from './thinkingAccordion';
 import { stopNotice, workedSummary } from '../agent/format';
-import { useDismissOnOutside } from '../utils/useDismissOnOutside';
+import { useDismissOnOutside, useEscapeToClose } from '../utils/useDismissOnOutside';
 import { createPanelStore, usePanelOpen } from './panels';
+import { AgentTrail } from './AgentTrailGroup';
 import { useThrottledValue } from '../utils/throttledValue';
 import { useElapsedSeconds } from '../utils/useElapsedSeconds';
 
@@ -45,13 +46,18 @@ const AgentWorkRow: React.FC<{
 }> = ({ messageId, live, liveLabel, elapsedSeconds, summary, notice, children }) => {
   const id = `work-${messageId}`;
   const open = usePanelOpen(workStore, id);
-  const rootRef = useRef<HTMLDivElement>(null);
-  useDismissOnOutside(rootRef, open, React.useCallback(() => workStore.close(), []));
+  const close = React.useCallback(() => workStore.close(), []);
+  /**
+   * Once opened, the trail stays open: reading it and clicking somewhere else is
+   * not the same as dismissing a menu. Escape still puts it away (and, being
+   * registered, that Escape does not also stop a run that is still working).
+   */
+  useEscapeToClose(close, open);
 
   const toggle = () => (workStore.get() === id ? workStore.close() : workStore.set(id));
 
   return (
-    <div ref={rootRef} className="mt-2 select-none">
+    <div className="mt-1 select-none">
       <button
         type="button"
         onClick={toggle}
@@ -926,10 +932,23 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
    * in front of the reader, and they move into the row when it is done.
    */
   const textBlocks = blocks.filter((b) => b.type === 'text');
+  /**
+   * The preview a run ended with stands OUTSIDE the work row: it is the one thing
+   * in a finished turn the user is meant to click, and burying the way to see the
+   * app behind one more click would be silly. The last one wins — it is the build
+   * that is up now — and it is taken out of the trail so it cannot appear twice.
+   */
+  const previewAction = (() => {
+    const done = blocks.filter(
+      (b) => b.type === 'action' && b.action.tool === 'get_preview_url' && b.action.result?.url
+    ) as Array<Extract<MessageBlock, { type: 'action' }>>;
+    return done.length ? done[done.length - 1].action : null;
+  })();
+  const inFold = (block: MessageBlock) => !(previewAction && block.type === 'action' && block.action.id === previewAction.id);
   const visibleText = liveTurn ? textBlocks : textBlocks.slice(-1);
   const visibleTextIds = new Set(visibleText.map((b) => b.id));
   const foldedText = textBlocks.filter((b) => !visibleTextIds.has(b.id));
-  const actionCount = blocks.filter((b) => b.type === 'action').length;
+  const actionCount = blocks.filter((b) => b.type === 'action' && inFold(b)).length;
   // A turn with nothing to fold (no actions, nothing said along the way) has no
   // work row at all — its reasoning shows in place instead of hiding behind it.
   const hasWorkRow = actionCount > 0 || foldedText.length > 0;
@@ -971,16 +990,20 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
       if (group.length === 0) return;
       const first = group[0].id;
       out.push(
-        <div key={`g-${first}`} className="my-1.5 space-y-px">
-          {group.map((a) => (
-            <AgentActionRow key={a.id} action={a} onApproval={onAgentApproval} onOpenPreview={onOpenPreview} />
-          ))}
+        <div key={`g-${first}`} className="my-1.5">
+          <AgentTrail
+            trailId={`${message.id}:${first}`}
+            actions={group}
+            onApproval={onAgentApproval}
+            onOpenPreview={onOpenPreview}
+          />
         </div>
       );
       group = [];
     };
     for (const block of blocks) {
       if (block.type === 'action') {
+        if (!inFold(block)) continue; // the preview row stands on its own, outside
         group.push(block.action);
         continue;
       }
@@ -1095,19 +1118,12 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
         {/* Agent turn: thinking, narration and actions in the exact order they happened */}
         {isAgentTimeline && (
           <div data-testid="agent-timeline">
-            {/* The turn's own words: the lines it is saying now, and — once it is
-                over — the answer it ended with. Everything else is behind the one
-                line below. */}
-            {visibleText.map((block) => textNode(block as Extract<MessageBlock, { type: 'text' }>, false))}
-
-            {/* An agent turn whose content arrived without blocks (an error, an
-                older saved chat) still shows its answer instead of nothing. */}
-            {textBlocks.length === 0 && safeMessageContent.trim() ? (
-              <div className={`markdown-body${message.isGenerating && !message.error ? ' is-streaming' : ''}`}>
-                <MarkdownBlock content={normalizeMessageContent(safeMessageContent)} streaming={message.isGenerating} components={markdownComponents} />
-              </div>
-            ) : null}
-
+            {/*
+              The order of a finished turn: what the run did — one line, with the
+              whole run behind it — then the preview it produced, then the answer
+              it ended with. The work line sits above the answer on purpose: it is
+              the work that produced it.
+            */}
             {hasWorkRow ? (
               <AgentWorkRow
                 messageId={message.id}
@@ -1142,6 +1158,25 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
                 {runFooter}
               </>
             )}
+
+            {/* The running app, one click from the chat it was built in. */}
+            {previewAction ? (
+              <div className="my-1.5">
+                <AgentActionRow action={previewAction} onApproval={onAgentApproval} onOpenPreview={onOpenPreview} />
+              </div>
+            ) : null}
+
+            {/* The turn's own words: the lines it is saying now, and — once it is
+                over — the answer it ended with. */}
+            {visibleText.map((block) => textNode(block as Extract<MessageBlock, { type: 'text' }>, false))}
+
+            {/* An agent turn whose content arrived without blocks (an error, an
+                older saved chat) still shows its answer instead of nothing. */}
+            {textBlocks.length === 0 && safeMessageContent.trim() ? (
+              <div className={`markdown-body${message.isGenerating && !message.error ? ' is-streaming' : ''}`}>
+                <MarkdownBlock content={normalizeMessageContent(safeMessageContent)} streaming={message.isGenerating} components={markdownComponents} />
+              </div>
+            ) : null}
           </div>
         )}
 

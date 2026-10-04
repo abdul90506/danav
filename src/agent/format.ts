@@ -458,3 +458,68 @@ export function collectActivity(messages: Message[], max = 60): string[] {
   }
   return lines.slice(-max);
 }
+
+/**
+ * Which family a tool belongs to, for the work trail.
+ *
+ * The trail is a summary, not a log: four reads in a row are one line — "4 files
+ * analyzed" — and the four rows sit one click behind it. Grouping is by what the
+ * tools did, so a mixed run of reads and searches still reads as two honest lines
+ * instead of one vague one.
+ */
+const TRAIL_KINDS: Record<string, string> = {
+  read_file: 'analyze',
+  file_outline: 'analyze',
+  list_dir: 'explore',
+  file_search: 'explore',
+  grep_search: 'explore',
+  run_command: 'run',
+  list_processes: 'process',
+  read_process_output: 'process',
+  stop_process: 'process',
+  write_file: 'change',
+  append_file: 'change',
+  edit_file: 'change',
+  multi_edit: 'change',
+  replace_in_files: 'change',
+  web_search: 'web',
+  fetch_url: 'web',
+  image_search: 'web',
+  remember: 'memory',
+  forget: 'memory',
+  search_memory: 'memory',
+  update_plan: 'plan',
+  delegate_task: 'delegate',
+};
+
+export function trailKind(tool: string): string {
+  return TRAIL_KINDS[tool] || 'other';
+}
+
+/** "4 files analyzed", "2 commands run", "1 place explored". */
+export function trailGroupLabel(kind: string, count: number): string {
+  const n = count;
+  const s = n === 1 ? '' : 's';
+  switch (kind) {
+    case 'analyze':
+      return `${n} file${s} analyzed`;
+    case 'explore':
+      return `${n} place${s} explored`;
+    case 'run':
+      return `${n} command${s} run`;
+    case 'process':
+      return `${n} process step${s}`;
+    case 'change':
+      return `${n} file${s} changed`;
+    case 'web':
+      return `${n} web lookup${s}`;
+    case 'memory':
+      return `${n} memory step${s}`;
+    case 'plan':
+      return `${n} plan update${s}`;
+    case 'delegate':
+      return `${n} subagent task${s}`;
+    default:
+      return `${n} step${s}`;
+  }
+}
