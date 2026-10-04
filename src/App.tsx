@@ -1061,6 +1061,7 @@ export const App: React.FC = () => {
         thinkingLevel: activeConversation.thinkingLevel,
         messages: historyPayload,
         workspaceId: agentWorkspace.id,
+        taskId: assistantMessageId,
         activity: collectActivity(existingMessages),
         signal: controller.signal,
         resume: isResume,

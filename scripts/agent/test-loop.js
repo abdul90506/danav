@@ -82,7 +82,7 @@ const saidSoFar = (events) => events.filter((e) => typeof e.content === 'string'
 const noticesSeen = (events) =>
   events.filter((e) => e.agent?.type === 'notice').map((e) => String(e.agent.message || ''));
 
-async function agentRun({ model = 'fake-build', autoRun = true, history, signal, onEvent, workspace } = {}) {
+async function agentRun({ model = 'fake-build', autoRun = true, history, signal, onEvent, workspace, taskId = '', resume = false, dataDir: sharedDataDir } = {}) {
   const l = await getLlm();
   l.requests.length = 0;
   const dir = workspace?.root || tmp('danav-loop-');
@@ -90,7 +90,7 @@ async function agentRun({ model = 'fake-build', autoRun = true, history, signal,
   await ws.init();
   const events = [];
   const previousDataDir = process.env.DANAV_DATA_DIR;
-  const testDataDir = tmp('danav-loop-data-');
+  const testDataDir = sharedDataDir || tmp('danav-loop-data-');
   process.env.DANAV_DATA_DIR = testDataDir;
   let result;
   try {
@@ -100,6 +100,8 @@ async function agentRun({ model = 'fake-build', autoRun = true, history, signal,
       thinkingLevel: 'Auto',
       history: history || [{ role: 'user', content: 'build me a landing page' }],
       activity: [],
+      taskId,
+      resume,
       workspace: ws,
       runSearchTool: async () => ({ success: false, error: 'offline' }),
       send: (e) => {
@@ -112,7 +114,7 @@ async function agentRun({ model = 'fake-build', autoRun = true, history, signal,
   } finally {
     if (previousDataDir === undefined) delete process.env.DANAV_DATA_DIR;
     else process.env.DANAV_DATA_DIR = previousDataDir;
-    fs.rmSync(testDataDir, { recursive: true, force: true });
+    if (!sharedDataDir) fs.rmSync(testDataDir, { recursive: true, force: true });
   }
   return { events, result, ws, dir, requests: l.requests };
 }
@@ -294,6 +296,75 @@ test('successful verification is journaled automatically and available in the ne
   } finally {
     if (previousDataDir === undefined) delete process.env.DANAV_DATA_DIR;
     else process.env.DANAV_DATA_DIR = previousDataDir;
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the run discovers project playbooks cheaply and loads a matching one through the read-only tool', async () => {
+  const dataDir = tmp('danav-skill-loop-data-');
+  const root = tmp('danav-skill-loop-workspace-');
+  fs.mkdirSync(path.join(root, '.agents/skills/security-review'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.agents/skills/security-review/SKILL.md'),
+    '---\nname: security-review\ndescription: Trace untrusted request data through authentication boundaries.\n---\n' +
+    'Inspect request parsing, authorization, and state mutation in that order.');
+  const ws = new LocalWorkspace({ id: 'ws-skill-loop', kind: 'local', name: 'skill', root, autoRun: true });
+  try {
+    const { events, requests, result } = await agentRun({
+      model: 'fake-skill', workspace: ws, dataDir,
+      history: [{ role: 'user', content: 'Use the security review playbook to audit the authentication route.' }],
+    });
+    assert.equal(result.stopReason, 'completed');
+    const manifest = requests[0].messages[0].content;
+    assert.match(manifest, /Available project skills/);
+    assert.match(manifest, /security-review/);
+    assert.doesNotMatch(manifest, /Inspect request parsing/);
+    assert.ok(agentEvents(events, 'action_start').some((action) => action.tool === 'load_skill'));
+    assert.match(JSON.stringify(requests[1].messages), /Inspect request parsing, authorization, and state mutation/);
+    assert.match(JSON.stringify(requests[1].messages), /untrusted project data/);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('task checkpoints carry findings and resume only the matching assistant turn', async () => {
+  const dataDir = tmp('danav-task-checkpoint-data-');
+  const root = tmp('danav-task-checkpoint-workspace-');
+  const ws = new LocalWorkspace({ id: 'ws-task-checkpoint', kind: 'local', name: 'checkpoint', root, autoRun: true });
+  await ws.init();
+  const taskId = 'assistant-message-checkpoint-1';
+  try {
+    const first = await agentRun({
+      model: 'fake-checkpoint', workspace: ws, taskId, dataDir,
+      history: [{ role: 'user', content: 'Map the route flow and plan the focused regression.' }],
+    });
+    assert.equal(first.result.stopReason, 'completed');
+    const file = path.join(dataDir, 'agent-runs', `${ws.id}.json`);
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8')).runs.at(-1);
+    assert.equal(saved.findings.length, 1);
+    assert.match(saved.findings[0], /stable assistant-message id/);
+    assert.equal(saved.toolErrors.length, 1);
+    assert.match(saved.toolErrors[0].message, /File not found/);
+    assert.equal(saved.plan[1].status, 'in_progress');
+    assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /assistant-message-checkpoint-1|Map the route flow/);
+
+    const resumed = await agentRun({
+      model: 'fake-checkpoint-resume', workspace: ws, taskId, resume: true, dataDir,
+      history: [{ role: 'user', content: 'Map the route flow and plan the focused regression.' }],
+    });
+    assert.equal(resumed.result.stopReason, 'completed');
+    const prompt = resumed.requests[0].messages[0].content;
+    assert.match(prompt, /What you already did on this task/);
+    assert.match(prompt, /Add the focused regression/);
+    assert.match(prompt, /stable assistant-message id/);
+    assert.match(prompt, /Earlier tool failures/);
+    assert.match(prompt, /File not found/);
+    assert.ok(!resumed.requests.some((request) => JSON.stringify(request.messages).includes('your own checklist still has')),
+      'the resumed model completes the hydrated plan instead of re-planning from zero');
+    const completed = JSON.parse(fs.readFileSync(file, 'utf8')).runs.at(-1);
+    assert.ok(completed.plan.every((item) => item.status === 'completed'));
+  } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -848,6 +919,26 @@ test('context pruning: old tool output and file bodies are elided first; whole r
   const c = build();
   assert.equal(pruneMessages(c, 1_000_000).pruned, false);
   assert.equal(c.length, 26);
+});
+
+test('compaction keeps the decisive tail diagnostic instead of the first terminal lines', () => {
+  const messages = [{ role: 'system', content: 'rules' }, { role: 'user', content: 'fix the failing check' }];
+  for (let i = 0; i < 6; i++) {
+    const id = `diag-${i}`;
+    messages.push({
+      role: 'assistant', content: null,
+      tool_calls: [{ id, type: 'function', function: { name: 'run_command', arguments: JSON.stringify({ command: `npm test -- ${i}` }) } }],
+    });
+    messages.push({
+      role: 'tool', tool_call_id: id,
+      content: `Command finished (exit ${i === 0 ? 1 : 0}):\n${'ordinary build output '.repeat(65)}\n${i === 0 ? 'Error: UNIQUE_TAIL_DIAGNOSTIC' : `PASS ${i}`}`,
+    });
+  }
+  const compacted = pruneMessages(messages, 6000);
+  assert.ok(compacted.droppedRounds > 0);
+  const digest = worklogLines(messages).join('\n');
+  assert.match(digest, /UNIQUE_TAIL_DIAGNOSTIC/, 'the actionable error at the end survives');
+  assert.doesNotMatch(digest, /ordinary build output ordinary build output/, 'bulk terminal noise does not survive');
 });
 
 test('pruning never clips a multimodal message into a broken string', () => {
@@ -1502,7 +1593,10 @@ test('a plan survives the trimming of the round that produced it', () => {
       type: 'function',
       function: {
         name: 'update_plan',
-        arguments: JSON.stringify({ todos: [{ content: 'Read the module', status: 'completed' }, { content: 'Add the retry helper', status: 'in_progress' }, { content: 'Run the tests', status: 'pending' }] }),
+        arguments: JSON.stringify({
+          todos: [{ content: 'Read the module', status: 'completed' }, { content: 'Add the retry helper', status: 'in_progress' }, { content: 'Run the tests', status: 'pending' }],
+          findings: ['server/agent/routes.js validates the workspace before starting an SSE run.'],
+        }),
       },
     }],
   });
@@ -1517,6 +1611,7 @@ test('a plan survives the trimming of the round that produced it', () => {
   assert.match(log, /plan \(1\/3 done\)/, `the checklist is in the work log: ${log.slice(0, 300)}`);
   assert.match(log, /\[~\] Add the retry helper/);
   assert.match(log, /\[ \] Run the tests/);
+  assert.match(log, /checkpoint finding: server\/agent\/routes\.js validates the workspace before starting an SSE run/);
   assert.ok(!messages.some((m) => m.role === 'assistant' && m.tool_calls?.some((tc) => tc.function.name === 'update_plan')), 'the round itself is gone');
 });
 

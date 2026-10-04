@@ -266,6 +266,14 @@ function rawLabel(a: AgentAction): ActionLabel {
       });
     }
 
+    case 'load_skill':
+      return base('Loading skill', 'Loaded skill', {
+        target: r?.name || args.name,
+        targetKind: 'text',
+        meta: !live ? r?.path : undefined,
+        expandable: false,
+      });
+
     case 'remember':
       return base('Remembering', 'Remembered', {
         target: r?.note || args.note,
@@ -537,6 +545,9 @@ export function collectActivity(messages: Message[], max = 60): string[] {
         case 'repo_status':
           if (a.status === 'done') lines.push(`read the repository state${r?.branch ? ` (branch ${r.branch})` : ''}${typeof r?.dirty === 'number' && r.dirty ? `, ${r.dirty} uncommitted` : ''}`);
           break;
+        case 'load_skill':
+          if (a.status === 'done') lines.push(`loaded project skill ${r?.name || a.args?.name || ''}${r?.path ? ` from ${r.path}` : ''}`.trim());
+          break;
         case 'repo_history':
           if (a.status === 'done') lines.push(`read ${r?.view || 'log'} history${a.args?.path ? ` of ${a.args.path}` : ''}`);
           break;
@@ -561,6 +572,7 @@ export function collectActivity(messages: Message[], max = 60): string[] {
  */
 const TRAIL_KINDS: Record<string, string> = {
   read_file: 'analyze',
+  load_skill: 'analyze',
   file_outline: 'analyze',
   find_symbol: 'analyze',
   relevant_files: 'explore',

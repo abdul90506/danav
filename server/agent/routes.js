@@ -242,7 +242,7 @@ export function registerAgentRoutes(app, { runSearchTool, resolveProvider = (pro
 
   // -------------------------------------------------------------------- chat
   router.post('/chat', async (req, res) => {
-    const { provider: suppliedProvider, model, thinkingLevel, messages, workspaceId, activity, resume } = req.body || {};
+    const { provider: suppliedProvider, model, thinkingLevel, messages, workspaceId, taskId, activity, resume } = req.body || {};
     const provider = resolveProvider(suppliedProvider);
     if (!provider || typeof provider !== 'object') return res.status(400).json({ error: 'Provider configuration is missing.' });
     if (provider.apiType === 'mock') {
@@ -295,6 +295,7 @@ export function registerAgentRoutes(app, { runSearchTool, resolveProvider = (pro
         model,
         thinkingLevel,
         history: messages,
+        taskId: typeof taskId === 'string' ? taskId.slice(0, 200) : '',
         activity: Array.isArray(activity) ? activity.filter((l) => typeof l === 'string').slice(-60) : [],
         workspace: ws,
         runSearchTool,

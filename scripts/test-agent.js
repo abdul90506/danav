@@ -29,8 +29,10 @@ export function test(name, fn) {
 async function runAll() {
   const onlyIdx = process.argv.indexOf('--only');
   const only = onlyIdx > -1 ? process.argv[onlyIdx + 1] : null;
+  let matched = 0;
   for (const { name, fn } of pending) {
     if (only && !name.includes(only)) continue;
+    matched++;
     const t0 = Date.now();
     try {
       await fn();
@@ -42,6 +44,12 @@ async function runAll() {
       failures.push({ name, err });
       console.log(`  ✗ ${name}\n      ${String(err?.stack || err).split('\n').slice(0, 6).join('\n      ')}`);
     }
+  }
+  if (only && matched === 0) {
+    const err = new Error(`No agent tests matched --only ${JSON.stringify(only)}.`);
+    results.failed++;
+    failures.push({ name: 'test filter', err });
+    console.log(`  ✗ ${err.message}`);
   }
 }
 
@@ -242,6 +250,7 @@ const MODULES = [
   './agent/test-memory.js',
   './agent/test-journal.js',
   './agent/test-context.js',
+  './agent/test-skills.js',
   './agent/test-codeindex.js',
   './agent/test-git.js',
   './agent/test-thinking.js',
@@ -262,14 +271,13 @@ const MODULES = [
 const moduleIdx = process.argv.indexOf('--module');
 const onlyModule = moduleIdx > -1 ? process.argv[moduleIdx + 1] : null;
 
-for (const mod of MODULES) {
-  if (onlyModule && !mod.includes(onlyModule)) continue;
-  try {
-    await import(mod);
-  } catch (err) {
-    if (err?.code !== 'ERR_MODULE_NOT_FOUND') throw err;
-  }
+const selectedModules = MODULES.filter((mod) => !onlyModule || mod.includes(onlyModule));
+if (onlyModule && selectedModules.length === 0) {
+  throw new Error(`No agent test module matches --module ${JSON.stringify(onlyModule)}.`);
 }
+// A missing dependency inside an existing test module is a real setup failure,
+// not an optional section to skip silently.
+for (const mod of selectedModules) await import(mod);
 
 await runAll();
 console.log(`\n${results.passed} passed, ${results.failed} failed`);

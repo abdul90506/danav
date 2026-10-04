@@ -117,6 +117,7 @@ export interface AgentActionResult {
   kind: string;
   ok?: boolean;
   path?: string;
+  name?: string;
   from?: string;
   to?: string;
   created?: boolean;

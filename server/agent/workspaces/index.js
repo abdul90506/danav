@@ -16,6 +16,9 @@ import {
 } from '../store.js';
 import { genId, slugify } from '../util.js';
 import { clearNotes } from '../memory.js';
+import { clearRunJournal } from '../journal.js';
+import { dropIndex } from '../codeindex.js';
+import { forgetRepo } from '../githistory.js';
 import { forget } from '../sandboxActivity.js';
 
 const instances = new Map();
@@ -158,6 +161,9 @@ export async function deleteWorkspace(id, { deleteFiles = false } = {}) {
     instances.delete(id);
     removeWorkspaceRecord(id);
     clearNotes(id);
+    clearRunJournal(id);
+    dropIndex(id);
+    forgetRepo(ws);
     forget(id); // stop the idle sweeper tracking a workspace that no longer exists
   }
 }

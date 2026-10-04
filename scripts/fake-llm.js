@@ -248,6 +248,33 @@ export const scenarios = {
     return { text: 'That is the change done.' };
   },
 
+  checkpoint: ({ roundIdx, messages }) => {
+    const wasNudged = messages.some((m) => m.role === 'user' && String(m.content).includes('your own checklist still has'));
+    if (roundIdx === 0) return {
+      text: 'I have mapped the route flow and recorded the task checkpoint.',
+      toolCalls: [
+        { name: 'update_plan', args: {
+          todos: [{ content: 'Trace the route flow', status: 'completed' }, { content: 'Add the focused regression', status: 'in_progress' }],
+          findings: ['server/agent/routes.js passes the stable assistant-message id into the agent run.'],
+        } },
+        { name: 'read_file', args: { path: 'src/route-controller.js' } },
+      ],
+    };
+    if (wasNudged) return { text: 'The focused regression remains the next task step.' };
+    return { text: 'The route flow is understood; the focused regression remains.' };
+  },
+
+  checkpointResume: ({ roundIdx }) => roundIdx === 0
+    ? { text: 'Continuing from the saved checkpoint.', toolCalls: [{ name: 'update_plan', args: {
+        todos: [{ content: 'Trace the route flow', status: 'completed' }, { content: 'Add the focused regression', status: 'completed' }],
+        findings: ['server/agent/routes.js passes the stable assistant-message id into the agent run.'],
+      } }] }
+    : { text: 'The saved task is complete; I continued at its remaining regression step.' },
+
+  skill: ({ roundIdx }) => roundIdx === 0
+    ? { text: 'Loading the matching playbook.', toolCalls: [{ name: 'load_skill', args: { skill: 'security-review' } }] }
+    : { text: 'I followed the project security-review playbook for this audit.' },
+
   check: ({ roundIdx }) => roundIdx === 0
     ? { text: 'Running the focused test suite now.', toolCalls: [{ name: 'run_command', args: { command: 'npm run test:agent' } }] }
     : { text: 'The focused test command completed.' },
@@ -458,6 +485,9 @@ const byModel = {
   'fake-parallel': scenarios.parallel,
   'fake-check': scenarios.check,
   'fake-verify': scenarios.verify,
+  'fake-checkpoint': scenarios.checkpoint,
+  'fake-checkpoint-resume': scenarios.checkpointResume,
+  'fake-skill': scenarios.skill,
   'fake-delegate': scenarios.delegate,
   'fake-gate': scenarios.gate,
   'fake-drop': scenarios.drop,

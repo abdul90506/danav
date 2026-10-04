@@ -5,6 +5,10 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
+import { createWorkspace, deleteWorkspace } from '../../server/agent/workspaces/index.js';
+import { addNote, readNotes } from '../../server/agent/memory.js';
+import { readRunJournal, recordRun } from '../../server/agent/journal.js';
+import { dataDir } from '../../server/agent/config.js';
 
 const { test } = globalThis.__agentTest;
 const isWin = process.platform === 'win32';
@@ -219,4 +223,29 @@ test('findFiles: glob and substring, ignoring node_modules', async () => {
   assert.deepEqual((await ws.findFiles({ pattern: '*.tsx', path: dir })).files, ['src/App.tsx']);
   assert.deepEqual((await ws.findFiles({ pattern: 'app', path: dir })).files.sort(), ['src/App.tsx', 'src/utils/app.test.ts']);
   assert.deepEqual((await ws.findFiles({ pattern: 'src/**/*.ts', path: dir })).files, ['src/utils/app.test.ts']);
+});
+
+test('workspace deletion clears its notes, task journal, and cached code index', async () => {
+  const previousDir = process.env.DANAV_WORKSPACES_DIR;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-workspace-cleanup-'));
+  process.env.DANAV_WORKSPACES_DIR = base;
+  let workspace;
+  try {
+    workspace = await createWorkspace({ name: 'cleanup', kind: 'local', path: path.join(base, 'project'), autoRun: true });
+    addNote(workspace.id, 'A temporary workspace note.');
+    recordRun(workspace.id, { stopReason: 'step_limit', plan: [{ content: 'Finish task', status: 'in_progress' }] });
+    const indexDir = path.join(dataDir(), 'code-index');
+    fs.mkdirSync(indexDir, { recursive: true });
+    const indexFile = path.join(indexDir, `${workspace.id}.json`);
+    fs.writeFileSync(indexFile, '{"workspaceId":"cleanup"}');
+
+    await deleteWorkspace(workspace.id);
+    assert.deepEqual(readNotes(workspace.id), []);
+    assert.deepEqual(readRunJournal(workspace.id), []);
+    assert.equal(fs.existsSync(indexFile), false);
+  } finally {
+    if (previousDir === undefined) delete process.env.DANAV_WORKSPACES_DIR;
+    else process.env.DANAV_WORKSPACES_DIR = previousDir;
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });

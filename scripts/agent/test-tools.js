@@ -662,8 +662,15 @@ test('update_plan stores a sanitised checklist', async () => {
       { content: 'Test', status: 'bogus' },
       { nope: true },
     ],
+    findings: [
+      'src/auth.ts verifies the CSRF token before looking up the session.',
+      'PRIVATE_API_KEY=sk_abcdefghijklmnopqrstuvwxyz123456',
+      'src/auth.ts verifies the CSRF token before looking up the session.',
+    ],
   });
   assert.equal(r.ui.total, 3);
+  assert.deepEqual(ctx.state.findings, ['src/auth.ts verifies the CSRF token before looking up the session.']);
+  assert.match(r.output, /1 concise finding/);
   assert.equal(r.ui.done, 1);
   assert.equal(ctx.state.plan[2].status, 'pending');
 
@@ -677,6 +684,7 @@ test('update_plan stores a sanitised checklist', async () => {
   assert.equal(two.ui.todos.filter((t) => t.status === 'in_progress').length, 1);
   assert.equal(two.ui.todos[1].status, 'pending');
   assert.match(two.output, /only the first/);
+  assert.match(ctx.state.findings[0], /CSRF token/, 'omitting findings preserves the earlier task checkpoint');
 
   const none = await run('update_plan', { todos: [{ content: 'A', status: 'pending' }, { content: 'B', status: 'pending' }] });
   assert.equal(none.ui.todos[0].status, 'in_progress');
@@ -688,6 +696,10 @@ test('update_plan stores a sanitised checklist', async () => {
   assert.equal(empty.ok, false);
   assert.match(empty.output, /no plan was sent/);
   assert.deepEqual(ctx.state.plan, before);
+
+  const invalid = await run('update_plan', { todos: [{ content: 'Safe new step', status: 'in_progress' }], findings: 'not an array' });
+  assert.equal(invalid.ok, false);
+  assert.deepEqual(ctx.state.plan, before, 'invalid checkpoint input does not partially replace the plan');
 });
 
 test('missing / wrong arguments become readable tool errors, not crashes', async () => {

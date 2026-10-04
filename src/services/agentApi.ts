@@ -188,6 +188,8 @@ export interface AgentStreamOptions {
   thinkingLevel: ThinkingLevel;
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: ChatMessageContent }>;
   workspaceId: string;
+  /** Stable id for this task; reused only when the stopped assistant turn is continued. */
+  taskId?: string;
   /** One-line summaries of what the agent did earlier in this conversation. */
   activity?: string[];
   /** This request continues a run that stopped early. */
@@ -230,6 +232,7 @@ export async function streamAgentRun(o: AgentStreamOptions): Promise<void> {
         thinkingLevel: o.thinkingLevel,
         messages: o.messages,
         workspaceId: o.workspaceId,
+        taskId: o.taskId,
         activity: o.activity,
         resume: o.resume === true,
       }),

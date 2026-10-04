@@ -374,6 +374,9 @@ test('the history and check tools read as plain rows too', async () => {
   assert.deepEqual([diff.verb, diff.target, diff.meta], ['Reviewed', 'uncommitted changes', '2 files +5 −1']);
 
   // A failing check is a row with its exit code, the same shape as any command.
+  const skill = fmt.actionLabel({ id: 's1', tool: 'load_skill', status: 'done', args: { name: 'security-review' }, result: { kind: 'skill', name: 'security-review', path: '.agents/skills/security-review/SKILL.md' } });
+  assert.deepEqual([skill.verb, skill.target, skill.meta], ['Loaded skill', 'security-review', '.agents/skills/security-review/SKILL.md']);
+
   const failed = fmt.actionLabel({ id: 'c1', tool: 'run_checks', status: 'error', args: {}, error: 'checks failed', result: { kind: 'command', command: 'npm test', passed: false, exitCode: 1, checks: 1 } });
   assert.deepEqual([failed.verb, failed.meta, failed.exitFailed], ['Ran checks', '1 check · exit 1', true]);
 
@@ -382,6 +385,7 @@ test('the history and check tools read as plain rows too', async () => {
 
   assert.equal(fmt.trailKind('repo_status'), 'analyze');
   assert.equal(fmt.trailKind('repo_history'), 'analyze');
+  assert.equal(fmt.trailKind('load_skill'), 'analyze');
   assert.equal(fmt.trailKind('run_checks'), 'run');
 });
 
@@ -1040,7 +1044,8 @@ test('collectActivity: one line per meaningful action, newest last, reads and se
     { type: 'action', id: 'b4', action: act({ id: '4', tool: 'run_command', result: { kind: 'command', command: 'node a.js', exitCode: 0 } }) },
     { type: 'action', id: 'b5', action: act({ id: '5', tool: 'edit_file', status: 'error', error: 'x' }) },
     { type: 'action', id: 'b6', action: act({ id: '6', tool: 'run_command', status: 'denied', args: { command: 'rm x' } }) },
-    { type: 'action', id: 'b7', action: act({ id: '7', tool: 'get_preview_url', result: { kind: 'preview', url: 'https://p' } }) },
+    { type: 'action', id: 'b7', action: act({ id: '7', tool: 'load_skill', args: { name: 'security-review' }, result: { kind: 'skill', name: 'security-review', path: '.agents/skills/security-review/SKILL.md' } }) },
+    { type: 'action', id: 'b8', action: act({ id: '8', tool: 'get_preview_url', result: { kind: 'preview', url: 'https://p' } }) },
   ];
   const lines = fmt.collectActivity([{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'ok', blocks }]);
   assert.deepEqual(lines, [
@@ -1048,6 +1053,7 @@ test('collectActivity: one line per meaningful action, newest last, reads and se
     'edited a.js (+2 −1)',
     'ran `node a.js` → exit 0',
     'run_command (denied by user): rm x',
+    'loaded project skill security-review from .agents/skills/security-review/SKILL.md',
     'preview: https://p',
   ]);
   assert.equal(fmt.collectActivity([{ role: 'assistant', content: 'x', blocks }], 2).length, 2);
@@ -1076,7 +1082,7 @@ test('data path: runAgentTurn turns a real SSE run into ordered blocks (and Stop
 
   try {
     const { runAgentTurn } = await load('src/agent/runAgentTurn.ts');
-    const { createWorkspace } = await load('src/services/agentApi.ts');
+    const { createWorkspace, getMemory } = await load('src/services/agentApi.ts');
     const ws = await createWorkspace({ name: 'fe', kind: 'local', autoRun: true });
     const provider = { id: 'p', name: 'fake', baseUrl: llm.baseUrl, apiType: 'openai', models: [] };
 
@@ -1084,7 +1090,7 @@ test('data path: runAgentTurn turns a real SSE run into ordered blocks (and Stop
     const updates = [];
     let finished;
     await runAgentTurn({
-      provider, model: 'fake-build', thinkingLevel: 'Auto', workspaceId: ws.id, activity: [],
+      provider, model: 'fake-build', thinkingLevel: 'Auto', workspaceId: ws.id, taskId: 'assistant-turn-e2e', activity: [],
       messages: [{ role: 'user', content: 'build a page' }],
       signal: new AbortController().signal,
       onUpdate: (snap) => updates.push(snap.blocks.map((b) => b.type + (b.type === 'action' ? `:${b.action.tool}:${b.action.status}` : ''))),
@@ -1104,6 +1110,8 @@ test('data path: runAgentTurn turns a real SSE run into ordered blocks (and Stop
     assert.equal(finished.snap.blocks[0].isStillThinking, false);
     assert.match(finished.snap.content, /^I'll set up a small landing page\.\n\nNow a couple of refinements\.\n\nDone! I created index\.html/);
     assert.equal(finished.snap.agentRun.changed.length, 2);
+    const memory = await getMemory(ws.id);
+    assert.match(memory.runs?.[0]?.taskKey || '', /^task-[a-f0-9]{24}$/, 'the browser-provided task id reaches the private server checkpoint as an opaque key');
     // while it ran, an action was seen in the pending state and later as done (live UI)
     assert.ok(updates.some((u) => u.includes('action:write_file:pending')));
     assert.ok(updates.at(-1).every((t) => !t.endsWith(':running') && !t.endsWith(':pending')));

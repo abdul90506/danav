@@ -9,6 +9,8 @@ export interface RunAgentTurnOptions {
   thinkingLevel: ThinkingLevel;
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: ChatMessageContent }>;
   workspaceId: string;
+  /** Stable id of this assistant task; Continue reuses it to restore only its own checkpoint. */
+  taskId?: string;
   /** What the agent did earlier in this conversation, one line each. */
   activity: string[];
   /** This turn continues a run that stopped early (see App.tsx RESUME_NOTE). */
@@ -53,6 +55,7 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
     thinkingLevel: opts.thinkingLevel,
     messages: opts.messages,
     workspaceId: opts.workspaceId,
+    taskId: opts.taskId,
     activity: opts.activity,
     resume: opts.resume,
     signal: opts.signal,

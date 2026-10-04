@@ -16,11 +16,12 @@ import { getIndex, primeIndex, renderRelevantFiles, renderRepoMap } from './code
 import { detectChecks, formatChecksHint } from './verify.js';
 import { formatRepoState, readRepoState } from './githistory.js';
 import { collectProjectGuidance } from './context.js';
-import { readRunJournal, recentRunsForPrompt, recordRun } from './journal.js';
-import { buildToolset, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint } from './tools.js';
+import { readRunJournal, recentRunsForPrompt, recordRun, taskKeyFor } from './journal.js';
+import { buildToolset, pickFailureLines, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint } from './tools.js';
 import { checkAction, createLedger, observeOwned } from './policy.js';
 import { splitLines } from './textops.js';
-import { memoryForPrompt } from './memory.js';
+import { looksLikeSecret, memoryForPrompt } from './memory.js';
+import { createSkillRegistry } from './skills.js';
 import { createRedactor, genId, truncateMiddle } from './util.js';
 
 const PROGRESS_THROTTLE_MS = 140;
@@ -355,6 +356,28 @@ const digestLine = (s, n = 200) => {
   return one.length > n ? `${one.slice(0, n - 1)}…` : one;
 };
 
+/** Preserve terminal outcomes and diagnostics, not an arbitrary prefix of output. */
+function digestToolResult(name, output) {
+  if (looksLikeSecret(output)) return '[tool output omitted because it contained a likely secret]';
+  const text = String(output ?? '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '');
+  const rows = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!rows.length) return '';
+  const failures = rows.filter((line) => /\b(error|failed|failure|exception|timed out|denied|not found|cannot|could not)\b/i.test(line)).slice(-2);
+  if (name === 'read_file' && !failures.length) {
+    const header = rows.slice(0, 2).join(' ');
+    const count = /\b(\d+)\s+lines?\b/i.exec(header)?.[1];
+    return `file read${count ? ` (${count} lines)` : ''}; source body omitted from compact history`;
+  }
+  if (name === 'load_skill') return `${digestLine(rows[0], 140)}; playbook body trimmed (load again only if needed)`;
+  if (name === 'run_command' || name === 'run_checks') {
+    const status = rows.find((line) => /^(?:command (?:finished|failed)|check(?:s)?\b|all \d+ (?:project )?checks?\b)/i.test(line));
+    const keep = [...new Set([status, ...failures, !failures.length ? rows.at(-1) : null].filter(Boolean))];
+    return digestLine(keep.join(' … '), 220);
+  }
+  if (failures.length) return digestLine(failures.join(' … '), 180);
+  return digestLine(rows.length > 1 ? `${rows[0]} … ${rows.at(-1)}` : rows[0], 180);
+}
+
 /**
  * What one dropped round is worth remembering.
  *
@@ -373,7 +396,7 @@ function roundDigest(dropped, original = null) {
   for (const m of dropped) {
     if (m.role === 'tool') continue; // recorded through its call, below
     if (m.role !== 'assistant' || !m.tool_calls?.length) {
-      const said = typeof m.content === 'string' ? digestLine(m.content, 160) : '';
+      const said = typeof m.content === 'string' && !looksLikeSecret(m.content) ? digestLine(m.content, 160) : '';
       if (said) lines.push(`  I said: ${said}`);
       continue;
     }
@@ -386,15 +409,20 @@ function roundDigest(dropped, original = null) {
         // has to survive the trimming — otherwise a long run forgets what it
         // decided to do and starts re-planning from nothing.
         const items = args.todos
-          .filter((item) => item && typeof item.content === 'string')
+          .filter((item) => item && typeof item.content === 'string' && !looksLikeSecret(item.content))
           .map((item) => `${item.status === 'completed' ? '[x]' : item.status === 'in_progress' ? '[~]' : '[ ]'} ${digestLine(item.content, 70)}`);
         lines.push(`  plan (${items.filter((i) => i.startsWith('[x]')).length}/${items.length} done): ${items.join('; ')}`.slice(0, 400));
+        const findings = Array.isArray(args.findings)
+          ? args.findings.filter((fact) => typeof fact === 'string' && !looksLikeSecret(fact)).slice(0, 8).map((fact) => digestLine(fact, 180))
+          : [];
+        for (const finding of findings) lines.push(`  checkpoint finding: ${finding}`);
         continue;
       }
       const target = args.path || args.from || args.file_path || args.pattern || args.query || args.command || args.task || '';
+      const safeTarget = target && looksLikeSecret(target) ? '[sensitive details omitted]' : target ? digestLine(String(target), 60) : '';
       const out = results.get(tc.id) ?? '';
-      const first = digestLine(out, 120);
-      lines.push(`  ${name}${target ? ` ${digestLine(String(target), 60)}` : ''}${first ? ` → ${first}` : ''}`);
+      const resultDigest = digestToolResult(name, out);
+      lines.push(`  ${name}${safeTarget ? ` ${safeTarget}` : ''}${resultDigest ? ` → ${resultDigest}` : ''}`);
     }
   }
   return lines;
@@ -674,15 +702,22 @@ const POLLING_TOOLS = new Set(['read_process_output', 'list_processes', 'get_pre
  * @param {(event: object) => void} o.send
  * @param {AbortSignal} o.signal
  * @param {string} o.runId
+ * @param {string} [o.taskId] stable assistant-turn id for exact-task checkpoints
  */
 export async function runAgent({
   provider, model, thinkingLevel, history, activity, workspace, runSearchTool, send, signal, runId,
+  /** Stable assistant-message id; Continue reuses it so only that task state is restored. */
+  taskId = '',
   /** The client's Continue button: the same task, picked up where it stopped. */
   resume = false,
 }) {
   const redact = createRedactor([provider.apiKey]);
+  const taskKey = taskKeyFor(taskId);
+  const priorTaskRun = resume && taskKey
+    ? readRunJournal(workspace.id, 30).find((run) => run.taskKey === taskKey) || null
+    : null;
   const state = {
-    readFiles: new Set(), plan: [], changed: new Map(), singleEdits: new Map(), checks: [], toolFailures: 0,
+    readFiles: new Set(), plan: priorTaskRun?.plan || [], findings: priorTaskRun?.findings || [], toolErrors: priorTaskRun?.toolErrors || [], changed: new Map(), singleEdits: new Map(), checks: [], toolFailures: 0,
     parkedBodies: new Set(),
     subagentCalls: 0,
     /** Files being written straight to disk while the model writes them (see tools.liveWrite). */
@@ -750,7 +785,8 @@ export async function runAgent({
       parentSignal?.removeEventListener('abort', abortChild);
     }
   };
-  const tools = buildToolset({ workspace, runSearchTool, runSubagent, redact });
+  const skillRegistry = createSkillRegistry(workspace, redact);
+  const tools = buildToolset({ workspace, runSearchTool, runSubagent, redact, skillRegistry });
   const startedAt = Date.now();
   const deadline = startedAt + limits.maxRunMs();
   const maxSteps = limits.maxSteps();
@@ -816,6 +852,8 @@ export async function runAgent({
      * with no code index gets the full listing, as before.
      */
     let snapshot = '';
+    let snapshotEntries = [];
+    let snapshotTruncated = false;
     let guidance = '';
     try {
       const richIndex = indexedFiles >= 15;
@@ -823,6 +861,8 @@ export async function runAgent({
         depth: richIndex ? 1 : 2,
         maxEntries: richIndex ? 60 : 120,
       });
+      snapshotEntries = entries;
+      snapshotTruncated = truncated;
       snapshot = formatSnapshot(entries, truncated);
       if (richIndex) snapshot += '\n(the code index above lists what is in the folders; use list_dir or file_search for anything else)';
     } catch (err) {
@@ -833,8 +873,15 @@ export async function runAgent({
     } catch {
       /* optional editor/project rules must never prevent the agent from starting */
     }
+    let skills = '';
+    try {
+      await skillRegistry.discover({ entries: snapshotEntries, truncated: snapshotTruncated });
+      skills = skillRegistry.promptText();
+    } catch {
+      /* optional project skills must never prevent the agent from starting */
+    }
 
-    const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, 2500, 6, { resume }));
+    const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, resume && priorTaskRun ? 8_000 : 2_500, 6, { resume, taskKey }));
     // Memory is looked up against the request AND the files this workspace was
     // last working on: "continue with the retry work" has to find the note about
     // the module that was just being changed, even though the words do not match.
@@ -866,7 +913,7 @@ export async function runAgent({
       /* no history is a normal state, not a failure */
     }
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, repo: repoBlock, activity, repoMap, relevantFiles, indexSummary, resume, budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
+      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, repo: repoBlock, activity, skills, repoMap, relevantFiles, indexSummary, resume: Boolean(resume && priorTaskRun), budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
       ...priorMessages,
     ];
 
@@ -1499,7 +1546,19 @@ export async function runAgent({
             res = await tools.execute(name, execArgs, ctx);
           }
         }
-        if (!res.ok && !res.denied && !res.blocked) state.toolFailures++;
+        if (!res.ok && !res.denied && !res.blocked) {
+          state.toolFailures++;
+          const rawFailure = typeof res.error === 'string' && res.error
+            ? res.error
+            : pickFailureLines(String(res.output || ''), 2) || String(res.output || '');
+          const message = digestLine(redact(rawFailure).replace(/\s+/g, ' ').trim(), 220);
+          if (message && !looksLikeSecret(message)) {
+            const entry = { tool: String(name || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40), message };
+            const key = `${entry.tool}:${entry.message}`.toLowerCase();
+            const prior = (state.toolErrors || []).filter((item) => `${item.tool}:${item.message}`.toLowerCase() !== key);
+            state.toolErrors = [...prior, entry].slice(-8);
+          }
+        }
         if (name === 'run_command' && !res.denied && res.ui?.kind === 'command') {
           const check = verificationLabel(args.command);
           if (check) {
@@ -1516,7 +1575,14 @@ export async function runAgent({
         // wrap-up gate both read this as the run's verification record.
         if (name === 'run_checks' && !res.denied && Array.isArray(res.runs)) {
           for (const r of res.runs) {
-            state.checks.push({ name: String(r.name || 'check').slice(0, 80), passed: Boolean(r.passed), ...(Number.isFinite(r.exitCode) ? { exitCode: r.exitCode } : {}), ...(r.timedOut ? { timedOut: true } : {}) });
+            state.checks.push({
+              name: String(r.name || 'check').slice(0, 80),
+              passed: Boolean(r.passed),
+              ...(Number.isFinite(r.exitCode) ? { exitCode: r.exitCode } : {}),
+              ...(r.timedOut ? { timedOut: true } : {}),
+              ...(r.aborted ? { aborted: true } : {}),
+              ...(typeof r.diagnostic === 'string' && !looksLikeSecret(r.diagnostic) ? { diagnostic: r.diagnostic.slice(0, 260) } : {}),
+            });
           }
         }
         flushOut();
@@ -1688,11 +1754,14 @@ export async function runAgent({
     }
     try {
       recordRun(workspace.id, {
+        taskKey,
         stopReason,
         changed: [...state.changed].map(([filePath, counts]) => ({ path: filePath, ...counts })),
         checks: state.checks,
         failures: state.toolFailures,
         plan: state.plan || [],
+        findings: state.findings || [],
+        toolErrors: state.toolErrors || [],
         interrupted: [...new Set(interrupted)].slice(0, 8),
       });
     } catch {

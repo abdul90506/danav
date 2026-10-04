@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readRunJournal, recordRun, recentRunsForPrompt } from '../../server/agent/journal.js';
+import { clearRunJournal, readRunJournal, recordRun, recentRunsForPrompt, taskKeyFor } from '../../server/agent/journal.js';
 
 const { test } = globalThis.__agentTest;
 console.log('\n[run journal]');
@@ -64,7 +64,7 @@ test('journal caps history and never stores arbitrary shell arguments', async ()
       recordRun('ws-cap', {
         stopReason: 'completed',
         changed: [{ path: `src/file-${i}.ts`, added: 1, removed: 0 }],
-        checks: [{ name: 'npm run test', passed: true, secretArgument: 'not copied' }],
+        checks: [{ name: 'npm run test', passed: true, secretArgument: 'not copied', diagnostic: 'ACCESS_TOKEN=not-copied' }],
         rawCommand: 'npm run test --token=not-copied',
       });
     }
@@ -75,35 +75,71 @@ test('journal caps history and never stores arbitrary shell arguments', async ()
   });
 });
 
-test('an unfinished run hands its plan to the next one', async () => {
-  await withDataDir(() => {
+test('a Continue hand-off restores only the exact task and carries its compact findings', async () => {
+  await withDataDir((root) => {
+    const taskKey = taskKeyFor('assistant-message-1');
     recordRun('ws-handoff', {
+      taskKey,
       stopReason: 'step_limit',
       changed: [{ path: 'src/api.ts', added: 12, removed: 3 }],
-      checks: [{ name: 'npm test', passed: false, exitCode: 1 }],
+      checks: [{ name: 'npm test', passed: false, exitCode: 1, diagnostic: 'AssertionError: expected 2 to equal 3 at src/api.test.js:12' }],
+      findings: ['src/api.ts keeps retry state per request; the helper must not share it globally.'],
       plan: [
         { content: 'Explore the API layer', status: 'completed' },
         { content: 'Add the retry helper', status: 'in_progress' },
         { content: 'Run the tests', status: 'pending' },
       ],
     });
+    // A different conversation's newest open plan must not hijack Continue.
+    recordRun('ws-handoff', {
+      taskKey: taskKeyFor('other-assistant-message'),
+      stopReason: 'step_limit',
+      plan: [{ content: 'Delete unrelated assets', status: 'in_progress' }],
+    });
 
-    const prompt = recentRunsForPrompt('ws-handoff', 'add the retry helper', 3000, 6);
-    assert.match(prompt, /unfinished/, 'the hand-off is called out');
+    const prompt = recentRunsForPrompt('ws-handoff', 'continue', 3000, 6, { resume: true, taskKey });
+    assert.match(prompt, /Checklist saved for this exact continued task/);
     assert.match(prompt, /\[x\] Explore the API layer/);
     assert.match(prompt, /\[~\] Add the retry helper/);
     assert.match(prompt, /\[ \] Run the tests/);
-    assert.match(prompt, /Continue from this plan/, 'the next run is told what to do with it');
-    assert.ok(prompt.length <= 3200, `the hand-off stays within its budget (${prompt.length})`);
+    assert.match(prompt, /retry state per request/);
+    assert.match(prompt, /AssertionError: expected 2 to equal 3/);
+    assert.doesNotMatch(prompt, /Delete unrelated assets/);
+    assert.ok(prompt.length <= 3000, `the hand-off stays within its budget (${prompt.length})`);
 
-    // A finished run says nothing about plans.
-    recordRun('ws-done', { stopReason: 'completed', changed: [{ path: 'a.ts', added: 1, removed: 0 }], plan: [{ content: 'x', status: 'pending' }] });
-    assert.doesNotMatch(recentRunsForPrompt('ws-done', '', 3000, 6), /unfinished/);
+    // Ordinary new work gets query-matched evidence, never an unrelated open plan.
+    const unrelated = recentRunsForPrompt('ws-handoff', 'style the landing page', 1200, 6, { taskKey: taskKeyFor('new-task') });
+    assert.doesNotMatch(unrelated, /Checklist saved|Delete unrelated assets|Add the retry helper/);
+    const matching = recentRunsForPrompt('ws-handoff', 'retry state API request', 1200, 6, { taskKey: taskKeyFor('new-task') });
+    assert.match(matching, /retry state per request/);
 
-    // Junk in a stored plan is dropped, not echoed.
-    recordRun('ws-junk', { stopReason: 'time_limit', plan: [{ content: 'ok', status: 'nonsense' }, { status: 'pending' }, 'nope'] });
-    const junk = recentRunsForPrompt('ws-junk', '', 3000, 6);
+    // A very small budget remains a real upper bound even with a long checklist and findings.
+    recordRun('ws-large', {
+      taskKey: taskKeyFor('large-task'),
+      stopReason: 'step_limit',
+      findings: Array.from({ length: 8 }, (_, i) => `src/file-${i}.ts: a verified finding about the request-scoped retry state and bounded cleanup.`),
+      plan: Array.from({ length: 12 }, (_, i) => ({ content: `Inspect subsystem ${i} and preserve the observed state carefully.`, status: i ? 'pending' : 'in_progress' })),
+    });
+    assert.ok(recentRunsForPrompt('ws-large', '', 500, 6, { resume: true, taskKey: taskKeyFor('large-task') }).length <= 500);
+
+    // Unfinished plans are still sanitized; no unchecked status or malformed item is echoed.
+    recordRun('ws-junk', { taskKey: taskKeyFor('junk-task'), stopReason: 'time_limit', plan: [{ content: 'ok', status: 'nonsense' }, { status: 'pending' }, 'nope'] });
+    const junk = recentRunsForPrompt('ws-junk', '', 3000, 6, { resume: true, taskKey: taskKeyFor('junk-task') });
     assert.match(junk, /\[ \] ok/);
     assert.doesNotMatch(junk, /nonsense|nope/);
+
+    const disk = fs.readFileSync(path.join(root, 'agent-runs', 'ws-handoff.json'), 'utf8');
+    assert.doesNotMatch(disk, /assistant-message-1|other-assistant-message/);
+  });
+});
+
+test('deleting workspace memory also removes its run checkpoint file', async () => {
+  await withDataDir((root) => {
+    recordRun('ws-delete', { stopReason: 'step_limit', plan: [{ content: 'Finish the task', status: 'in_progress' }] });
+    const file = path.join(root, 'agent-runs', 'ws-delete.json');
+    assert.equal(fs.existsSync(file), true);
+    clearRunJournal('ws-delete');
+    assert.equal(fs.existsSync(file), false);
+    assert.deepEqual(readRunJournal('ws-delete'), []);
   });
 });

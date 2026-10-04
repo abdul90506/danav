@@ -254,6 +254,7 @@ test('run_checks runs the project checks cheapest first and stops at the first f
       [['npm run typecheck', true], ['npm test', false]],
       'the cheapest check ran first, and the failure stopped the run'
     );
+    assert.match(res.runs[1].diagnostic, /AssertionError: expected 2 to equal 3/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
