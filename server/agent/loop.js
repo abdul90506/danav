@@ -675,6 +675,8 @@ const POLLING_TOOLS = new Set(['read_process_output', 'list_processes', 'get_pre
  */
 export async function runAgent({
   provider, model, thinkingLevel, history, activity, workspace, runSearchTool, send, signal, runId,
+  /** The client's Continue button: the same task, picked up where it stopped. */
+  resume = false,
 }) {
   const redact = createRedactor([provider.apiKey]);
   const state = {
@@ -774,8 +776,16 @@ export async function runAgent({
     }
 
     const priorMessages = cleanHistory(history);
+    /**
+     * What this run is answering. A resume sends its own instruction as the last
+     * user turn ("[continue] …"), and that is not the task — the task is the
+     * request above it, which is also what memory is looked up against and what the
+     * read-only subagent is told the goal is. So both note kinds are skipped.
+     */
     const currentRequest = [...priorMessages].reverse().find((m) =>
-      m.role === 'user' && !String(m.content || '').startsWith('[system notice]')
+      m.role === 'user' &&
+      !String(m.content || '').startsWith('[system notice]') &&
+      !String(m.content || '').startsWith('[continue]')
     )?.content || '';
     lastUserRequest = currentRequest;
     const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, 2500, 6));

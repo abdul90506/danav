@@ -67,6 +67,19 @@ import { SmoothStreamer } from './utils/smoothStream';
 import { buildMessageContent } from './utils/messageContent';
 import { savePreviewAccessCode } from './services/previewAuth';
 
+/**
+ * What a resume says to the model.
+ *
+ * It is a note, not a user message: the task itself is already in the transcript
+ * above, and the server hands over the plan, the files that changed and the checks
+ * that already ran. Saying it this way is what stops the model treating "continue"
+ * as a fresh request — there is nothing to rephrase and nothing to start over.
+ */
+const RESUME_NOTE =
+  '[continue] The previous run stopped before the task was finished. The journal above has the plan, ' +
+  'the files already changed and the checks already run. Resume from the first unfinished step: do not ' +
+  'redo work that is already done, do not start over, and finish the task the user asked for.';
+
 export const App: React.FC = () => {
   // Theme state
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme());
@@ -779,12 +792,28 @@ export const App: React.FC = () => {
      * removed turns came straight back and the transcript grew instead of
      * resetting. Passing the list in makes trim-and-send a single atomic step.
      */
-    baseMessages?: Message[]
+    baseMessages?: Message[],
+    /**
+     * Resume a stopped agent turn IN PLACE: the id of the assistant message being
+     * continued.
+     *
+     * Continuing used to be `handleSendMessage('Continue')` — a new user bubble, a
+     * new assistant message, and the transcript looked like a second request. It is
+     * the same run: the client keeps the existing message (blocks intact), streams
+     * the new part into it, and the server's journal hands the model its plan and
+     * the files it already changed. Nothing is retyped and nothing restarts.
+     */
+    resumeInto?: string
   ) => {
     const rawText = String(textToSend ?? '').trim();
     const currentAttachments = attachmentsToSend || [];
 
-    if (!rawText && currentAttachments.length === 0) return;
+    const resumeSource = resumeInto
+      ? (baseMessages || activeConversation?.messages || []).find((m) => m.id === resumeInto)
+      : undefined;
+    const isResume = Boolean(resumeSource && resumeInto);
+
+    if (!isResume && !rawText && currentAttachments.length === 0) return;
     if (!activeConversation || isLoading) return;
 
     const existingMessages = baseMessages || activeConversation.messages;
@@ -803,7 +832,7 @@ export const App: React.FC = () => {
       return;
     }
 
-    const messageContent = rawText || (currentAttachments[0] ? `Attached file: ${currentAttachments[0].name}` : '');
+    const messageContent = isResume ? '' : rawText || (currentAttachments[0] ? `Attached file: ${currentAttachments[0].name}` : '');
 
     // User message
     const userMessage: Message = {
@@ -814,8 +843,8 @@ export const App: React.FC = () => {
       createdAt: Date.now(),
     };
 
-    // Assistant placeholder
-    const assistantMessageId = `msg-ai-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+    // Assistant placeholder (or, for a resume, the message that is being continued)
+    const assistantMessageId = isResume ? String(resumeInto) : `msg-ai-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
     const assistantMessage: Message = {
       id: assistantMessageId,
       role: 'assistant',
@@ -829,7 +858,7 @@ export const App: React.FC = () => {
 
     // Auto-update conversation title: use quick fallback first, then update with AI-generated title
     const isFirstUserMessage = existingMessages.filter((m) => m.role === 'user').length === 0;
-    const shouldAutoName = isFirstUserMessage || !activeConversation.title || activeConversation.title === 'New Chat';
+    const shouldAutoName = !isResume && (isFirstUserMessage || !activeConversation.title || activeConversation.title === 'New Chat');
     const initialTitle = shouldAutoName
       ? generateTitleFromPrompt(messageContent)
       : activeConversation.title;
@@ -851,7 +880,18 @@ export const App: React.FC = () => {
       });
     }
 
-    const updatedMessages = [...existingMessages, userMessage, assistantMessage];
+    /**
+     * A resume touches exactly one message — the turn being continued — and adds
+     * nothing: no user bubble, no second answer. Its blocks stay where they are and
+     * the new ones are appended to them (see baseBlocks below).
+     */
+    const updatedMessages = isResume
+      ? existingMessages.map((m) =>
+          m.id === assistantMessageId
+            ? { ...m, isGenerating: true, agentRun: undefined, agentStatus: undefined, error: undefined }
+            : m
+        )
+      : [...existingMessages, userMessage, assistantMessage];
 
     setConversations((prev) =>
       prev.map((c) =>
@@ -866,7 +906,7 @@ export const App: React.FC = () => {
       )
     );
 
-    resetComposer();
+    if (!isResume) resetComposer();
     setIsLoading(true);
 
     // The web tools are handed to the MODEL, not run here. It decides what to
@@ -893,11 +933,17 @@ export const App: React.FC = () => {
     // Messages history to send. Each turn is rebuilt from what was stored, so
     // an image attached three turns ago is still sent with its own message.
     const historyPayload: Array<{ role: 'user' | 'assistant' | 'system'; content: ChatMessageContent }> = [
-      ...existingMessages.map((m) => ({
-        role: m.role === 'tool' ? ('user' as const) : (m.role as 'user' | 'assistant' | 'system'),
-        content: buildMessageContent(m.content, m.attachments),
-      })),
-      { role: 'user' as const, content: buildMessageContent(augmentedPrompt, currentAttachments) },
+      ...existingMessages
+        // On a resume the assistant turn being continued is already in the list:
+        // the model sees its own last message, then the instruction to carry on.
+        .map((m) => ({
+          role: m.role === 'tool' ? ('user' as const) : (m.role as 'user' | 'assistant' | 'system'),
+          content: buildMessageContent(m.content, m.attachments),
+        })),
+      {
+        role: 'user' as const,
+        content: isResume ? RESUME_NOTE : buildMessageContent(augmentedPrompt, currentAttachments),
+      },
     ];
 
     // ---- Agent mode: the model works in the workspace with real tools --------
@@ -915,6 +961,34 @@ export const App: React.FC = () => {
                 }
           )
         );
+      /**
+       * A resume carries what the turn did so far: its blocks are the ones already
+       * on screen (the new ones are appended to them), and its numbers are added to
+       * the ones the run had, so the finished line reports the whole job rather
+       * than just the second half of it.
+       */
+      const baseBlocks = isResume ? resumeSource?.blocks || [] : [];
+      const previousRun = isResume ? resumeSource?.agentRun : undefined;
+      const withBase = (incoming: MessageBlock[] = []) => (baseBlocks.length ? [...baseBlocks, ...incoming] : incoming);
+      const mergeRun = (next: Message['agentRun']): Message['agentRun'] => {
+        if (!previousRun) return next;
+        if (!next) return previousRun;
+        const changed = new Map((previousRun.changed || []).map((f) => [f.path, { ...f }]));
+        for (const f of next.changed || []) {
+          const was = changed.get(f.path);
+          changed.set(f.path, was ? { ...was, added: was.added + f.added, removed: was.removed + f.removed } : { ...f });
+        }
+        return {
+          stopReason: next.stopReason,
+          // Never report less work than was actually done: two runs of 4 steps are 8.
+          steps: (previousRun.steps || 0) + (next.steps || 0),
+          toolCalls: (previousRun.toolCalls || 0) + (next.toolCalls || 0),
+          durationMs: (previousRun.durationMs || 0) + (next.durationMs || 0),
+          changed: [...changed.values()],
+        };
+      };
+      const baseContent = isResume ? resumeSource?.content || '' : '';
+
       // Anything that can change a file on disk: the tool calls, or a command that does.
       const MUTATING = new Set(['write_file', 'edit_file', 'multi_edit', 'run_command']);
       let settledMutations = 0;
@@ -939,17 +1013,18 @@ export const App: React.FC = () => {
         workspaceId: agentWorkspace.id,
         activity: collectActivity(existingMessages),
         signal: controller.signal,
+        resume: isResume,
         onStreamers: (text, thinking) => {
           contentStreamerRef.current = text;
           thinkingStreamerRef.current = thinking;
         },
         onUpdate: (snap, status) => {
           patchAssistant({
-            content: snap.content,
+            content: snap.content || baseContent,
             thinkingContent: snap.thinkingContent,
-            blocks: snap.blocks,
+            blocks: withBase(snap.blocks),
             agent: true,
-            agentRun: snap.agentRun,
+            agentRun: mergeRun(snap.agentRun),
             agentStatus: status,
           });
           // keep an open Files panel live while the agent works
@@ -979,11 +1054,11 @@ export const App: React.FC = () => {
         },
         onFinish: (snap, error) => {
           patchAssistant({
-            content: snap.content || (error ? 'Unable to complete the request.' : ''),
+            content: snap.content || baseContent || (error ? 'Unable to complete the request.' : ''),
             thinkingContent: snap.thinkingContent,
-            blocks: snap.blocks,
+            blocks: withBase(snap.blocks),
             agent: true,
-            agentRun: snap.agentRun,
+            agentRun: mergeRun(snap.agentRun),
             agentStatus: undefined,
             isGenerating: false,
             ...(error ? { error } : {}),
@@ -1273,9 +1348,22 @@ export const App: React.FC = () => {
     await handleSendMessage(promptMsg.content, undefined, undefined, trimmed);
   };
 
-  // Continue generation from where it left off
-  const handleContinueResponse = () => {
-    handleSendMessage('Continue');
+  /**
+   * Keep going from where the run stopped.
+   *
+   * The instruction is sent to the model as the turn's own note — it is in the
+   * request, never in the transcript — and the answer streams back into the SAME
+   * message: same blocks, same work line, one more stretch of work. That is what
+   * makes it a resume rather than a second request.
+   */
+  const handleContinueResponse = (assistantMessageId?: string) => {
+    if (assistantMessageId) {
+      void handleSendMessage(undefined, undefined, true, undefined, assistantMessageId);
+      return;
+    }
+    // Fallback for a plain (non-agent) answer: there is no run to resume, so the
+    // old behaviour — ask for the rest of the answer — is the right one.
+    void handleSendMessage('Continue');
   };
 
   const agentOn = Boolean(activeConversation?.agentMode);
@@ -1445,7 +1533,7 @@ export const App: React.FC = () => {
   const onRetryStable = useStable(() => void handleRetry());
   const onEditUserMessageStable = useStable((id: string, text: string) => void handleEditUserMessage(id, text));
   const onRegenerateResponseStable = useStable((id: string) => void handleRegenerateResponse(id));
-  const onContinueResponseStable = useStable(() => handleContinueResponse());
+  const onContinueResponseStable = useStable((id?: string) => handleContinueResponse(id));
   const onAgentApprovalStable = useStable((action: AgentAction, allow: boolean, always: boolean) =>
     void handleAgentApproval(action, allow, always)
   );

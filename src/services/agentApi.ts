@@ -190,6 +190,8 @@ export interface AgentStreamOptions {
   workspaceId: string;
   /** One-line summaries of what the agent did earlier in this conversation. */
   activity?: string[];
+  /** This request continues a run that stopped early. */
+  resume?: boolean;
   signal?: AbortSignal;
   onStatus?: (status: string) => void;
   onContent: (text: string) => void;
@@ -229,6 +231,7 @@ export async function streamAgentRun(o: AgentStreamOptions): Promise<void> {
         messages: o.messages,
         workspaceId: o.workspaceId,
         activity: o.activity,
+        resume: o.resume === true,
       }),
     });
 

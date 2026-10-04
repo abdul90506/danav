@@ -1177,6 +1177,17 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
         : 'Working…';
 
   const runLine = !message.isGenerating ? workedSummary(message.agentRun) : undefined;
+  /**
+   * A run that stopped short of the end is a pause, and the way to carry on is one
+   * press: the button continues THIS turn in place (see App.handleContinueResponse),
+   * rather than sending anything that would look like a new request.
+   */
+  const resumableReasons = ['step_limit', 'time_limit', 'repeated_failures', 'no_progress', 'aborted', 'error'];
+  const canContinue =
+    Boolean(onContinueResponse) &&
+    !message.isGenerating &&
+    Boolean(message.agent) &&
+    resumableReasons.includes(String(message.agentRun?.stopReason || ''));
   const notice = !message.isGenerating ? stopNotice(message.agentRun?.stopReason) : undefined;
   const runFooter =
     runLine || notice ? (
@@ -1305,6 +1316,22 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
                 <MarkdownBlock content={normalizeMessageContent(safeMessageContent)} streaming={message.isGenerating} components={markdownComponents} />
               </div>
             ) : null}
+
+            {/* The run stopped before it was finished: one press carries on from
+                the step it reached, in this same turn. */}
+            {canContinue ? (
+              <div className="mt-1.5">
+                <button
+                  type="button"
+                  onClick={() => onContinueResponse?.(message.id)}
+                  title="Carry on from where it stopped"
+                  className="inline-flex items-center gap-1.5 -mx-1.5 px-1.5 py-1 rounded-md text-[13px] font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
+                >
+                  <Play className="w-3 h-3 stroke-[2.2]" />
+                  Continue
+                </button>
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -1370,7 +1397,9 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
               </button>
             )}
 
-            {onContinueResponse && (
+            {/* Agent turns get the visible Continue above instead: two buttons for
+                the same job is one button too many. */}
+            {onContinueResponse && !message.agent && (
               <button
                 type="button"
                 onClick={() => onContinueResponse(message.id)}

@@ -408,9 +408,9 @@ export function stopNotice(reason?: string): string | undefined {
     case 'aborted':
       return 'Stopped.';
     case 'step_limit':
-      return 'Reached the step limit for one run — reply "continue" to keep going.';
+      return 'Reached the step limit for one run — press Continue to carry on.';
     case 'time_limit':
-      return 'Reached the time limit for one run — reply "continue" to keep going.';
+      return 'Reached the time limit for one run — press Continue to carry on.';
     case 'repeated_failures':
       return 'Stopped after the same step kept failing.';
     case 'no_progress':

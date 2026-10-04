@@ -11,6 +11,8 @@ export interface RunAgentTurnOptions {
   workspaceId: string;
   /** What the agent did earlier in this conversation, one line each. */
   activity: string[];
+  /** This turn continues a run that stopped early (see App.tsx RESUME_NOTE). */
+  resume?: boolean;
   signal: AbortSignal;
   /** Fired on every change while the turn runs. `status` is a transient note ("Provider busy — retrying…"). */
   onUpdate: (snapshot: TurnSnapshot, status: string) => void;
@@ -52,6 +54,7 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
     messages: opts.messages,
     workspaceId: opts.workspaceId,
     activity: opts.activity,
+    resume: opts.resume,
     signal: opts.signal,
     onStatus: (s) => {
       status = s;
