@@ -38,12 +38,15 @@ const AgentWorkRow: React.FC<{
   messageId: string;
   live: boolean;
   liveLabel: string;
+  /** The newest line the agent said while working, shown as a shimmer under the label. */
+  narration?: string;
+  narrationId?: string;
   elapsedSeconds: number;
   /** The finished numbers, once the run is over. */
   summary?: string;
   notice?: string;
   children: React.ReactNode;
-}> = ({ messageId, live, liveLabel, elapsedSeconds, summary, notice, children }) => {
+}> = ({ messageId, live, liveLabel, narration, narrationId, elapsedSeconds, summary, notice, children }) => {
   const id = `work-${messageId}`;
   const open = usePanelOpen(workStore, id);
   /** The user's own choice, so the automatic open and close can leave it alone. */
@@ -115,6 +118,25 @@ const AgentWorkRow: React.FC<{
           }`}
         />
       </button>
+
+      {/*
+        What the agent says while it works, in one line under the label: the newest
+        line, cut off at the edge rather than wrapped, shimmering so it reads as
+        something being written rather than a sentence to keep. A new line replaces
+        it — a fresh element, so it fades in again — and with no narration the row is
+        just the label, which is how it was.
+      */}
+      {live && narration ? (
+        <div className="mt-0.5 pl-1 max-w-full overflow-hidden">
+          <span
+            key={narrationId}
+            title={narration}
+            className="narration-shimmer block truncate text-[12px] leading-5 animate-in fade-in duration-300"
+          >
+            {narration}
+          </span>
+        </div>
+      ) : null}
 
       {/*
         Kept mounted and hidden rather than unmounted: the rows inside keep their
@@ -946,9 +968,33 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
     return done.length ? done[done.length - 1].action : null;
   })();
   const inFold = (block: MessageBlock) => !(previewAction && block.type === 'action' && block.action.id === previewAction.id);
-  const visibleText = liveTurn ? textBlocks : textBlocks.slice(-1);
+  /**
+   * Lines the agent says *while* it is working are narration, and narration does
+   * not belong in the transcript: "Building a modern, fully responsive portfolio
+   * website…" used to sit above the work as a paragraph of its own, and then vanish
+   * into the trail when the run ended — text that was written and then taken away
+   * again. It now goes straight into the working row, as one shimmering line under
+   * the label (see AgentWorkRow).
+   *
+   * The one exception is text that arrives AFTER the last action: that is the
+   * closing answer being written, and the reader should watch it arrive.
+   */
+  const lastActionAt = blocks.reduce((at, b, i) => (b.type === 'action' ? i : at), -1);
+  const closingText = textBlocks.find((b) => blocks.indexOf(b) > lastActionAt);
+  const visibleText = liveTurn
+    ? closingText
+      ? [closingText]
+      : textBlocks.filter((b) => b.notice)
+    : textBlocks.slice(-1);
   const visibleTextIds = new Set(visibleText.map((b) => b.id));
   const foldedText = textBlocks.filter((b) => !visibleTextIds.has(b.id));
+
+  /** The newest line the agent said while working — the shimmer under the label. */
+  const liveNarration = (() => {
+    if (!liveTurn) return null;
+    const spoken = textBlocks.filter((b) => !visibleTextIds.has(b.id) && !b.notice && b.content.trim());
+    return spoken.length ? spoken[spoken.length - 1] : null;
+  })();
   const actionCount = blocks.filter((b) => b.type === 'action' && inFold(b)).length;
   // A turn with nothing to fold (no actions, nothing said along the way) has no
   // work row at all — its reasoning shows in place instead of hiding behind it.
@@ -1130,6 +1176,8 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
                 messageId={message.id}
                 live={liveTurn}
                 liveLabel={workingText}
+                narration={liveNarration?.content}
+                narrationId={liveNarration?.id}
                 elapsedSeconds={elapsedSeconds}
                 summary={runLine}
                 notice={notice}

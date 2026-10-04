@@ -176,12 +176,17 @@ function rawLabel(a: AgentAction): ActionLabel {
   };
 
   switch (a.tool) {
-    case 'list_dir':
+    case 'list_dir': {
+      // A listing of the workspace root has no path worth printing: "." on its own
+      // is punctuation, not information. The row then reads "Listed 8 items".
+      const listed = r?.path || args.path || '';
+      const isRoot = listed === '' || listed === '.' || listed === './' || listed === '/';
       return base('Listing', 'Listed', {
-        target: r?.path || args.path || '.',
+        target: isRoot ? undefined : listed,
         targetKind: 'dir',
         meta: !live && r ? plural(r.count ?? 0, 'item') : undefined,
       });
+    }
 
     case 'read_file': {
       const start = r?.startLine ?? args.startLine;
