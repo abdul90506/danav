@@ -431,7 +431,7 @@ export const TOOL_DEFINITIONS = [
   ),
   fn(
     'run_command',
-    'Run a shell command in the workspace; returns its output and exit code. Every call is a fresh shell (use `cwd`, or `cd dir && …`). Non-interactive only: pass -y/--yes flags, never wait for input. Anything that keeps running — dev servers, watchers — MUST use background=true, which returns immediately with a process id.',
+    'Run a shell command in the workspace; returns its output and exit code. This is also where housekeeping happens — there is no create/move/delete tool: "mkdir -p <folder>", "mv <from> <to>", "cp -r <from> <to>", "rm -f <file>" / "rm -rf <folder>", "git …", "npm …" ("md", "move", "copy", "del", "rmdir /s" on Windows). Every call is a fresh shell (use `cwd`, or `cd dir && …`). Non-interactive only: pass -y/--yes flags, never wait for input. Anything that keeps running — dev servers, watchers — MUST use background=true, which returns immediately with a process id. Read the output: a non-zero exit code is information, not a dead end.',
     {
       command: { type: 'string', description: 'The command line.' },
       cwd: { type: 'string', description: 'Working directory, relative to the workspace root.' },
@@ -538,13 +538,90 @@ export const RETIRED_TOOLS = new Map([
   ],
   [
     'move_file',
-    'moving and renaming are shell jobs now: run_command with "mv <from> <to>" (or "move" / "ren" on Windows). The destination is stamped as created when it lands, and the look-before-you-leap rule covers both halves — the file you move and the file you land on must have been inspected in this run.',
+    'moving and renaming are shell jobs now: run_command with "mv <from> <to>" (or "move" / "ren" on Windows). The destination is stamped as created when it lands, and the run inspects what it is about to touch for you.',
   ],
   [
     'delete_file',
-    'removing things is a shell job now. Use run_command: "rm -f <file>", "rm -rf <folder>", or the platform equivalent ("del" / "rmdir /s" on Windows). The same look-before-you-leap rule guards it, so list or read what you are removing first. Never remove the workspace itself.',
+    'removing things is a shell job now. Use run_command: "rm -f <file>", "rm -rf <folder>", or the platform equivalent ("del" / "rmdir /s" on Windows). The run inspects targets it has not seen yet for you; what it will not do is remove the workspace itself.',
   ],
 ]);
+
+/**
+ * What a model means when it reaches for a tool that is not there.
+ *
+ * Housekeeping has no tools of its own on purpose — one command does the work of
+ * four — but a model that was trained on other agents will still try `delete_file`
+ * or `create_dir` first. Answering with "unknown tool" and a list of 23 names
+ * costs a whole round trip and teaches nothing; answering with the exact command
+ * gets the work done on the next try.
+ */
+const HOUSEKEEPING_INTENT = [
+  {
+    re: /^(delete|del|remove|rm|unlink|erase|trash|remove_file|remove_dir|remove_path|delete_file|delete_path|delete_dir|rm_file|rm_dir|rmdir|rm_files)$/i,
+    tool: 'run_command',
+    command: 'rm -f <file> (or rm -rf <folder>)',
+    why: 'removing things is a shell job',
+  },
+  {
+    re: /^(move|ren|rename|mv|move_path|move_file|rename_file)$/i,
+    tool: 'run_command',
+    command: 'mv <from> <to> (or move / ren on Windows)',
+    why: 'moving and renaming are shell jobs',
+  },
+  {
+    re: /^(create_dir|mkdir|mkdirs|make_dir|new_folder|create_folder|mkpath)$/i,
+    tool: 'run_command',
+    command: 'mkdir -p <folder>',
+    why: 'folders are a shell job (write_file also creates every folder on the way to a file)',
+  },
+  { re: /^(copy|cp|copy_file|duplicate)$/i, tool: 'run_command', command: 'cp <from> <to> (or copy on Windows)', why: 'copying is a shell job' },
+  { re: /^(cat|view|open|view_file|show_file)$/i, tool: 'read_file', command: null, why: 'reading a file is read_file' },
+  { re: /^(ls|list|dir|list_files|list_directory|tree)$/i, tool: 'list_dir', command: null, why: 'listing a folder is list_dir' },
+  { re: /^(grep|ripgrep|search|search_files|find_in_files)$/i, tool: 'grep_search', command: null, why: 'searching file contents is grep_search' },
+  { re: /^(find|find_file|locate|glob)$/i, tool: 'file_search', command: null, why: 'finding a file by name is file_search' },
+  { re: /^(bash|shell|exec|execute|run|run_shell|terminal|sh|powershell|command)$/i, tool: 'run_command', command: null, why: 'running a command is run_command' },
+  { re: /^(save_file|create_file|new_file|touch|write|add_file)$/i, tool: 'write_file', command: null, why: 'writing a file is write_file' },
+  { re: /^(patch|modify_file|update_file|replace|substitute)$/i, tool: 'edit_file', command: null, why: 'changing an existing file is edit_file or multi_edit' },
+  { re: /^(fetch|http|curl|download|browse|open_url)$/i, tool: 'fetch_url', command: null, why: 'reading a web page is fetch_url' },
+  { re: /^(todo|todos|task|tasks|plan|checklist)$/i, tool: 'update_plan', command: null, why: 'the checklist is update_plan' },
+];
+
+/** "Use run_command with `rm -rf <folder>` — removing things is a shell job." */
+export function unknownToolHint(name) {
+  if (typeof name !== 'string' || !name) return null;
+  const bare = name.trim();
+  const names = TOOL_DEFINITIONS.map((d) => d.function.name);
+  if (names.includes(bare)) return null; // it exists; the caller asked the wrong question
+  const intent = HOUSEKEEPING_INTENT.find((entry) => entry.re.test(bare));
+  if (intent) {
+    const how = intent.command ? ` — for example \`${intent.command}\`` : '';
+    return `"${bare}" is not a tool, but ${intent.why}: use \`${intent.tool}\`${how}.`;
+  }
+  // Not a housekeeping name: maybe it is a typo of one that does exist.
+  let best = null;
+  let bestDistance = 3;
+  for (const candidate of names) {
+    const distance = editDistance(bare.toLowerCase(), candidate.toLowerCase());
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = candidate;
+    }
+  }
+  return best ? `"${bare}" is not a tool. Did you mean \`${best}\`?` : null;
+}
+
+/** Small Levenshtein, used only to point at a likely typo in a tool name. */
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = row;
+  }
+  return prev[b.length];
+}
 
 export const READ_ONLY_TOOLS = new Set([
   'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'list_processes', 'read_process_output', 'web_search', 'fetch_url', 'search_memory',

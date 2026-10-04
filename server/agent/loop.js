@@ -14,7 +14,7 @@ import { LlmError, streamCompletion } from './llm.js';
 import { buildSystemPrompt, formatSnapshot } from './prompt.js';
 import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun } from './journal.js';
-import { buildToolset, READ_ONLY_TOOLS, RETIRED_TOOLS } from './tools.js';
+import { buildToolset, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint } from './tools.js';
 import { checkAction, createLedger, observeOwned } from './policy.js';
 import { splitLines } from './textops.js';
 import { memoryForPrompt } from './memory.js';
@@ -1341,9 +1341,12 @@ export async function runAgent({
           }
         } else if (!tools.has(name)) {
           const retired = RETIRED_TOOLS.get(name);
+          // A name that never existed is answered with the tool that does the job
+          // — a list of 23 names costs a round trip and teaches the model nothing.
+          const hint = retired ? null : unknownToolHint(name);
           const msg = retired
             ? `"${name}" is not a tool any more — ${retired}`
-            : `Unknown tool "${name}". Available tools: ${tools.definitions.map((d) => d.function.name).join(', ')}.`;
+            : hint || `Unknown tool "${name}". Available tools: ${tools.definitions.map((d) => d.function.name).join(', ')}.`;
           res = { ok: false, output: `Error: ${msg}`, error: msg, ui: { kind: name, ok: false } };
         } else {
           // The invariant, checked before anything is touched: a call that would

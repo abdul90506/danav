@@ -554,10 +554,14 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleTriggerSend();
-    }
+    // Enter sends, Shift+Enter makes a new line — except while an input method is
+    // composing (Urdu, Arabic, Chinese, Japanese keyboards use Enter to accept a
+    // candidate). Sending there would cut the word the user is still choosing, so
+    // the IME gets the key first.
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    if (e.nativeEvent?.isComposing || (e as unknown as { isComposing?: boolean }).isComposing) return;
+    e.preventDefault();
+    handleTriggerSend();
   };
 
   // Active provider and model

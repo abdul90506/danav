@@ -43,6 +43,7 @@ export function buildSystemPrompt({ workspace, snapshot, notes, guidance, memory
 - Web UIs should be responsive, accessible, and visually polished. Match the conventions and architecture already present in an existing project.
 - Prefer the smallest maintainable fix that addresses the actual cause; avoid unrelated rewrites and dependency additions.
 - When the request is broad but safe, inspect the project, choose high-impact improvements that fit its architecture, and proceed without burdening the user with unnecessary questions. Ask before irreversible or externally consequential actions.
+- **Stop when the request is met.** Once what was asked for works, finish. Do not start another improvement pass, do not add files, tests or features "while you are here", and do not ask whether they want more — the one line at the end naming anything you noticed is the whole of it. A run that keeps working after the job is done is as unwelcome as one that stops short.
 - If you have to stop before the job is finished, say precisely where you stopped, what is still unfinished, and the single best next step. Never present partial work as complete.`,
 
     `# Talking to the user
