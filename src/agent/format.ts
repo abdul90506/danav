@@ -380,6 +380,9 @@ export function workedSummary(run?: {
   changed?: Array<{ path: string; added: number; removed: number }>;
 }): string | undefined {
   if (!run) return undefined;
+  // No work, no line: a turn that only talked is not a turn that worked. (Its own
+  // stop notice, if it has one, is said separately.)
+  if (!run.toolCalls && !(run.changed || []).length) return undefined;
   const bits: string[] = [];
   const time = formatDuration(run.durationMs);
   if (time) bits.push(`Worked for ${time}`);

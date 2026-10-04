@@ -32,38 +32,18 @@ interface ToolExecutionCardProps {
 const toolStore = createPanelStore();
 
 export const ToolExecutionCard: React.FC<ToolExecutionCardProps> = ({ tool, onWatch }) => {
-  const isRunningTool = tool.status === 'running';
   const expanded = usePanelOpen(toolStore, tool.id);
   const cardRef = useRef<HTMLDivElement>(null);
-  /** Opened by us while it ran, so we may close it again; false once the user clicks. */
-  const autoOpenedRef = useRef(false);
-  const pinnedRef = useRef(false);
   useDismissOnOutside(cardRef, expanded, useCallback(() => toolStore.close(), []));
 
-  // While the tool runs, this card is the open one. When it settles, it closes
-  // again — unless the user opened it themselves, in which case it is theirs.
-  React.useEffect(() => {
-    if (isRunningTool) {
-      if (!autoOpenedRef.current) {
-        autoOpenedRef.current = true;
-        pinnedRef.current = false;
-        toolStore.set(tool.id);
-      }
-      return;
-    }
-    if (autoOpenedRef.current) {
-      autoOpenedRef.current = false;
-      if (!pinnedRef.current && toolStore.get() === tool.id) toolStore.close();
-    }
-  }, [isRunningTool, tool.id]);
-
+  /**
+   * The card does not open itself, while it runs or when it settles: the row says
+   * what it found ("8 results"), and the raw output is there for whoever wants it.
+   * One is open at a time, chat-wide, and a click anywhere else closes it.
+   */
   const toggle = useCallback(() => {
-    if (toolStore.get() === tool.id) {
-      toolStore.close();
-      return;
-    }
-    pinnedRef.current = true;
-    toolStore.set(tool.id);
+    if (toolStore.get() === tool.id) toolStore.close();
+    else toolStore.set(tool.id);
   }, [tool.id]);
 
   const isRunning = tool.status === 'running';

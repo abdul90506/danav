@@ -915,6 +915,7 @@ test('formatRanges / formatDuration / workedSummary / stopNotice', () => {
   );
   assert.equal(fmt.workedSummary({ durationMs: 300, toolCalls: 1 }), '1 action', 'no stopwatch under half a second');
   assert.equal(fmt.workedSummary({}), undefined);
+  assert.equal(fmt.workedSummary({ durationMs: 6_000, toolCalls: 0, changed: [] }), undefined, 'a turn that only talked reports nothing');
   assert.match(fmt.stopNotice('step_limit'), /continue/);
   assert.match(fmt.stopNotice('no_progress'), /same call|same answer/i);
   assert.equal(fmt.stopNotice('completed'), undefined);

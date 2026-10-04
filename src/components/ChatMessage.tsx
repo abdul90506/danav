@@ -62,22 +62,30 @@ const AgentWorkRow: React.FC<{
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        className="group/work inline-flex items-center gap-1.5 max-w-full text-left cursor-pointer py-0.5"
+        title={open ? 'Hide what this turn did' : 'Show what this turn did'}
+        className="group/work flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 max-w-full text-left cursor-pointer py-1 -my-0.5 rounded-sm"
       >
         <ChevronRight
-          className={`w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/work:text-zinc-600 dark:group-hover/work:text-zinc-300 ${open ? 'rotate-90' : ''}`}
+          className={`w-3.5 h-3.5 shrink-0 self-center text-zinc-400 dark:text-zinc-500 transition-transform duration-200 group-hover/work:text-zinc-700 dark:group-hover/work:text-zinc-200 ${
+            open ? 'rotate-90' : ''
+          }`}
         />
         {live ? (
-          <span className="agent-shimmer text-[13px] leading-6">{liveLabel}</span>
+          <span className="agent-shimmer text-[14px] leading-6">{liveLabel}</span>
         ) : (
-          <span className="text-[12px] leading-5 text-zinc-400 dark:text-zinc-500">
+          /*
+            The turn's own numbers, one size up from the small print: this is the
+            line a finished turn is read by, so it gets room to breathe and wraps
+            at the separators on a narrow screen instead of being cut off.
+          */
+          <span className="text-[14px] leading-6 font-medium text-zinc-600 dark:text-zinc-300 group-hover/work:text-zinc-900 dark:group-hover/work:text-zinc-100 transition-colors">
             {summary}
-            {summary && notice ? <span className="text-zinc-300 dark:text-zinc-600"> · </span> : null}
-            {notice}
+            {summary && notice ? <span className="font-normal text-zinc-400 dark:text-zinc-500"> · </span> : null}
+            {notice ? <span className="font-normal text-zinc-500 dark:text-zinc-400">{notice}</span> : null}
           </span>
         )}
         {live && elapsedSeconds >= 2 && (
-          <span className="text-[12px] text-zinc-400 dark:text-zinc-500">{elapsedSeconds}s</span>
+          <span className="text-[13px] text-zinc-400 dark:text-zinc-500">{elapsedSeconds}s</span>
         )}
       </button>
 
@@ -86,7 +94,7 @@ const AgentWorkRow: React.FC<{
         state (an opened diff stays opened), and a trail that is opened mid-run is
         already up to date instead of rebuilding itself from the start.
       */}
-      <div hidden={!open} className="mt-1.5 ml-0.5 pl-3 border-l border-zinc-200 dark:border-zinc-800">
+      <div hidden={!open} className="mt-2 ml-1 pl-3.5 border-l border-zinc-200 dark:border-zinc-800">
         {children}
       </div>
     </div>
@@ -147,13 +155,6 @@ interface ThinkingSectionProps {
   thinkingDuration?: number;
   /** How many reasoning rounds this turn had, when more than one. */
   rounds?: number;
-  /**
-   * The turn is still running. Between two rounds of reasoning the model goes
-   * quiet for a moment while it decides what to do — the box must not close and
-   * reopen on every one of those gaps, which is what "the reasoning stopped"
-   * used to mean.
-   */
-  turnRunning?: boolean;
 }
 
 /**
@@ -208,10 +209,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   isStillThinking,
   thinkingDuration,
   rounds,
-  turnRunning,
 }) => {
-  /** The turn is running (so the box stays put) — not the same as a token arriving. */
-  const active = isStillThinking || Boolean(turnRunning);
   // One thought open at a time, chat-wide: opening this one closes the others.
   // The third argument is the server snapshot — without it React refuses to
   // render this anywhere that is not a live browser (the test renderer, and any
@@ -225,30 +223,10 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   const pausedRef = useRef(false);
   /** Scroll events before this moment are ours, not the user's. */
   const ignoreScrollUntilRef = useRef(0);
-  /** We opened this box because it was streaming, so we may close it again when it stops. */
-  const autoOpenedRef = useRef(false);
-  /** The user opened this box on purpose: leave it alone when the reasoning ends. */
-  const userPinnedRef = useRef(false);
-
-  // While the turn runs, its box is the one on screen — opened at the first sign
-  // of reasoning and left alone until the turn is over, gaps between rounds
-  // included. When the turn ends the box closes itself, so the answer gets the
-  // room — unless the user opened it deliberately to read it.
-  React.useEffect(() => {
-    if (active) {
-      if (!autoOpenedRef.current) {
-        autoOpenedRef.current = true;
-        pausedRef.current = false;
-        setOpenThinkingId(id);
-      }
-      return;
-    }
-    if (autoOpenedRef.current) {
-      autoOpenedRef.current = false;
-      if (!userPinnedRef.current && getOpenThinkingId() === id) setOpenThinkingId(null);
-    }
-  }, [id, active]);
-
+  // Nothing here reveals itself. “Thinking…” is on the row the whole time a round is
+  // being written, and the box is opened by the user, not by the model: reading the
+  // reasoning is a choice, and a turn that thinks three times should not push three
+  // boxes in front of the answer.
   /**
    * Seconds from the round being written right now — added to the rounds already
    * finished, so a turn that reasons three times shows one growing number rather
@@ -287,25 +265,14 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
     pausedRef.current = distanceFromBottom > 24;
   };
 
-  const toggle = () => {
-    if (isExpanded) {
-      userPinnedRef.current = false;
-      setOpenThinkingId(null);
-    } else {
-      userPinnedRef.current = true;
-      setOpenThinkingId(id);
-    }
-  };
+  const toggle = () => (isExpanded ? setOpenThinkingId(null) : setOpenThinkingId(id));
 
   /**
    * Clicking anywhere else — or Escape — puts the reasoning away. It used to be the
    * one revealed thing in the chat that ignored this, so an opened thought stayed
    * open over everything until it was clicked again or another panel took its place.
    */
-  useDismissOnOutside(rootRef, isExpanded, () => {
-    userPinnedRef.current = false;
-    setOpenThinkingId(null);
-  });
+  useDismissOnOutside(rootRef, isExpanded, () => setOpenThinkingId(null));
 
   // While reasoning streams, render it line by line so each new line can fade
   // in (see `.stream-lines` in index.css). Long blocks fall back to one text
@@ -334,7 +301,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
               : 'group-hover/think:text-zinc-700 dark:group-hover/think:text-zinc-200'
           }`}
         />
-        {active ? (
+        {isStillThinking ? (
           <span className="thinking-shimmer text-xs tracking-wide">Thinking…</span>
         ) : (
           <span className="text-xs tracking-wide text-zinc-500 dark:text-zinc-400 group-hover/think:text-zinc-800 dark:group-hover/think:text-zinc-200 transition-colors">
@@ -1106,7 +1073,6 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
                     isStillThinking={stillThinking}
                     thinkingDuration={thinkingAggregate?.duration || block.duration}
                     rounds={thinkingAggregate?.rounds}
-                    turnRunning={Boolean(message.isGenerating) && !message.error}
                   />
                 );
               }
