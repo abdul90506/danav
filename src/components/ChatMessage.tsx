@@ -1105,13 +1105,23 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
               <>
                 {/* Nothing to fold: the reasoning stands where it happened, and the
                     turn's numbers are a plain line under it. */}
+                {/*
+                  A turn with no work to fold still has its reasoning — and it is
+                  still the user's to open, not the model's to show: one small row,
+                  closed, that says how long it thought and opens on a click. Left
+                  as a plain block it was the one place in the app where something
+                  was on screen for good, with no way to put it away.
+                */}
                 {!thinkingAggregate ? null : (
-                  <ThinkingEntry
-                    content={thinkingAggregate.content}
-                    duration={thinkingAggregate.duration || undefined}
-                    rounds={thinkingAggregate.rounds}
-                    active={liveTurn && thinkingAggregate.stillThinking}
-                  />
+                  <div className="my-1">
+                    <ThinkingSection
+                      id={thinkingAggregate.id}
+                      thinkingContent={thinkingAggregate.content}
+                      isStillThinking={thinkingAggregate.stillThinking}
+                      thinkingDuration={thinkingAggregate.duration || undefined}
+                      rounds={thinkingAggregate.rounds}
+                    />
+                  </div>
                 )}
                 {showIdleWorking ? (
                   <div className="mt-1 text-[13px] leading-6 select-none">
