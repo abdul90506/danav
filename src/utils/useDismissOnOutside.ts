@@ -50,9 +50,16 @@ export function useDismissOnOutside(
     if (!open) return;
     openPopovers += 1;
     // Tell the others, then listen for whichever of them opens next.
-    window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: idRef.current }));
+    window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: { id: idRef.current, node: ref.current } }));
     const onOther = (event: Event) => {
-      if ((event as CustomEvent).detail !== idRef.current) dismiss();
+      const detail = (event as CustomEvent).detail as { id: string; node: Node | null } | undefined;
+      if (!detail || detail.id === idRef.current) return;
+      // A panel opened INSIDE this one belongs to it: the work row's trail holds
+      // the action rows, and opening a diff in there must not close the trail
+      // that was just opened to read it.
+      const node = ref.current;
+      if (node && detail.node && node.contains(detail.node)) return;
+      dismiss();
     };
     window.addEventListener(OPEN_EVENT, onOther);
     return () => {

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useSyncExternalStore } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Check, Copy, Brain, ChevronDown, Pencil, RotateCcw, Play, File, Folder, ExternalLink, PanelRight } from 'lucide-react';
+import { Check, Copy, Brain, ChevronDown, ChevronRight, Pencil, RotateCcw, Play, File, Folder, ExternalLink, PanelRight } from 'lucide-react';
 import { AgentAction, Message, MessageBlock, MovieItem } from '../types';
 import { CodeBlock } from './CodeBlock';
 import { ToolExecutionCard } from './ToolExecutionCard';
@@ -11,10 +11,81 @@ import { normalizeMessageContent } from '../utils/markdownNormalize';
 import { isPreviewUrl, previewHost } from '../utils/previewUrl';
 import { AgentActionRow } from './AgentActionRow';
 import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from './thinkingAccordion';
-import { isLive, stopNotice, workedSummary } from '../agent/format';
+import { stopNotice, workedSummary } from '../agent/format';
 import { useDismissOnOutside } from '../utils/useDismissOnOutside';
+import { createPanelStore, usePanelOpen } from './panels';
 import { useThrottledValue } from '../utils/throttledValue';
 import { useElapsedSeconds } from '../utils/useElapsedSeconds';
+
+/** One work row open at a time, chat-wide — the same rule as every other panel. */
+const workStore = createPanelStore();
+
+/**
+ * The one line a turn ends with: what it did, and everything it did behind it.
+ *
+ * A run reads as a dozen rows — reads, edits, commands, searches, notes to
+ * memory — and a transcript of them is a wall. They all live in here instead: the
+ * line says the turn's own numbers ("Worked for 32s · 8 actions · 2 files +7 −1")
+ * and opening it shows the whole run in the order it happened, thoughts included,
+ * in the place each one happened. Nothing is lost — it is one click instead of a
+ * screenful.
+ *
+ * While the run is still going the same line is the live one ("Working… 12s",
+ * "Thinking… 12s"), so the trail can be watched as it is written.
+ */
+const AgentWorkRow: React.FC<{
+  messageId: string;
+  live: boolean;
+  liveLabel: string;
+  elapsedSeconds: number;
+  /** The finished numbers, once the run is over. */
+  summary?: string;
+  notice?: string;
+  children: React.ReactNode;
+}> = ({ messageId, live, liveLabel, elapsedSeconds, summary, notice, children }) => {
+  const id = `work-${messageId}`;
+  const open = usePanelOpen(workStore, id);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useDismissOnOutside(rootRef, open, React.useCallback(() => workStore.close(), []));
+
+  const toggle = () => (workStore.get() === id ? workStore.close() : workStore.set(id));
+
+  return (
+    <div ref={rootRef} className="mt-2 select-none">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="group/work inline-flex items-center gap-1.5 max-w-full text-left cursor-pointer py-0.5"
+      >
+        <ChevronRight
+          className={`w-3 h-3 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-150 group-hover/work:text-zinc-600 dark:group-hover/work:text-zinc-300 ${open ? 'rotate-90' : ''}`}
+        />
+        {live ? (
+          <span className="agent-shimmer text-[13px] leading-6">{liveLabel}</span>
+        ) : (
+          <span className="text-[12px] leading-5 text-zinc-400 dark:text-zinc-500">
+            {summary}
+            {summary && notice ? <span className="text-zinc-300 dark:text-zinc-600"> · </span> : null}
+            {notice}
+          </span>
+        )}
+        {live && elapsedSeconds >= 2 && (
+          <span className="text-[12px] text-zinc-400 dark:text-zinc-500">{elapsedSeconds}s</span>
+        )}
+      </button>
+
+      {/*
+        Kept mounted and hidden rather than unmounted: the rows inside keep their
+        state (an opened diff stays opened), and a trail that is opened mid-run is
+        already up to date instead of rebuilding itself from the start.
+      */}
+      <div hidden={!open} className="mt-1.5 ml-0.5 pl-3 border-l border-zinc-200 dark:border-zinc-800">
+        {children}
+      </div>
+    </div>
+  );
+};
 
 interface ChatMessageProps {
   message: Message;
@@ -89,6 +160,42 @@ interface ThinkingSectionProps {
  * The rows are merged here: the durations add up, the rounds are kept in order
  * inside one box, and only one of these is ever open in the whole chat.
  */
+/**
+ * The turn's reasoning inside the work trail: one small entry, in the place the
+ * thinking actually happened.
+ *
+ * The rounds are merged exactly as before — durations added up, every round kept
+ * in order in one block — but the entry is not lifted above the turn any more,
+ * and it needs no disclosure of its own: by the time it can be read, the trail it
+ * lives in is already open.
+ */
+const ThinkingEntry: React.FC<{
+  content: string;
+  duration?: number;
+  rounds?: number;
+  /** A round is streaming right now. */
+  active?: boolean;
+}> = ({ content, duration, rounds, active }) => (
+  <div className="my-1.5">
+    <div className="flex items-center gap-1.5 text-[12px] select-none">
+      <Brain className={`w-3.5 h-3.5 shrink-0 text-zinc-500 dark:text-zinc-400 ${active ? 'thinking-brain-shimmer' : ''}`} />
+      {active ? (
+        <span className="thinking-shimmer tracking-wide">Thinking…</span>
+      ) : (
+        <span className="tracking-wide text-zinc-500 dark:text-zinc-400">
+          Thought for {duration || 1}s
+          {rounds && rounds > 1 ? <span className="text-zinc-400 dark:text-zinc-500"> · {rounds} rounds</span> : null}
+        </span>
+      )}
+    </div>
+    {content.trim() ? (
+      <div className="panel-scroll mt-1 max-h-56 overflow-y-auto overscroll-y-contain pl-3 py-0.5 border-l border-zinc-200 dark:border-zinc-800 text-[13px] leading-[1.65] text-zinc-500 dark:text-zinc-400 font-sans whitespace-pre-wrap select-text">
+        {content}
+      </div>
+    ) : null}
+  </div>
+);
+
 const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   id,
   thinkingContent,
@@ -789,12 +896,11 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
   const isWorking = Boolean(message.isGenerating);
 
   /**
-   * All the turn's reasoning as one row.
+   * All the turn's reasoning as one entry.
    *
    * Reasoning arrives in several rounds — one before each burst of tool calls —
    * and the last one is the live one. They are merged: durations added up, rounds
-   * concatenated in order (newest last, which is where the box is scrolled to),
-   * and rendered once at the top of the turn instead of once per round.
+   * concatenated in order, and shown once, where the first of them happened.
    */
   const thinkingAggregate = (() => {
     const parts = blocks.filter((b) => b.type === 'thinking');
@@ -808,10 +914,59 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
     return { id: `think-${message.id}`, content, duration, stillThinking, rounds: parts.length };
   })();
 
-  /** thinking / narration / action rows, in order; consecutive actions share one tight group */
-  const renderAgentTimeline = () => {
+  const liveTurn = Boolean(message.isGenerating) && !message.error;
+
+  /**
+   * What a finished agent turn shows, and what it keeps behind its one line.
+   *
+   * Every action of the run — every read, edit, command, search, note — folds
+   * into the work row, along with the reasoning and the lines the agent said
+   * along the way. What stays on screen is the answer the run ended with. While
+   * the turn is still running nothing is folded yet: the lines it is writing stay
+   * in front of the reader, and they move into the row when it is done.
+   */
+  const textBlocks = blocks.filter((b) => b.type === 'text');
+  const visibleText = liveTurn ? textBlocks : textBlocks.slice(-1);
+  const visibleTextIds = new Set(visibleText.map((b) => b.id));
+  const foldedText = textBlocks.filter((b) => !visibleTextIds.has(b.id));
+  const actionCount = blocks.filter((b) => b.type === 'action').length;
+  // A turn with nothing to fold (no actions, nothing said along the way) has no
+  // work row at all — its reasoning shows in place instead of hiding behind it.
+  const hasWorkRow = actionCount > 0 || foldedText.length > 0;
+
+  /** One markdown block of the turn's own words. */
+  const textNode = (block: Extract<MessageBlock, { type: 'text' }>, inTrail: boolean) => {
+    if (block.notice) {
+      return (
+        <div key={block.id} className="my-1.5 text-[12px] italic text-zinc-400 dark:text-zinc-500">
+          {block.content}
+        </div>
+      );
+    }
+    return (
+      <div
+        key={block.id}
+        className={`markdown-body my-2${block.id === liveTextId ? ' is-streaming' : ''}${
+          inTrail && block.content.length > 1200 ? ' text-[13px]' : ''
+        }`}
+      >
+        <MarkdownBlock
+          content={normalizeMessageContent(block.content)}
+          streaming={block.id === liveTextId}
+          components={markdownComponents}
+        />
+      </div>
+    );
+  };
+
+  /**
+   * Everything the run did, in the order it did it: the reasoning where it
+   * happened, the lines it said, and the actions in tight groups.
+   */
+  const renderTrail = () => {
     const out: React.ReactNode[] = [];
     let group: AgentAction[] = [];
+    let thinkingShown = false;
     const flush = () => {
       if (group.length === 0) return;
       const first = group[0].id;
@@ -829,42 +984,25 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
         group.push(block.action);
         continue;
       }
+      if (block.type === 'text' && visibleTextIds.has(block.id)) continue;
       flush();
       if (block.type === 'thinking') {
-        // Rendered once, above the actions — see thinkingAggregate.
-      } else if (block.type === 'text') {
+        if (!thinkingAggregate || thinkingShown) continue; // one entry for the whole turn
+        thinkingShown = true;
         out.push(
-          block.notice ? (
-            <div key={block.id} className="my-1.5 text-[12px] italic text-zinc-400 dark:text-zinc-500">
-              {block.content}
-            </div>
-          ) : (
-            <div key={block.id} className={`markdown-body my-2${block.id === liveTextId ? ' is-streaming' : ''}`}>
-              <MarkdownBlock
-                content={normalizeMessageContent(block.content)}
-                streaming={block.id === liveTextId}
-                components={markdownComponents}
-              />
-            </div>
-          )
+          <ThinkingEntry
+            key={thinkingAggregate.id}
+            content={thinkingAggregate.content}
+            duration={thinkingAggregate.duration || undefined}
+            rounds={thinkingAggregate.rounds}
+            active={liveTurn && thinkingAggregate.stillThinking}
+          />
         );
+      } else if (block.type === 'text') {
+        out.push(textNode(block, true));
       }
     }
     flush();
-    if (thinkingAggregate) {
-      out.unshift(
-        <div key={thinkingAggregate.id} className="my-1">
-          <ThinkingSection
-            id={thinkingAggregate.id}
-            thinkingContent={thinkingAggregate.content}
-            isStillThinking={thinkingAggregate.stillThinking}
-            thinkingDuration={thinkingAggregate.duration || undefined}
-            rounds={thinkingAggregate.rounds}
-            turnRunning={Boolean(message.isGenerating) && !message.error}
-          />
-        </div>
-      );
-    }
     return out;
   };
 
@@ -876,16 +1014,28 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
   const firstActionAt = blocks.find((b) => b.type === 'action')?.action.startedAt;
   const elapsedSeconds = useElapsedSeconds(Boolean(message.isGenerating) && !message.error, firstActionAt ?? null);
 
-  // "Working…" fills the quiet moments between steps (the model is deciding what to do next).
+  /**
+   * A live turn before its first action has no work row yet, and the answer it
+   * is writing is not always on screen — so the quiet "Working…" line is kept
+   * for exactly those moments, and only while nothing else is being written.
+   */
   const lastBlock = blocks[blocks.length - 1];
-  const showWorking =
-    Boolean(message.isGenerating) &&
-    !message.error &&
-    (!lastBlock ||
-      (lastBlock.type === 'action' && !isLive(lastBlock.action)) ||
-      (lastBlock.type === 'thinking' && !lastBlock.isStillThinking) ||
-      (lastBlock.type === 'text' && Boolean(lastBlock.notice)));
-  const workingText = message.agentStatus && message.agentStatus !== 'Working…' ? message.agentStatus : 'Working…';
+  const textIsStreaming = lastBlock?.type === 'text' && lastBlock.id === liveTextId;
+  const showIdleWorking =
+    liveTurn && !hasWorkRow && !textIsStreaming && !thinkingAggregate?.stillThinking;
+
+  /**
+   * The label on the live line. "Thinking…" while a round of reasoning is being
+   * written, the provider's own note if it has one ("Provider busy — retrying…"),
+   * and "Working…" for everything else — the moments between steps, a command
+   * still running, a file being written.
+   */
+  const workingText =
+    thinkingAggregate?.stillThinking
+      ? 'Thinking…'
+      : message.agentStatus && message.agentStatus !== 'Working…'
+        ? message.agentStatus
+        : 'Working…';
 
   const runLine = !message.isGenerating ? workedSummary(message.agentRun) : undefined;
   const notice = !message.isGenerating ? stopNotice(message.agentRun?.stopReason) : undefined;
@@ -945,16 +1095,53 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
         {/* Agent turn: thinking, narration and actions in the exact order they happened */}
         {isAgentTimeline && (
           <div data-testid="agent-timeline">
-            {renderAgentTimeline()}
-            {showWorking && (
-              <div className="mt-1 text-[13px] leading-6 select-none">
-                <span className="agent-shimmer">{workingText}</span>
-                {elapsedSeconds >= 2 && (
-                  <span className="ml-1.5 text-[12px] text-zinc-400 dark:text-zinc-500">{elapsedSeconds}s</span>
-                )}
+            {/* The turn's own words: the lines it is saying now, and — once it is
+                over — the answer it ended with. Everything else is behind the one
+                line below. */}
+            {visibleText.map((block) => textNode(block as Extract<MessageBlock, { type: 'text' }>, false))}
+
+            {/* An agent turn whose content arrived without blocks (an error, an
+                older saved chat) still shows its answer instead of nothing. */}
+            {textBlocks.length === 0 && safeMessageContent.trim() ? (
+              <div className={`markdown-body${message.isGenerating && !message.error ? ' is-streaming' : ''}`}>
+                <MarkdownBlock content={normalizeMessageContent(safeMessageContent)} streaming={message.isGenerating} components={markdownComponents} />
               </div>
+            ) : null}
+
+            {hasWorkRow ? (
+              <AgentWorkRow
+                messageId={message.id}
+                live={liveTurn}
+                liveLabel={workingText}
+                elapsedSeconds={elapsedSeconds}
+                summary={runLine}
+                notice={notice}
+              >
+                {renderTrail()}
+              </AgentWorkRow>
+            ) : (
+              <>
+                {/* Nothing to fold: the reasoning stands where it happened, and the
+                    turn's numbers are a plain line under it. */}
+                {!thinkingAggregate ? null : (
+                  <ThinkingEntry
+                    content={thinkingAggregate.content}
+                    duration={thinkingAggregate.duration || undefined}
+                    rounds={thinkingAggregate.rounds}
+                    active={liveTurn && thinkingAggregate.stillThinking}
+                  />
+                )}
+                {showIdleWorking ? (
+                  <div className="mt-1 text-[13px] leading-6 select-none">
+                    <span className="agent-shimmer">{workingText}</span>
+                    {elapsedSeconds >= 2 && (
+                      <span className="ml-1.5 text-[12px] text-zinc-400 dark:text-zinc-500">{elapsedSeconds}s</span>
+                    )}
+                  </div>
+                ) : null}
+                {runFooter}
+              </>
             )}
-            {runFooter}
           </div>
         )}
 
