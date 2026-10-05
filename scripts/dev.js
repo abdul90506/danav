@@ -87,6 +87,9 @@ async function startBackend() {
       ...process.env,
       PORT: String(BACKEND_PORT),
       DANAV_HOST: process.env.DANAV_HOST || '127.0.0.1',
+      // Dev preview is open by default so no unlock modal interrupts startup.
+      // Operators can set DANAV_DISABLE_PREVIEW_AUTH=0 or supply DANAV_PREVIEW_TOKEN to re-enable a gate.
+      DANAV_DISABLE_PREVIEW_AUTH: process.env.DANAV_DISABLE_PREVIEW_AUTH || '1',
     },
   });
 
