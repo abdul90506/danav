@@ -35,6 +35,7 @@ export class AgentTurnState {
   private content = '';
   private thinking = '';
   private thinkingStartedAt: number | null = null;
+  private finalAnswerStarted = false;
   private seq = 0;
   private readonly now: () => number;
 
@@ -62,6 +63,10 @@ export class AgentTurnState {
 
   appendText(chunk: string) {
     if (!chunk) return;
+    if (this.finalAnswerStarted) {
+      this.appendFinalAnswer(chunk);
+      return;
+    }
     this.markThinkingDone();
     const last = this.last();
     if (last && last.type === 'text' && !last.notice) {
@@ -75,6 +80,22 @@ export class AgentTurnState {
     if (this.content && !this.content.endsWith('\n')) this.content += '\n\n';
     this.content += text;
     this.blocks.push({ id: this.nextId('txt'), type: 'text', content: text });
+  }
+
+  private appendFinalAnswer(chunk: string) {
+    if (!chunk) return;
+    this.markThinkingDone();
+    const last = this.last();
+    if (last && last.type === 'text' && !last.notice && last.finalAnswer) {
+      this.blocks[this.blocks.length - 1] = { ...last, content: last.content + chunk };
+      this.content += chunk;
+      return;
+    }
+    const text = chunk.replace(/^\s+/, '');
+    if (!text) return;
+    if (this.content && !this.content.endsWith('\n')) this.content += '\n\n';
+    this.content += text;
+    this.blocks.push({ id: this.nextId('txt'), type: 'text', content: text, finalAnswer: true });
   }
 
   appendThinking(chunk: string) {
@@ -110,6 +131,11 @@ export class AgentTurnState {
       case 'notice':
         this.markThinkingDone();
         if (ev.message) this.blocks.push({ id: this.nextId('note'), type: 'text', content: String(ev.message), notice: true });
+        break;
+
+      case 'final_answer_start':
+        this.markThinkingDone();
+        this.finalAnswerStarted = true;
         break;
 
       case 'action_start': {

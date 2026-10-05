@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { clearRunJournal, readRunJournal, recordRun, recentRunsForPrompt, taskKeyFor } from '../../server/agent/journal.js';
+import { createTaskMemory } from '../../server/agent/taskMemory.js';
 
 const { test } = globalThis.__agentTest;
 console.log('\n[run journal]');
@@ -58,6 +59,101 @@ test('journal keeps bounded change/check evidence and retrieves entries relevant
   });
 });
 
+test('automatic task-step memory is compact, redacted, model-summarized in the background, and query-retrieved', async () => {
+  await withDataDir((root) => {
+    const taskKey = taskKeyFor('assistant-message-private-task-id');
+    let summaryInput = null;
+    const state = {
+      plan: [
+        { content: 'Trace the authentication guard', status: 'completed' },
+        { content: 'Verify an invalid session', status: 'in_progress' },
+      ],
+      findings: ['The authentication guard runs before the protected route handler.'],
+      checks: [{ name: 'node scripts/test-auth.js', passed: true, exitCode: 0 }],
+    };
+    const memory = createTaskMemory({
+      workspaceId: 'ws-task-memory',
+      runId: 'run-task-memory',
+      taskKey,
+      provider: { id: 'summary-provider', baseUrl: 'https://summary.test/v1' },
+      model: 'compact-summary',
+      redact: (text) => String(text).replaceAll('provider-secret-value', '[REDACTED]'),
+      debounceMs: 60_000,
+      summarize: async (input) => {
+        summaryInput = input;
+        return {
+          summary: 'The authentication guard runs before protected routing; the focused check passes.',
+          facts: ['Guard validation happens before the protected handler.', 'ACCESS_TOKEN=not-a-real-but-secret-value-123456789'],
+          decisions: ['Keep the guard at the request boundary.'],
+          errors: [],
+          files: ['src/auth.ts', '.env', '../outside.txt'],
+          next: 'Verify an invalid session.',
+        };
+      },
+    });
+
+    memory.capture({
+      name: 'read_file',
+      args: { path: 'src/auth.ts' },
+      result: { ok: true, output: 'PRIVATE FILE BODY MUST NOT BE STORED', ui: { kind: 'read', path: 'src/auth.ts', startLine: 1, endLine: 40 } },
+      state,
+    });
+    memory.capture({
+      name: 'run_checks',
+      args: { only: 'auth' },
+      result: { ok: true, runs: [{ name: 'auth check', passed: true }] },
+      state,
+    });
+
+    const provisional = readRunJournal('ws-task-memory')[0];
+    assert.equal(provisional.runId, 'run-task-memory');
+    assert.equal(provisional.memories.length, 1);
+    assert.equal(provisional.memories[0].source, 'local', 'a useful fallback is written before the model responds');
+    assert.match(provisional.memories[0].summary, /src\/auth\.ts/);
+
+    return memory.flush().then(() => {
+      const merged = recordRun('ws-task-memory', {
+        runId: 'run-task-memory', taskKey, stopReason: 'completed',
+        changed: [{ path: 'src/auth.ts', added: 3, removed: 1 }],
+        checks: [{ name: 'auth check', passed: true, exitCode: 0 }],
+      });
+      assert.ok(merged);
+      const run = readRunJournal('ws-task-memory')[0];
+      assert.equal(readRunJournal('ws-task-memory').length, 1, 'the final run updates the same checkpoint instead of duplicating it');
+      assert.equal(run.memories[0].source, 'model');
+      assert.match(run.memories[0].summary, /focused check passes/);
+      assert.deepEqual(run.memories[0].files, ['src/auth.ts']);
+      assert.equal(run.memories[0].facts.some((fact) => /ACCESS_TOKEN/.test(fact)), false);
+      assert.match(JSON.stringify(summaryInput), /src\/auth\.ts/);
+      assert.doesNotMatch(JSON.stringify(summaryInput), /PRIVATE FILE BODY|assistant-message-private-task-id|provider-secret-value/);
+
+      const retrieved = recentRunsForPrompt('ws-task-memory', 'authentication guard protected routing', 1800, 6, { taskKey: taskKeyFor('different-task') });
+      assert.match(retrieved, /Earlier task memory/);
+      assert.match(retrieved, /focused check passes/);
+      const unrelated = recentRunsForPrompt('ws-task-memory', 'landing page color palette', 1800, 6, { taskKey: taskKeyFor('another-task') });
+      assert.equal(unrelated, '', 'unrelated tasks do not inherit the newest checkpoint');
+
+      const disk = fs.readFileSync(path.join(root, 'agent-runs', 'ws-task-memory.json'), 'utf8');
+      assert.doesNotMatch(disk, /PRIVATE FILE BODY|assistant-message-private-task-id|ACCESS_TOKEN=|provider-secret-value/);
+
+      const fallback = createTaskMemory({
+        workspaceId: 'ws-task-memory', runId: 'run-memory-fallback', taskKey,
+        provider: { id: 'unavailable' }, model: 'does-not-matter', debounceMs: 60_000,
+        summarize: async () => { throw new Error('offline'); },
+      });
+      fallback.capture({
+        name: 'edit_file', args: { path: 'src/cache.js' },
+        result: { ok: true, ui: { kind: 'edit', path: 'src/cache.js', added: 2, removed: 1 }, output: 'source text is not captured' },
+        state,
+      });
+      return fallback.flush().then(() => {
+        const savedFallback = readRunJournal('ws-task-memory').find((item) => item.runId === 'run-memory-fallback');
+        assert.equal(savedFallback.memories[0].source, 'local', 'provider failures leave the local task note usable');
+      });
+    });
+  });
+});
+
 test('journal caps history and never stores arbitrary shell arguments', async () => {
   await withDataDir(() => {
     for (let i = 0; i < 35; i++) {
@@ -89,6 +185,21 @@ test('a Continue hand-off restores only the exact task and carries its compact f
         { content: 'Add the retry helper', status: 'in_progress' },
         { content: 'Run the tests', status: 'pending' },
       ],
+      memories: [{ summary: 'First task step traced request-local retry state.', files: ['src/api.ts'], next: 'Add the focused retry regression.' }],
+    });
+    // A subsequent Continue stores a new run id but must not discard the earlier task notes.
+    recordRun('ws-handoff', {
+      taskKey,
+      stopReason: 'step_limit',
+      changed: [{ path: 'src/api.test.js', added: 5, removed: 0 }],
+      checks: [{ name: 'npm test', passed: false, exitCode: 1, diagnostic: 'AssertionError: expected 2 to equal 3 at src/api.test.js:12' }],
+      findings: ['src/api.ts keeps retry state per request; the helper must not share it globally.'],
+      plan: [
+        { content: 'Explore the API layer', status: 'completed' },
+        { content: 'Add the retry helper', status: 'in_progress' },
+        { content: 'Run the tests', status: 'pending' },
+      ],
+      memories: [{ summary: 'Second task step added the focused retry regression.', files: ['src/api.test.js'], next: 'Run the focused regression.' }],
     });
     // A different conversation's newest open plan must not hijack Continue.
     recordRun('ws-handoff', {
@@ -103,6 +214,8 @@ test('a Continue hand-off restores only the exact task and carries its compact f
     assert.match(prompt, /\[~\] Add the retry helper/);
     assert.match(prompt, /\[ \] Run the tests/);
     assert.match(prompt, /retry state per request/);
+    assert.match(prompt, /First task step traced request-local retry state/);
+    assert.match(prompt, /Second task step added the focused retry regression/);
     assert.match(prompt, /AssertionError: expected 2 to equal 3/);
     assert.doesNotMatch(prompt, /Delete unrelated assets/);
     assert.ok(prompt.length <= 3000, `the hand-off stays within its budget (${prompt.length})`);

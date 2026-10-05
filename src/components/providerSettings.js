@@ -8,19 +8,21 @@ export function buildEditedProvider(provider, fields) {
     models: (Array.isArray(fields.models) ? fields.models : []).map((model) => ({ ...model, providerId: provider.id })),
   };
   delete next.apiKey;
+  delete next.apiKeys;
+  delete next.apiKeyAdditions;
   delete next.clearApiKey;
+  delete next.clearApiKeys;
 
-  const enteredKey = typeof fields.apiKey === 'string' ? fields.apiKey.trim() : '';
-  if (enteredKey) {
-    next.apiKey = enteredKey;
-    next.apiKeyConfigured = true;
-  } else if (fields.clearSavedApiKey === true) {
-    next.apiKey = '';
-    next.apiKeyConfigured = false;
-    next.clearApiKey = true;
-  } else {
-    next.apiKeyConfigured = Boolean(provider.apiKeyConfigured || (typeof provider.apiKey === 'string' && provider.apiKey.trim()));
-  }
+  const additions = Array.isArray(fields.apiKeys)
+    ? [...new Set(fields.apiKeys.filter((key) => typeof key === 'string').map((key) => key.trim()).filter(Boolean))]
+    : [];
+  if (additions.length) next.apiKeyAdditions = additions;
+  if (fields.clearSavedApiKeys === true) next.clearApiKeys = true;
+  const currentCount = Number.isFinite(provider.apiKeyCount)
+    ? Math.max(0, Math.floor(provider.apiKeyCount || 0))
+    : Number(Boolean(provider.apiKeyConfigured || (typeof provider.apiKey === 'string' && provider.apiKey.trim())));
+  next.apiKeyCount = fields.clearSavedApiKeys === true ? additions.length : currentCount + additions.length;
+  next.apiKeyConfigured = next.apiKeyCount > 0;
 
   return next;
 }

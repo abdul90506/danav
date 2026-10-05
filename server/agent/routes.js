@@ -61,7 +61,11 @@ function sendError(res, err) {
 
 const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((err) => sendError(res, err));
 
-export function registerAgentRoutes(app, { runSearchTool, resolveProvider = (provider) => provider }) {
+export function registerAgentRoutes(app, {
+  runSearchTool,
+  resolveProvider = (provider) => provider,
+  resolveSummaryModel = (_provider, _model) => null,
+}) {
   const router = express.Router();
   router.use(agentRequestGuard);
 
@@ -289,10 +293,15 @@ export function registerAgentRoutes(app, { runSearchTool, resolveProvider = (pro
       if (!res.writableEnded) controller.abort();
     });
 
+    let summarySelection = null;
+    try { summarySelection = resolveSummaryModel(provider, model); } catch { /* summary notes fall back to the active model */ }
+
     try {
       await runAgent({
         provider,
         model,
+        summaryProvider: summarySelection?.provider || provider,
+        summaryModel: summarySelection?.model || model,
         thinkingLevel,
         history: messages,
         taskId: typeof taskId === 'string' ? taskId.slice(0, 200) : '',

@@ -15,6 +15,7 @@ import { SandboxManagerDialog } from './components/SandboxManagerDialog';
 import {
   AgentAction,
   AgentConfig,
+  AgentSummaryModelSelection,
   AgentWorkspace,
   ChatMessageContent,
   Conversation,
@@ -96,6 +97,7 @@ export const App: React.FC = () => {
 
   // Providers state
   const [providers, setProviders] = useState<Provider[]>(() => getStoredProviders());
+  const [agentSummaryModel, setAgentSummaryModel] = useState<AgentSummaryModelSelection | null>(null);
 
   // Remember last selected provider & model across all chats
   const [lastSelectedProviderId, setLastSelectedProviderId] = useState<string>('provider-gemini');
@@ -225,7 +227,7 @@ export const App: React.FC = () => {
           // Do not revive an old browser-stored provider key in this isolated
           // preview. Keep provider definitions, but require a fresh key.
           const safeProviders = sanitizeProvidersForClient(getStoredProviders())
-            .map((provider) => ({ ...provider, apiKeyConfigured: false }));
+            .map((provider) => ({ ...provider, apiKeyConfigured: false, apiKeyCount: 0 }));
           setProviders(safeProviders);
           saveStoredProviders(safeProviders);
         } else if (response.ok) {
@@ -254,6 +256,7 @@ export const App: React.FC = () => {
     if (!previewAuthenticated) return;
     fetchBackendSettings().then(async (backendSettings) => {
       if (backendSettings) {
+        setAgentSummaryModel(backendSettings.agentSummaryModel ?? null);
         if (Array.isArray(backendSettings.providers)) {
           let needsKeyMigration = false;
           const hydratedProviders = backendSettings.providers.map((remoteProvider) => {
@@ -346,6 +349,8 @@ export const App: React.FC = () => {
     }
     return stored[0]?.id || null;
   });
+  /** Explicit renames always win over a title request that resolves later. */
+  const titleEditRevisionRef = useRef(new Map<string, number>());
 
   // Chat Input & Streaming state
   /**
@@ -492,9 +497,24 @@ export const App: React.FC = () => {
       lastSelectedModelId,
     });
     if (!saved) return false;
-    const safeProviders = sanitizeProvidersForClient(newProviders);
+    // Re-read only the public settings shape so the exact saved-key count stays
+    // accurate without ever receiving the credential values in this browser.
+    const storedSettings = await fetchBackendSettings();
+    const safeProviders = sanitizeProvidersForClient(
+      Array.isArray(storedSettings?.providers) ? storedSettings.providers : newProviders
+    );
     setProviders(safeProviders);
     saveStoredProviders(safeProviders);
+    setAgentSummaryModel(storedSettings?.agentSummaryModel ?? null);
+    return true;
+  };
+
+  const handleSaveAgentSummaryModel = async (selection: AgentSummaryModelSelection | null): Promise<boolean> => {
+    const saved = await saveBackendSettings({ agentSummaryModel: selection });
+    if (!saved) return false;
+    const storedSettings = await fetchBackendSettings();
+    const safeSelection = storedSettings ? (storedSettings.agentSummaryModel ?? null) : selection;
+    setAgentSummaryModel(safeSelection);
     return true;
   };
 
@@ -508,7 +528,16 @@ export const App: React.FC = () => {
   const handleConversationsRestored = useCallback(async () => {
     const data = await fetchBackendConversations();
     if (!data) return;
+    const previousRun = abortControllerRef.current;
+    abortControllerRef.current = null;
+    previousRun?.abort();
+    setIsLoading(false);
+    resetComposer();
     const restored = data.conversations.length > 0 ? data.conversations : [];
+    for (const conversation of restored) {
+      const revisions = titleEditRevisionRef.current;
+      revisions.set(conversation.id, (revisions.get(conversation.id) || 0) + 1);
+    }
     setConversations(restored);
     saveStoredConversations(restored);
     const nextActive =
@@ -521,9 +550,9 @@ export const App: React.FC = () => {
 
   // Create New Chat: retains the exact model, provider and thinking level
   const handleNewChat = () => {
-    if (isLoading && abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
+    const previousRun = abortControllerRef.current;
+    abortControllerRef.current = null;
+    previousRun?.abort();
 
     const currentProvId = activeConversation?.selectedProviderId || lastSelectedProviderId || providers[0]?.id || 'provider-gemini';
     const currentModId = activeConversation?.selectedModelId || lastSelectedModelId || providers[0]?.models?.[0]?.id || 'models/gemini-3.5-flash';
@@ -543,9 +572,12 @@ export const App: React.FC = () => {
 
   // Switch Chat
   const handleSelectChat = (id: string) => {
-    if (isLoading && abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
+    // Re-selecting the active chat is only a sidebar interaction; it must not
+    // cancel the run or discard an unfinished composer draft.
+    if (id === activeChatId) return;
+    const previousRun = abortControllerRef.current;
+    abortControllerRef.current = null;
+    previousRun?.abort();
     setActiveChatId(id);
     resetComposer();
     setIsLoading(false);
@@ -553,6 +585,8 @@ export const App: React.FC = () => {
 
   // Rename Chat
   const handleRenameChat = (id: string, newTitle: string) => {
+    const revisions = titleEditRevisionRef.current;
+    revisions.set(id, (revisions.get(id) || 0) + 1);
     setConversations((prev) =>
       prev.map((c) => (c.id === id ? { ...c, title: newTitle, updatedAt: Date.now() } : c))
     );
@@ -560,6 +594,17 @@ export const App: React.FC = () => {
 
   // Delete Chat
   const handleDeleteChat = (id: string) => {
+    // A run belongs to the active transcript. Deleting that transcript must stop
+    // its request before its callbacks can affect the newly selected chat.
+    if (activeChatId === id) {
+      const previousRun = abortControllerRef.current;
+      abortControllerRef.current = null;
+      previousRun?.abort();
+      setIsLoading(false);
+      resetComposer();
+    }
+    titleEditRevisionRef.current.delete(id);
+
     // Computed outside the updater: a `setState` updater must be pure, and
     // calling setActiveChatId from inside it runs twice under StrictMode.
     const remaining = conversations.filter((c) => c.id !== id);
@@ -620,10 +665,9 @@ export const App: React.FC = () => {
 
   // Stop Generation
   const handleStop = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
+    const controller = abortControllerRef.current;
+    abortControllerRef.current = null;
+    controller?.abort();
     contentStreamerRef.current?.flushImmediate();
     thinkingStreamerRef.current?.flushImmediate();
     setIsLoading(false);
@@ -641,7 +685,7 @@ export const App: React.FC = () => {
       if (e.key !== 'Escape') return;
       if (hasOpenPopover()) return;
       const active = document.activeElement as HTMLElement | null;
-      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable)) return;
       handleStop();
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -773,17 +817,13 @@ export const App: React.FC = () => {
   };
 
   const handleAgentApproval = async (action: AgentAction, allow: boolean, always: boolean) => {
-    if (!action.approval) return;
-    try {
-      await answerApproval(action.approval.key, {
-        allow,
-        always,
-        workspaceId: activeConversation?.agentWorkspaceId || undefined,
-      });
-      if (always) refreshAgent();
-    } catch {
-      /* the run already ended — nothing is waiting any more */
-    }
+    if (!action.approval) throw new Error('This approval request is no longer available.');
+    await answerApproval(action.approval.key, {
+      allow,
+      always,
+      workspaceId: activeConversation?.agentWorkspaceId || undefined,
+    });
+    if (always) void refreshAgent();
   };
 
   // Send Message
@@ -889,18 +929,22 @@ export const App: React.FC = () => {
 
     if (shouldAutoName) {
       const convId = activeConversation.id;
+      const titleEditRevision = titleEditRevisionRef.current.get(convId) || 0;
       generateAIChatTitle({
         provider: activeProvider,
         model: activeModelId,
         message: messageContent,
       }).then((aiTitle) => {
-        if (aiTitle) {
-          setConversations((prev) =>
-            prev.map((c) =>
-              c.id === convId ? { ...c, title: aiTitle, updatedAt: Date.now() } : c
-            )
-          );
-        }
+        // A slow title request must not replace a name the user has since chosen,
+        // or an auto-title from a newer attempt.
+        if (!aiTitle || (titleEditRevisionRef.current.get(convId) || 0) !== titleEditRevision) return;
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === convId && c.title === initialTitle
+              ? { ...c, title: aiTitle, updatedAt: Date.now() }
+              : c
+          )
+        );
       });
     }
 
@@ -951,6 +995,12 @@ export const App: React.FC = () => {
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    const isCurrentRun = () => abortControllerRef.current === controller;
+    const clearCurrentRun = () => {
+      if (!isCurrentRun()) return;
+      abortControllerRef.current = null;
+      setIsLoading(false);
+    };
 
     const augmentedPrompt = `${attachmentsContext}${messageContent}`.trim();
 
@@ -1066,6 +1116,7 @@ export const App: React.FC = () => {
         signal: controller.signal,
         resume: isResume,
         onStreamers: (text, thinking) => {
+          if (!isCurrentRun()) return;
           contentStreamerRef.current = text;
           thinkingStreamerRef.current = thinking;
         },
@@ -1084,7 +1135,7 @@ export const App: React.FC = () => {
           ).length;
           if (settled !== settledMutations) {
             settledMutations = settled;
-            setFilesRefresh((n) => n + 1);
+            if (isCurrentRun()) setFilesRefresh((n) => n + 1);
             previewStale = true;
           }
           // A finished `get_preview_url` is the agent saying "the app is up" —
@@ -1100,7 +1151,7 @@ export const App: React.FC = () => {
           }
           if (announcedUrl && announcedUrl !== announcedPreview) {
             announcedPreview = announcedUrl;
-            followPreview(announcedUrl, announcedTitle);
+            if (isCurrentRun()) followPreview(announcedUrl, announcedTitle);
           }
         },
         onFinish: (snap, error) => {
@@ -1114,11 +1165,11 @@ export const App: React.FC = () => {
             isGenerating: false,
             ...(error ? { error } : {}),
           });
-          setIsLoading(false);
-          abortControllerRef.current = null;
-          setFilesRefresh((n) => n + 1);
-          // The turn changed files the open preview serves: show the result.
-          if (previewStale) followPreview();
+          const ownsRun = isCurrentRun();
+          clearCurrentRun();
+          if (ownsRun) setFilesRefresh((n) => n + 1);
+          // The active turn changed files the open preview serves: show the result.
+          if (ownsRun && previewStale) followPreview();
         },
       });
       return;
@@ -1312,8 +1363,7 @@ export const App: React.FC = () => {
             };
           })
         );
-        setIsLoading(false);
-        abortControllerRef.current = null;
+        clearCurrentRun();
       },
       onDone: () => {
         thinkingStreamer.finish();
@@ -1344,8 +1394,7 @@ export const App: React.FC = () => {
             };
           })
         );
-        setIsLoading(false);
-        abortControllerRef.current = null;
+        clearCurrentRun();
       },
     });
   };
@@ -1359,12 +1408,11 @@ export const App: React.FC = () => {
     const lastUserIndex = [...msgs].reverse().findIndex((m) => m.role === 'user');
     if (lastUserIndex === -1) return;
     const actualIndex = msgs.length - 1 - lastUserIndex;
-    const prompt = msgs[actualIndex].content;
+    const promptMessage = msgs[actualIndex];
 
     const trimmed = msgs.slice(0, actualIndex);
-    // Trim AND send in one step: the send is handed the trimmed list directly,
-    // so it cannot rebuild the transcript from the pre-trim state.
-    await handleSendMessage(prompt, undefined, undefined, trimmed);
+    // Keep the original files/images with the prompt being retried.
+    await handleSendMessage(promptMessage.content, promptMessage.attachments, undefined, trimmed);
   };
 
   // Edit a past user message and regenerate response from that point
@@ -1374,9 +1422,9 @@ export const App: React.FC = () => {
     const msgIndex = msgs.findIndex((m) => m.id === messageId);
     if (msgIndex === -1) return;
 
-    // Keep messages before this one
+    // Keep messages before this one, and keep the prompt's attached files/images.
     const trimmed = msgs.slice(0, msgIndex);
-    await handleSendMessage(newContent, undefined, undefined, trimmed);
+    await handleSendMessage(newContent, msgs[msgIndex].attachments, undefined, trimmed);
   };
 
   // Regenerate a specific assistant response
@@ -1396,7 +1444,7 @@ export const App: React.FC = () => {
     const userIndex = msgs.findIndex((m) => m.id === promptMsg.id);
     const trimmed = msgs.slice(0, userIndex);
 
-    await handleSendMessage(promptMsg.content, undefined, undefined, trimmed);
+    await handleSendMessage(promptMsg.content, promptMsg.attachments, undefined, trimmed);
   };
 
   /**
@@ -1586,7 +1634,7 @@ export const App: React.FC = () => {
   const onRegenerateResponseStable = useStable((id: string) => void handleRegenerateResponse(id));
   const onContinueResponseStable = useStable((id?: string) => handleContinueResponse(id));
   const onAgentApprovalStable = useStable((action: AgentAction, allow: boolean, always: boolean) =>
-    void handleAgentApproval(action, allow, always)
+    handleAgentApproval(action, allow, always)
   );
   const onWatchMediaStable = useStable((id: string, type: string, title?: string) =>
     setActiveMoviePlayer({ isOpen: true, mediaId: id, mediaType: type, title: title || 'Now Playing' })
@@ -1734,7 +1782,7 @@ export const App: React.FC = () => {
 
       {/* Agent mode: browse the workspace the agent is working in */}
       {agentOn && filesOpen && activeWorkspace && (
-        <WorkspacePanel workspace={activeWorkspace} refreshToken={filesRefresh} onClose={() => setFilesOpen(false)} />
+        <WorkspacePanel key={activeWorkspace.id} workspace={activeWorkspace} refreshToken={filesRefresh} onClose={() => setFilesOpen(false)} />
       )}
 
       {/* The running app the agent built, docked on the right of the chat */}
@@ -1757,6 +1805,8 @@ export const App: React.FC = () => {
         onThemeChange={handleThemeChange}
         providers={providers}
         onSaveProviders={handleSaveProviders}
+        agentSummaryModel={agentSummaryModel}
+        onSaveAgentSummaryModel={handleSaveAgentSummaryModel}
         conversations={conversations}
         onConversationsRestored={handleConversationsRestored}
       />

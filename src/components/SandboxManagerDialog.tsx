@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import type { AgentConfig, SandboxState, SandboxSummary, SandboxTotals } from '../types';
 import { killSandbox, listSandboxes, pauseSandbox, resumeSandbox, updateWorkspace } from '../services/agentApi';
-import { useEscapeToClose } from '../utils/useDismissOnOutside';
+import { useEscapeToClose, useFocusTrap } from '../utils/useDismissOnOutside';
 
 interface SandboxManagerDialogProps {
   isOpen: boolean;
@@ -75,6 +75,8 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   /** Drives the "sleeps in …" countdowns without re-fetching. */
   const [now, setNow] = useState(() => Date.now());
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, isOpen);
   const openRef = useRef(isOpen);
   openRef.current = isOpen;
 
@@ -153,7 +155,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
       setCopiedId(sandboxId);
       setTimeout(() => setCopiedId((c) => (c === sandboxId ? null : c)), 1400);
     } catch {
-      /* clipboard blocked: the id is selectable anyway */
+      setError('Clipboard access was blocked. You can select the sandbox ID to copy it manually.');
     }
   };
 
@@ -172,6 +174,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
     <button
       type="button"
       onClick={() => setFilter(key)}
+      aria-pressed={filter === key}
       className={`h-6 px-2 rounded-full text-[11px] font-medium border transition-colors ${
         filter === key
           ? 'bg-zinc-900 text-white border-transparent dark:bg-zinc-100 dark:text-zinc-900'
@@ -186,36 +189,46 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-900/40 backdrop-blur-sm animate-in fade-in duration-150"
-      onMouseDown={() => !busyId && onClose()}
+      onClick={(event) => {
+        if (!busyId && event.target === event.currentTarget) onClose();
+      }}
       data-testid="sandbox-dialog"
     >
       <div
+        ref={dialogRef}
         className="w-full max-w-2xl max-h-[88vh] flex flex-col bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden"
-        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label="Sandboxes"
+        aria-modal="true"
+        aria-labelledby="sandbox-dialog-title"
+        aria-busy={loading || !!busyId}
+        tabIndex={-1}
       >
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-200/80 dark:border-zinc-800">
           <div className="min-w-0">
-            <h2 className="text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">Sandboxes</h2>
+            <h2 id="sandbox-dialog-title" className="text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">Sandboxes</h2>
             <p className="text-[12px] text-zinc-500 dark:text-zinc-400 truncate">
               Everything in your Novita account — including ones Danav no longer tracks.
             </p>
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <button
-              onClick={() => load()}
-              disabled={loading}
+              type="button"
+              onClick={() => void load()}
+              disabled={loading || !!busyId}
               className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              aria-label="Refresh sandboxes"
               title="Refresh"
               data-testid="sandbox-refresh"
             >
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             </button>
             <button
+              type="button"
               onClick={onClose}
               disabled={!!busyId}
               className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              aria-label="Close sandbox manager"
               title="Close"
             >
               <X className="w-4 h-4" />
@@ -361,6 +374,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
                         type="button"
                         disabled={busy || runBusy || s.state === 'gone'}
                         onClick={() => setConfirmId(s.sandboxId)}
+                        aria-label={`Delete sandbox ${s.workspaceName || s.name || s.sandboxId}`}
                         title={runBusy ? 'The agent is running in this sandbox' : 'Terminate and delete its disk (cannot be undone)'}
                         className={`${btn} text-zinc-400 border-transparent hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40`}
                         data-testid={`sandbox-delete-${s.sandboxId}`}
@@ -374,7 +388,9 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
                 <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
                   <button
                     type="button"
-                    onClick={() => copyId(s.sandboxId)}
+                    onClick={() => void copyId(s.sandboxId)}
+                    aria-label={copiedId === s.sandboxId ? `Copied sandbox ID ${s.sandboxId}` : `Copy sandbox ID ${s.sandboxId}`}
+                    aria-live="polite"
                     className="inline-flex items-center gap-1 font-mono hover:text-zinc-800 dark:hover:text-zinc-200"
                     title="Copy the sandbox id"
                   >

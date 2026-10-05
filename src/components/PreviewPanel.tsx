@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ExternalLink, Loader2, RefreshCw, X } from 'lucide-react';
+import { useEscapeToClose, useFocusTrap } from '../utils/useDismissOnOutside';
 
 /** Never let the panel get uselessly thin, and never squeeze the chat to nothing. */
 export const MIN_PREVIEW_WIDTH = 320;
@@ -108,6 +109,8 @@ const PreviewPanelInner: React.FC<PreviewPanelProps> = ({
    */
   const dragRef = useRef<{ pointerX: number; startWidth: number; pending: number; frame: number } | null>(null);
   const isDesktop = useIsDesktop();
+  useEscapeToClose(onClose);
+  useFocusTrap(asideRef, !isDesktop);
 
   const host = url.replace(/^https?:\/\//, '');
   /**
@@ -215,21 +218,33 @@ const PreviewPanelInner: React.FC<PreviewPanelProps> = ({
   // absolutely-positioned divider. With `static` the divider would fly off to
   // some ancestor and there would be nothing to grab.
   return (
-    <aside
-      ref={asideRef}
-      // While a drag is in flight the ref holds the truth; React catches up on
-      // release. At rest this is just the width the app remembers.
-      style={isDesktop ? { width: dragging && dragRef.current ? dragRef.current.pending : width } : undefined}
-      className="fixed lg:relative inset-y-0 right-0 z-40 flex flex-col h-full min-w-0 w-[min(96vw,720px)] lg:shrink-0 bg-white dark:bg-zinc-950 border-l border-zinc-200 dark:border-zinc-800 shadow-xl lg:shadow-none animate-in fade-in duration-150"
-      data-testid="preview-panel"
-    >
+    <>
+      {!isDesktop && (
+        <div aria-hidden="true" onClick={onClose} className="fixed inset-0 z-30 bg-zinc-900/35 backdrop-blur-[1px] lg:hidden" />
+      )}
+      <aside
+        ref={asideRef}
+        // While a drag is in flight the ref holds the truth; React catches up on
+        // release. At rest this is just the width the app remembers.
+        style={isDesktop ? { width: dragging && dragRef.current ? dragRef.current.pending : width } : undefined}
+        className="fixed lg:relative inset-y-0 right-0 z-40 flex flex-col h-full min-w-0 w-[min(96vw,720px)] lg:shrink-0 bg-white dark:bg-zinc-950 border-l border-zinc-200 dark:border-zinc-800 shadow-xl lg:shadow-none animate-in fade-in duration-150"
+        data-testid="preview-panel"
+        role={isDesktop ? undefined : 'dialog'}
+        aria-modal={!isDesktop ? 'true' : undefined}
+        aria-labelledby="preview-panel-title"
+        aria-busy={loading}
+      >
       {/* Drag the divider left to grow the preview, right to grow the chat. */}
       {isDesktop && (
         <div
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize the preview"
+          aria-valuemin={MIN_PREVIEW_WIDTH}
+          aria-valuemax={Math.max(MIN_PREVIEW_WIDTH, window.innerWidth - MIN_CHAT_WIDTH)}
           aria-valuenow={width}
+          aria-valuetext={`${width} pixels wide`}
+          aria-keyshortcuts="ArrowLeft ArrowRight"
           tabIndex={0}
           onPointerDown={beginDrag}
           onPointerMove={moveDrag}
@@ -257,13 +272,14 @@ const PreviewPanelInner: React.FC<PreviewPanelProps> = ({
       {/* A hairline of a bar: title, host and three buttons on one 24px row. */}
       <div className="flex items-center gap-1.5 h-6 px-2 border-b border-zinc-200/80 dark:border-zinc-800">
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-        <span className="shrink-0 max-w-[45%] truncate text-[12px] font-medium leading-none text-zinc-900 dark:text-zinc-100">
+        <h2 id="preview-panel-title" className="shrink-0 max-w-[45%] truncate text-[12px] font-medium leading-none text-zinc-900 dark:text-zinc-100">
           {title || 'Preview'}
-        </span>
+        </h2>
         <span className="flex-1 min-w-0 truncate text-[11px] leading-none text-zinc-400">{host}</span>
 
         <div className="flex items-center gap-px shrink-0">
           <button
+            type="button"
             onClick={reload}
             className="p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"
             title="Reload preview"
@@ -272,6 +288,7 @@ const PreviewPanelInner: React.FC<PreviewPanelProps> = ({
             {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
           </button>
           <button
+            type="button"
             onClick={openInNewTab}
             className="p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"
             title="Open in a new tab"
@@ -281,7 +298,9 @@ const PreviewPanelInner: React.FC<PreviewPanelProps> = ({
             <ExternalLink className="w-3 h-3" />
           </button>
           <button
+            type="button"
             onClick={onClose}
+            data-dialog-initial-focus
             className="p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"
             title="Close preview"
             aria-label="Close preview"
@@ -293,11 +312,11 @@ const PreviewPanelInner: React.FC<PreviewPanelProps> = ({
 
       <div className="flex-1 min-h-0 min-w-0 relative overflow-hidden bg-zinc-50 dark:bg-zinc-900">
         {loading && showLoading && (
-          <div className="absolute inset-0 z-10 grid place-items-center px-6 text-center text-[12px] text-zinc-400">
+          <div role="status" aria-live="polite" className="absolute inset-0 z-10 grid place-items-center px-6 text-center text-[12px] text-zinc-400">
             {slow ? (
               <span>
                 Still loading… If nothing appears, the page may refuse to be embedded.{' '}
-                <button onClick={openInNewTab} className="underline hover:text-zinc-600 dark:hover:text-zinc-200">
+                <button type="button" onClick={openInNewTab} className="underline hover:text-zinc-600 dark:hover:text-zinc-200">
                   Open it in a new tab
                 </button>
                 .
@@ -331,7 +350,8 @@ const PreviewPanelInner: React.FC<PreviewPanelProps> = ({
           allow="clipboard-write; fullscreen"
         />
       </div>
-    </aside>
+      </aside>
+    </>
   );
 };
 

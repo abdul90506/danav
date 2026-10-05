@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { X, Server, Maximize2, Minimize2, Tv, Layers, Check } from 'lucide-react';
-import { useEscapeToClose } from '../utils/useDismissOnOutside';
+import { useEscapeToClose, useFocusTrap } from '../utils/useDismissOnOutside';
 
 export interface MoviePlayerModalProps {
   isOpen: boolean;
@@ -111,6 +111,16 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
   const [season, setSeason] = useState<number>(initialSeason);
   const [episode, setEpisode] = useState<number>(initialEpisode);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, isOpen && Boolean(mediaId));
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setSelectedServerId('server1');
+    setSeason(initialSeason);
+    setEpisode(initialEpisode);
+    setIsFullscreen(false);
+  }, [isOpen, mediaId, mediaType, initialSeason, initialEpisode]);
 
   // Escape leaves fullscreen first, and closes the player from there. Registered
   // through the shared rule so the key never also reaches the chat mid-run.
@@ -120,7 +130,7 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
       return;
     }
     onClose();
-  }, isOpen);
+  }, isOpen && Boolean(mediaId));
 
   if (!isOpen || !mediaId) return null;
 
@@ -131,22 +141,29 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
   const embedUrl = currentServer.getUrl(mediaId, cleanType, season, episode);
 
   const toggleFullscreen = () => {
-    setIsFullscreen(!isFullscreen);
+    setIsFullscreen((current) => !current);
   };
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 md:p-6 bg-black/85 backdrop-blur-md animate-in fade-in duration-200"
-      onClick={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
     >
       {/* Floating Modal Frame: NO header bar, NO footer bar, just 16:9 player + right-side server panel */}
       <div
+        ref={dialogRef}
         className={`relative flex flex-col lg:flex-row bg-zinc-950/90 backdrop-blur-2xl text-white rounded-2xl sm:rounded-3xl border border-white/15 shadow-[0_30px_90px_rgba(0,0,0,0.9)] overflow-hidden transition-all duration-200 ${
           isFullscreen
             ? 'w-full h-full max-w-none rounded-none'
             : 'w-full max-w-6xl'
         }`}
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="movie-player-title"
+        tabIndex={-1}
       >
         {/* Left / Center: Strict 16:9 Aspect Ratio Embed Video Player (Flush to edges) */}
         <div className="relative flex-1 min-w-0 bg-black aspect-video flex items-center justify-center">
@@ -166,7 +183,7 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
           {/* Minimal Top Bar in Sidebar: Title + Fullscreen + Close */}
           <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/10">
             <div className="min-w-0">
-              <h4 className="text-xs sm:text-sm font-semibold truncate text-zinc-100">
+              <h4 id="movie-player-title" className="text-xs sm:text-sm font-semibold truncate text-zinc-100">
                 {title || 'Now Playing'}
               </h4>
               <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 mt-0.5 font-mono">
@@ -180,6 +197,7 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
                 type="button"
                 onClick={toggleFullscreen}
                 className="p-1.5 text-zinc-400 hover:text-white hover:bg-white/10 rounded-lg transition-all cursor-pointer"
+                aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
                 title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
               >
                 {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
@@ -187,7 +205,9 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
               <button
                 type="button"
                 onClick={onClose}
+                data-dialog-initial-focus
                 className="p-1.5 text-zinc-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all cursor-pointer"
+                aria-label="Close player"
                 title="Close"
               >
                 <X className="w-4 h-4" />
@@ -215,6 +235,7 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
                   key={server.id}
                   type="button"
                   onClick={() => setSelectedServerId(server.id)}
+                  aria-pressed={isActive}
                   className={`flex flex-col items-start px-2.5 py-1.5 rounded-xl text-left transition-all cursor-pointer ${
                     isActive
                       ? 'bg-red-600/90 text-white shadow-[0_0_12px_rgba(220,38,38,0.45)] border border-red-500/70 font-semibold'
@@ -251,6 +272,7 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
                   Season
                 </span>
                 <select
+                  aria-label="Season"
                   value={season}
                   onChange={(e) => {
                     setSeason(Number(e.target.value));
@@ -287,6 +309,8 @@ export const MoviePlayerModal: React.FC<MoviePlayerModalProps> = ({
                         key={ep}
                         type="button"
                         onClick={() => setEpisode(ep)}
+                        aria-pressed={isEpActive}
+                        aria-label={`Season ${season}, episode ${ep}`}
                         className={`py-1 text-xs font-medium rounded-lg transition-all text-center cursor-pointer ${
                           isEpActive
                             ? 'bg-blue-600 text-white shadow-[0_0_10px_rgba(37,99,235,0.4)] border border-blue-500'

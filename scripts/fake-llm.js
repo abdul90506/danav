@@ -239,7 +239,7 @@ export const scenarios = {
    * the gate is repeating itself.
    */
   verify: ({ roundIdx, messages }) => {
-    const asked = messages.some((m) => m.role === 'user' && String(m.content).includes('ran none of the project'));
+    const asked = messages.some((m) => m.role === 'user' && String(m.content).includes('ran no relevant check'));
     const alreadyRan = messages.some(
       (m) => m.role === 'assistant' && (m.tool_calls || []).some((c) => c.function?.name === 'run_checks')
     );
@@ -506,6 +506,7 @@ const byModel = {
 
 export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {
   const requests = [];
+  const authorizations = [];
   const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST' || !req.url.includes('/chat/completions')) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -521,6 +522,7 @@ export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {
       return res.end('{"error":{"message":"bad json"}}');
     }
     requests.push(payload);
+    authorizations.push(String(req.headers.authorization || ''));
 
     if (payload.model === 'fake-http-500') {
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -606,6 +608,7 @@ export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {
         port: p,
         baseUrl: `http://127.0.0.1:${p}/v1`,
         requests,
+        authorizations,
         close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(r); }),
       });
     });

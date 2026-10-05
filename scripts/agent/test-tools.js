@@ -526,11 +526,13 @@ test('secrets are redacted from what the model (and the chat) can see', async ()
   }
 });
 
-test('web tools go through the injected search runner; failures are tool errors', async () => {
+test('web tools go through the injected search runner; empty searches stay informative', async () => {
   const calls = [];
   const search = async (name, args) => {
     calls.push([name, args]);
     if (args.query === 'boom') return { success: false, error: 'blocked' };
+    if (args.query === 'missing-diagnostic' || args.url === 'https://x.dev/no-diagnostic') return { success: false };
+    if (args.query === 'empty') return { success: false, status: 'no_results', output: 'No results found. Try a shorter query.', results: [] };
     if (name === 'web_search') return { success: true, output: '1. Result — https://x.dev', results: [{}, {}] };
     if (name === 'fetch_url') return { success: true, output: '# Page\nbody', title: 'Page' };
     return { success: true, images: [{ title: 'cat', url: 'https://i/c.png', thumbnail: 'https://i/t.png' }] };
@@ -542,10 +544,21 @@ test('web tools go through the injected search runner; failures are tool errors'
   assert.match(f.output, /Untrusted web content/);
   assert.equal(f.ui.title, 'Page');
   assert.equal((await run('image_search', { query: 'cats' })).ui.count, 1);
+  const empty = await run('web_search', { query: 'empty' });
+  assert.equal(empty.ok, true, 'no hits are a completed search, not a transport error');
+  assert.equal(empty.ui.count, 0);
+  assert.match(empty.output, /No results found/);
   const bad = await run('web_search', { query: 'boom' });
   assert.equal(bad.ok, false);
   assert.match(bad.output, /Web search failed: blocked/);
-  assert.equal(calls.length, 4);
+  const missingSearchDetail = await run('web_search', { query: 'missing-diagnostic' });
+  assert.equal(missingSearchDetail.ok, false);
+  assert.match(missingSearchDetail.output, /search service returned no response/i);
+  const missingFetchDetail = await run('fetch_url', { url: 'https://x.dev/no-diagnostic' });
+  assert.equal(missingFetchDetail.ok, false);
+  assert.match(missingFetchDetail.output, /page reader returned no diagnostic details/i);
+  assert.doesNotMatch(`${missingSearchDetail.output} ${missingFetchDetail.output}`, /unknown error/i);
+  assert.equal(calls.length, 7);
 });
 
 test('SSRF: fetch_url refuses local / private / metadata addresses before anything is fetched', async () => {
@@ -670,7 +683,10 @@ test('update_plan stores a sanitised checklist', async () => {
   });
   assert.equal(r.ui.total, 3);
   assert.deepEqual(ctx.state.findings, ['src/auth.ts verifies the CSRF token before looking up the session.']);
-  assert.match(r.output, /1 concise finding/);
+  assert.deepEqual(r.ui.findings, ctx.state.findings, 'the saved facts are available in the expandable plan details');
+  assert.equal(r.ui.summary, 'Build UI', 'the current milestone is surfaced separately from the full checklist');
+  assert.match(r.output, /Current step: Build UI/);
+  assert.match(r.output, /1 useful task finding/);
   assert.equal(r.ui.done, 1);
   assert.equal(ctx.state.plan[2].status, 'pending');
 

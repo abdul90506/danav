@@ -311,7 +311,8 @@ test('a project that declares no test script gets the command inferred, and it r
     const hint = formatChecksHint(await detectChecks(ws));
     assert.match(hint, /node --test/);
     assert.match(hint, /inferred/);
-    assert.match(hint, /run_checks runs them all in one call/, 'and names the one call that runs them');
+    assert.match(hint, /Without `only`, run_checks runs all detected checks/);
+    assert.match(hint, /Do not run the whole test suite by habit/);
 
     const res = await run('run_checks', {});
     assert.match(res.output, /node --test/);

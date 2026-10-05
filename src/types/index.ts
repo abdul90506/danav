@@ -12,15 +12,28 @@ export interface Model {
   description?: string;
 }
 
+/** Background task-note model; null follows the provider/model of the current run. */
+export interface AgentSummaryModelSelection {
+  providerId: string;
+  modelId: string;
+}
+
 export interface Provider {
   id: string;
   name: string;
   baseUrl: string;
-  /** Sent only when the user is entering/replacing a key; never loaded from settings responses. */
+  /** Legacy single-key or one-shot connection-test credential; never returned by settings. */
   apiKey?: string;
+  /** One-shot credentials for a connection test; never persisted in browser storage. */
+  apiKeys?: string[];
+  /** New saved credentials to append; the server keeps the actual values private. */
+  apiKeyAdditions?: string[];
+  /** Safe metadata returned by settings; never includes credential values. */
+  apiKeyCount?: number;
   apiKeyConfigured?: boolean;
-  /** One-shot settings update intent; removed before provider state is persisted. */
+  /** One-shot settings update intents; removed before provider state is persisted. */
   clearApiKey?: boolean;
+  clearApiKeys?: boolean;
   apiType: ApiType;
   models: Model[];
   isCustom?: boolean;
@@ -193,6 +206,10 @@ export interface AgentActionResult {
   isDir?: boolean;
   images?: ToolImage[];
   todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>;
+  /** Short user-facing current milestone, shown beside the plan progress. */
+  summary?: string;
+  /** Verified task facts saved in the private checkpoint, shown when plan details are opened. */
+  findings?: string[];
   done?: number;
   total?: number;
 }
@@ -309,6 +326,8 @@ export type MessageBlock =
       content: string;
       /** A one-line system notice (e.g. "sandbox was recreated"), shown muted. */
       notice?: boolean;
+      /** The accepted closing answer, streamed below the live work row. */
+      finalAnswer?: boolean;
     }
   | {
       id: string;

@@ -1,5 +1,5 @@
-import React, { useCallback, useRef } from 'react';
-import { ChevronRight, Circle, CircleCheck, CircleDot, ExternalLink, PanelRight } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronRight, Circle, CircleCheck, CircleDot, ExternalLink, Loader2, PanelRight } from 'lucide-react';
 import type { AgentAction, AgentDiffHunk } from '../types';
 import { actionLabel, formatRanges, isWorking } from '../agent/format';
 import { FileTypeIcon } from './FileTypeIcon';
@@ -25,7 +25,7 @@ const lastLines = (text = '', n = 3) =>
 
 interface RowProps {
   action: AgentAction;
-  onApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
+  onApproval?: (action: AgentAction, allow: boolean, always: boolean) => void | Promise<void>;
   /** Show this URL in the docked preview panel instead of a new tab. */
   onOpenPreview?: (url: string, title?: string) => void;
 }
@@ -116,6 +116,17 @@ const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
         </ul>
       )}
 
+      {r?.findings && r.findings.length > 0 && (
+        <div className="mt-2 pt-2 border-t border-zinc-200/70 dark:border-zinc-800">
+          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+            Useful task findings
+          </div>
+          <ul className="space-y-1 text-[11px] leading-4 text-zinc-500 dark:text-zinc-400">
+            {r.findings.map((finding, i) => <li key={i}>· {finding}</li>)}
+          </ul>
+        </div>
+      )}
+
       {r?.images && r.images.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {r.images.map((img) => (
@@ -169,6 +180,41 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
     },
     [action.id]
   );
+
+  const approvalKey = action.approval?.key;
+  const approvalIdentity = `${action.id}:${approvalKey || ''}`;
+  const approvalIdentityRef = useRef(approvalIdentity);
+  const approvalRequestRef = useRef<string | null>(null);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalSent, setApprovalSent] = useState(false);
+  const [approvalError, setApprovalError] = useState('');
+  useEffect(() => {
+    if (approvalIdentityRef.current === approvalIdentity) return;
+    approvalIdentityRef.current = approvalIdentity;
+    approvalRequestRef.current = null;
+    setApprovalBusy(false);
+    setApprovalSent(false);
+    setApprovalError('');
+  }, [approvalIdentity]);
+
+  const submitApproval = async (allow: boolean, always: boolean) => {
+    if (!onApproval || !approvalKey || approvalRequestRef.current === approvalKey || approvalSent) return;
+    approvalRequestRef.current = approvalKey;
+    setApprovalBusy(true);
+    setApprovalError('');
+    try {
+      await onApproval(action, allow, always);
+      if (approvalRequestRef.current === approvalKey) setApprovalSent(true);
+    } catch {
+      if (approvalRequestRef.current === approvalKey) setApprovalError('Could not send that choice. Try again.');
+    } finally {
+      if (approvalRequestRef.current === approvalKey) {
+        approvalRequestRef.current = null;
+        setApprovalBusy(false);
+      }
+    }
+  };
+
   const label = actionLabel(action);
   const live = isWorking(action); // shimmer = working on it right now
   const queued = action.status === 'queued';
@@ -319,20 +365,45 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
           </span>
         )}
 
-        {awaiting && onApproval && (
-          <span className="shrink-0 inline-flex items-center gap-1 ml-1">
-            <button type="button" onClick={() => onApproval(action, true, false)}
-              className="px-2 h-6 rounded-md text-[12px] font-medium bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
-              Allow
-            </button>
-            <button type="button" onClick={() => onApproval(action, true, true)}
-              className="px-2 h-6 rounded-md text-[12px] text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800">
-              Always allow
-            </button>
-            <button type="button" onClick={() => onApproval(action, false, false)}
-              className="px-2 h-6 rounded-md text-[12px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">
-              Deny
-            </button>
+        {awaiting && onApproval && action.approval && (
+          <span className="shrink-0 inline-flex flex-wrap items-center gap-1 ml-1">
+            {approvalBusy ? (
+              <span className="inline-flex items-center gap-1 text-[11px] text-zinc-500 dark:text-zinc-400" role="status">
+                <Loader2 className="w-3 h-3 animate-spin" /> Sending choice…
+              </span>
+            ) : approvalSent ? (
+              <span className="text-[11px] text-zinc-500 dark:text-zinc-400" role="status" aria-live="polite">
+                Choice sent — waiting for the agent…
+              </span>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void submitApproval(true, false)}
+                  disabled={approvalBusy}
+                  className="px-2 h-6 rounded-md text-[12px] font-medium bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 disabled:opacity-50"
+                >
+                  Allow
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void submitApproval(true, true)}
+                  disabled={approvalBusy}
+                  className="px-2 h-6 rounded-md text-[12px] text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  Always allow
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void submitApproval(false, false)}
+                  disabled={approvalBusy}
+                  className="px-2 h-6 rounded-md text-[12px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 disabled:opacity-50"
+                >
+                  Deny
+                </button>
+              </>
+            )}
+            {approvalError && <span className="text-[11px] text-rose-600 dark:text-rose-400" role="alert">{approvalError}</span>}
           </span>
         )}
       </div>

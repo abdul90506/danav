@@ -1103,9 +1103,11 @@ test('data path: runAgentTurn turns a real SSE run into ordered blocks (and Stop
       'thinking', 'text', 'action:update_plan', 'action:write_file', 'action:write_file',
       'text', 'action:read_file', 'action:multi_edit', 'action:edit_file',
       'action:run_command', 'action:grep_search', 'action:list_dir',
-      // the model's closing answer
-      'text',
+      // closing prose before the server's plan-finish nudge, then the accepted
+      // final answer in its own block so the UI can stream it separately
+      'text', 'text',
     ]);
+    assert.equal(finished.snap.blocks.at(-1).finalAnswer, true, 'the accepted final answer is explicitly marked');
     assert.ok(finished.snap.blocks.filter((b) => b.type === 'action').every((b) => b.action.status === 'done'));
     assert.equal(finished.snap.blocks[0].isStillThinking, false);
     assert.match(finished.snap.content, /^I'll set up a small landing page\.\n\nNow a couple of refinements\.\n\nDone! I created index\.html/);

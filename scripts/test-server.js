@@ -23,14 +23,29 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  describePageFetchFailure,
+  isGoogleNewsArticleWrapper,
+  isTerminalPageStatus,
+  parseBraveNewsSearchResults,
+  parseBraveSearchResults,
+  parseGoogleNewsRss,
+} from '../server/webSearch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
 let passed = 0;
+let skipped = 0;
 const failures = [];
+const onlyArg = process.argv.indexOf('--only');
+const onlyTest = onlyArg >= 0 ? String(process.argv[onlyArg + 1] || '').toLowerCase() : '';
 
 async function test(name, fn) {
+  if (onlyTest && !name.toLowerCase().includes(onlyTest)) {
+    skipped++;
+    return;
+  }
   try {
     await fn();
     passed++;
@@ -92,7 +107,7 @@ async function waitForServer(instance, base, deadlineMs = 20000) {
   throw new Error(`server did not start on ${base}\n--- server output ---\n${instance.log}`);
 }
 
-const server = startServer({});
+const server = startServer({ extraEnv: { DANAV_CHAT_RETRY_BASE_MS: '10' } });
 const serverLog = server.log;
 
 const api = async (method, route, body, extraHeaders) => {
@@ -135,6 +150,59 @@ console.log('\nServer integration (isolated data dir)\n');
 await waitForServer(server, BASE);
 console.log(`  (server on ${BASE}, data dir ${path.basename(dataDir)})\n`);
 
+await test('web search adapters parse dated headlines and Brave result cards', async () => {
+  const feed = `<?xml version="1.0"?><rss><channel>
+    <item><title>Older headline - Old News</title><link>https://news.google.com/rss/articles/old?oc=5&amp;x=1</link><source url="https://old.example">Old News</source><pubDate>Fri, 02 Oct 2026 08:00:00 GMT</pubDate></item>
+    <item><title>Newest &amp; relevant headline - Example News</title><link>https://news.google.com/rss/articles/new?oc=5&amp;x=2</link><source url="https://example.com">Example News</source><pubDate>Sun, 04 Oct 2026 10:00:00 GMT</pubDate></item>
+  </channel></rss>`;
+  const news = parseGoogleNewsRss(feed);
+  assert.equal(news.length, 2);
+  assert.equal(news[0].title, 'Newest & relevant headline - Example News');
+  assert.equal(news[0].source, 'Example News');
+  assert.equal(news[0].sourceUrl, 'https://example.com');
+  assert.equal(news[0].publishedAt, '2026-10-04T10:00:00.000Z');
+  assert.equal(news[0].url, 'https://news.google.com/rss/articles/new?oc=5&x=2');
+
+  const brave = `<div class="snippet svelte" data-pos="0" data-type="web">
+    <a href="https://example.com/story?a=1&amp;b=2"><div class="title search-snippet-title">Latest &amp; useful</div></a>
+    <div class="generic-snippet"><div class="content">A current <strong>summary</strong> &#x27;today&#x27;.</div></div>
+  </div>`;
+  const results = parseBraveSearchResults(brave);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].title, 'Latest & useful');
+  assert.equal(results[0].url, 'https://example.com/story?a=1&b=2');
+  assert.equal(results[0].snippet, "A current summary 'today'.");
+
+  const braveNews = `<div class="snippet svelte" data-pos="0" data-type="news">
+    <a href="https://example.com/pakistan-talks"><span class="desktop-small-semibold t-secondary">Example News</span>
+      <span class="desktop-small-regular t-tertiary">16 minutes ago</span>
+      <div class="title line-clamp-2">Pakistan talks &amp; updates</div></a>
+    <div class="generic-snippet"><div class="content"><div class="description">A new <strong>regional story</strong>.</div></div></div>
+  </div>`;
+  const articles = parseBraveNewsSearchResults(braveNews);
+  assert.equal(articles.length, 1);
+  assert.equal(articles[0].title, 'Pakistan talks & updates');
+  assert.equal(articles[0].url, 'https://example.com/pakistan-talks');
+  assert.equal(articles[0].source, 'Example News');
+  assert.equal(articles[0].ageMinutes, 16);
+  assert.equal(articles[0].snippet, 'Published 16 minutes ago — A new regional story.');
+});
+
+await test('page fetch reports 404 as not-found, not a bot-block error', async () => {
+  assert.equal(isGoogleNewsArticleWrapper('https://news.google.com/rss/articles/example'), true);
+  assert.equal(isGoogleNewsArticleWrapper('https://news.google.com/articles/example'), true);
+  assert.equal(isGoogleNewsArticleWrapper('https://news.google.com/read/example'), true);
+  assert.equal(isGoogleNewsArticleWrapper('https://news.google.com/home'), false);
+  assert.equal(isGoogleNewsArticleWrapper('https://publisher.example/article'), false);
+  assert.equal(isTerminalPageStatus(404), true);
+  assert.equal(isTerminalPageStatus(410), true);
+  assert.equal(isTerminalPageStatus(403), false, '403 can still benefit from the reader fallback');
+  assert.match(describePageFetchFailure(404), /not found/i);
+  assert.doesNotMatch(describePageFetchFailure(404), /block|challenge/i);
+  assert.match(describePageFetchFailure(403), /denied/i);
+  assert.match(describePageFetchFailure(503, 'Service Unavailable'), /server error/i);
+});
+
 await test('GET /api/settings answers and never includes an API key', async () => {
   const { status, json } = await api('GET', '/api/settings');
   assert.strictEqual(status, 200);
@@ -160,11 +228,12 @@ await test('POST /api/settings stores a key server-side and reports only that it
   assert.strictEqual(status, 200);
   const provider = json.settings.providers.find((p) => p.id === 'provider-test');
   assert.strictEqual(provider.apiKeyConfigured, true);
+  assert.strictEqual(provider.apiKeyCount, 1);
   assert.strictEqual(provider.apiKey, undefined);
 
   // It IS on disk — the server needs it to call the provider.
   const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'settings.json'), 'utf-8'));
-  assert.strictEqual(onDisk.providers.find((p) => p.id === 'provider-test').apiKey, 'sk-secret-value-123');
+  assert.strictEqual(onDisk.providers.find((p) => p.id === 'provider-test').apiKeys[0], 'sk-secret-value-123');
 });
 
 await test('a provider update without a key keeps the stored key (no accidental wipe)', async () => {
@@ -181,7 +250,7 @@ await test('a provider update without a key keeps the stored key (no accidental 
     ],
   });
   const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'settings.json'), 'utf-8'));
-  assert.strictEqual(onDisk.providers.find((p) => p.id === 'provider-test').apiKey, 'sk-secret-value-123');
+  assert.strictEqual(onDisk.providers.find((p) => p.id === 'provider-test').apiKeys[0], 'sk-secret-value-123');
 });
 
 await test('POST /api/settings rejects a malformed body with 400, not a crash', async () => {
@@ -568,6 +637,99 @@ await test('a provider 5xx is retried, but a 401 fails immediately', async () =>
   }
 });
 
+await test('standard chat uses all five visible retries with increasing waits', async () => {
+  let calls = 0;
+  const fake = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      calls += 1;
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end('{"error":{"message":"upstream busy for test"}}');
+    });
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  try {
+    const started = Date.now();
+    const res = await fetch(`${BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: { id: 'provider-five-retries', baseUrl: `http://127.0.0.1:${fake.address().port}/v1`, apiType: 'openai' },
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+    const stream = await res.text();
+    const elapsed = Date.now() - started;
+    assert.equal(res.status, 200, 'a retry status starts the event stream');
+    assert.equal(calls, 6, 'five retries follow the initial request');
+    assert.deepEqual([...stream.matchAll(/retry (\d) of 5/g)].map((match) => match[1]), ['1', '2', '3', '4', '5']);
+    assert.match(stream, /upstream busy for test/);
+    assert.ok(elapsed >= 250 && elapsed < 3000, `the distinct 10/20/40/80/160ms test backoff should be bounded, took ${elapsed}ms`);
+  } finally {
+    fake.close();
+  }
+});
+
+await test('standard chat rotates saved keys after auth and busy errors without exposing them', async () => {
+  const badKey = 'chat-rotation-invalid-test-key';
+  const goodKey = 'chat-rotation-valid-test-key';
+  const authorizations = [];
+  let goodKeyCalls = 0;
+  const fake = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const authorization = String(req.headers.authorization || '');
+      authorizations.push(authorization);
+      if (authorization === `Bearer ${badKey}`) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end('{"error":{"message":"invalid test key"}}');
+        return;
+      }
+      goodKeyCalls += 1;
+      if (goodKeyCalls === 1) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end('{"error":{"message":"temporary busy"}}');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Recovered with the next key.' } }] })}\n\ndata: [DONE]\n\n`);
+    });
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  try {
+    const baseUrl = `http://127.0.0.1:${fake.address().port}/v1`;
+    const saved = await api('POST', '/api/settings', { providers: [{
+      id: 'provider-chat-key-rotation', name: 'Chat rotation fixture', baseUrl, apiType: 'openai',
+      apiKeyAdditions: [badKey, goodKey], models: [{ id: 'fake-model', name: 'fake-model' }],
+    }] });
+    assert.equal(saved.status, 200);
+    assert.match(saved.text, /"apiKeyCount":2/);
+    assert.doesNotMatch(saved.text, /chat-rotation-(?:invalid|valid)-test-key/);
+
+    const res = await fetch(`${BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: { id: 'provider-chat-key-rotation', baseUrl, apiType: 'openai' },
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+    const stream = await res.text();
+    assert.equal(res.status, 200);
+    assert.match(stream, /Recovered with the next key/);
+    assert.match(stream, /API key rejected; trying another saved key/);
+    assert.match(stream, /retry 1 of 5/);
+    assert.deepEqual(authorizations, [
+      `Bearer ${badKey}`, `Bearer ${goodKey}`, `Bearer ${badKey}`, `Bearer ${goodKey}`,
+    ]);
+    assert.doesNotMatch(stream, /chat-rotation-(?:invalid|valid)-test-key/);
+  } finally {
+    fake.close();
+  }
+});
+
 await test('a fallback chat title stays sidebar-sized, whatever was pasted', async () => {
   // Unreachable provider -> the route answers with its local fallback title.
   const blob = 'x'.repeat(20000);
@@ -739,10 +901,9 @@ try {
   });
 
   await test('the generated code is private to the account and survives a restart', async () => {
-    if (process.platform !== 'win32') {
-      assert.strictEqual(fs.statSync(tokenFile).mode & 0o777, 0o600);
-    }
     const code = fs.readFileSync(tokenFile, 'utf-8').trim();
+    // Simulate a legacy file created before mode was enforced on every startup.
+    if (process.platform !== 'win32') fs.chmodSync(tokenFile, 0o644);
     auto.proc.kill();
     const restarted = startServer({
       port: AUTO_PORT,
@@ -750,6 +911,9 @@ try {
     });
     try {
       await waitForServer(restarted, AUTO_BASE);
+      if (process.platform !== 'win32') {
+        assert.strictEqual(fs.statSync(tokenFile).mode & 0o777, 0o600, 'an existing token file is made private again after restart');
+      }
       assert.strictEqual(fs.readFileSync(tokenFile, 'utf-8').trim(), code, 'the code must not rotate');
       const stillWorks = await fetch(`${AUTO_BASE}/api/settings`, {
         headers: { 'x-danav-preview-token': code },
@@ -810,5 +974,5 @@ if (failures.length) {
   process.exit(1);
 }
 console.log('====================================================');
-console.log(`\ud83c\udf89 ALL ${passed} SERVER INTEGRATION TESTS PASSED`);
+console.log(`\ud83c\udf89 ${passed} SERVER INTEGRATION TEST${passed === 1 ? '' : 'S'} PASSED${skipped ? ` (${skipped} unrelated checks skipped)` : ''}`);
 console.log('====================================================');

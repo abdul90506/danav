@@ -82,9 +82,13 @@ export const ToolExecutionCard: React.FC<ToolExecutionCardProps> = ({ tool, onWa
     <div ref={cardRef} className="mb-2 select-none">
       <button
         type="button"
-        aria-expanded={(hasDetail || hasImages) ? expanded : undefined}
-        onClick={() => (hasDetail || hasImages) && toggle()}
-        className={`inline-flex items-center gap-1.5 max-w-full py-1 text-xs font-medium transition-opacity ${
+        disabled={!hasDetail && !hasImages}
+        aria-expanded={hasDetail || hasImages ? expanded : undefined}
+        aria-controls={hasDetail || hasImages ? `tool-detail-${tool.id}` : undefined}
+        aria-label={`${verb}${label ? `: ${label}` : ''}${isRunning ? ', working' : isError ? ', failed' : cleanSummary ? `, ${cleanSummary}` : ''}${hasDetail || hasImages ? expanded ? ', hide details' : ', show details' : ''}`}
+        aria-busy={isRunning}
+        onClick={toggle}
+        className={`inline-flex items-center gap-1.5 max-w-full py-1 text-xs font-medium transition-opacity disabled:cursor-default ${
           hasDetail || hasImages ? 'cursor-pointer group/tool' : 'cursor-default'
         }`}
       >
@@ -137,7 +141,7 @@ export const ToolExecutionCard: React.FC<ToolExecutionCardProps> = ({ tool, onWa
       </button>
 
       {expanded && (
-        <div className="mt-1.5 animate-in fade-in duration-150">
+        <div id={`tool-detail-${tool.id}`} className="mt-1.5 animate-in fade-in duration-150">
           {hasMovies && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3 max-w-3xl">
               {tool.movies!.map((movie) => (

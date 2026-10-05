@@ -12,6 +12,7 @@ import {
   Plus,
   File,
   Folder,
+  Loader2,
 } from 'lucide-react';
 import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 import { Attachment, Provider, ThinkingLevel, Model } from '../types';
@@ -189,7 +190,18 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
   };
 
   return (
-    <div className="w-[280px] sm:w-[330px] max-w-[calc(100vw-28px)] max-h-[340px] flex flex-col bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-200 dark:border-zinc-800 text-xs overflow-hidden animate-in fade-in zoom-in-95 duration-150 select-none z-50">
+    <div
+      id="model-selector-popup"
+      role="region"
+      aria-label="Model selector"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}
+      className="w-[280px] sm:w-[330px] max-w-[calc(100vw-28px)] max-h-[340px] flex flex-col bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-200 dark:border-zinc-800 text-xs overflow-hidden animate-in fade-in zoom-in-95 duration-150 select-none z-50"
+    >
       {/* Header: Compact Search Box */}
       <div className="p-2 border-b border-zinc-100 dark:border-zinc-800/80">
         <div className="relative flex items-center bg-zinc-100/90 dark:bg-zinc-800/70 rounded-lg px-2 py-1 focus-within:ring-1 focus-within:ring-zinc-400 dark:focus-within:ring-zinc-600 transition-all">
@@ -199,6 +211,7 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search models..."
+            aria-label="Search models"
             autoFocus
             className="w-full bg-transparent text-[12px] text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 outline-none border-none focus:outline-none focus:ring-0 p-0"
           />
@@ -206,6 +219,7 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
             <button
               type="button"
               onClick={() => setSearch('')}
+              aria-label="Clear model search"
               className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 ml-1 cursor-pointer"
             >
               <X className="w-3 h-3" />
@@ -215,10 +229,11 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
 
         {/* Provider Tabs with Horizontal Scroll */}
         {providers.length > 1 && (
-          <div className="flex items-center gap-1 mt-1.5 overflow-x-auto no-scrollbar pb-0.5">
+          <div role="group" aria-label="Filter models by provider" className="flex items-center gap-1 mt-1.5 overflow-x-auto no-scrollbar pb-0.5">
             <button
               type="button"
               onClick={() => setActiveTab('all')}
+              aria-pressed={activeTab === 'all'}
               className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors shrink-0 cursor-pointer ${
                 activeTab === 'all'
                   ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shadow-sm'
@@ -236,6 +251,7 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                   key={p.id}
                   type="button"
                   onClick={() => setActiveTab(p.id)}
+                  aria-pressed={isTabActive}
                   className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors shrink-0 cursor-pointer ${
                     isTabActive
                       ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shadow-sm'
@@ -272,6 +288,8 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                   onSelectModel(provider.id, model.id);
                   onClose();
                 }}
+                aria-pressed={isSelected}
+                aria-label={`Select ${cleanDisplayName} from ${provider.name}`}
                 className={`w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-left transition-all cursor-pointer ${
                   isSelected
                     ? 'bg-zinc-100 dark:bg-zinc-800/90 text-zinc-900 dark:text-white font-medium ring-1 ring-zinc-300/60 dark:ring-zinc-700'
@@ -334,13 +352,23 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   agentControls,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const attachTriggerRef = useRef<HTMLButtonElement>(null);
+  const modelTriggerRef = useRef<HTMLButtonElement>(null);
+  const thinkingTriggerRef = useRef<HTMLButtonElement>(null);
   const [draft, setDraft] = useState('');
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  /** Why a dropped or picked file did not attach — shown next to the paperclip. */
+  /** Keep the latest list available to queued file-processing jobs. */
+  const attachmentsRef = useRef<Attachment[]>([]);
+  /** A send waits until every selected/dropped file is ready. */
+  const [pendingFileCount, setPendingFileCount] = useState(0);
+  const pendingFileCountRef = useRef(0);
+  const attachmentEpochRef = useRef(0);
+  const processQueueRef = useRef<Promise<void>>(Promise.resolve());
+  /** Why a dropped or picked file did not attach — shown once above the composer. */
   const [attachmentNotice, setAttachmentNotice] = useState('');
   const [isInputExpanded, setIsInputExpanded] = useState(false);
   /** Docked controls bar: hidden until you reach for the arrow, click to pin. */
@@ -374,68 +402,114 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   useDismissOnOutside(thinkingMenuRef, thinkingDropdownOpen, closeThinkingMenu);
   useDismissOnOutside(plusMenuRef, plusMenuOpen, closePlusMenu);
 
-  // Process files/folders into Attachment objects
-  const processFiles = async (fileList: FileList | File[], isFolder = false) => {
-    const newAttachments: Attachment[] = [];
-    const skipped: string[] = [];
-    // What this message would carry after the new files are added.
-    let payloadBytes = totalPayloadBytes(attachments);
-    for (let i = 0; i < fileList.length; i++) {
-      const file = fileList[i];
-      if (file.size > MAX_ATTACHMENT_BYTES) {
-        skipped.push(`${file.name} is over ${formatBytesAsMegabytes(MAX_ATTACHMENT_BYTES)}`);
-        continue;
-      }
+  // Process file batches in order so simultaneous drops/selections share one
+  // attachment budget and cannot sneak into a different chat after a reset.
+  const processFiles = (fileList: FileList | File[], isFolder = false): Promise<void> => {
+    const files = Array.from(fileList);
+    if (files.length === 0) return Promise.resolve();
 
-      const isImage = file.type.startsWith('image/');
-      let content = '';
-      let previewUrl = '';
-      let size = file.size;
+    const epoch = attachmentEpochRef.current;
+    pendingFileCountRef.current += files.length;
+    setPendingFileCount(pendingFileCountRef.current);
 
-      if (isImage) {
-        // The data URL is both the preview and the payload sent to the model,
-        // so the thumbnail survives a reload instead of dying with a blob URL.
-        const prepared = await prepareImageForModel(file);
-        content = prepared.dataUrl;
-        previewUrl = prepared.dataUrl;
-        size = prepared.bytes;
-      } else {
-        try {
-          content = await new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve((reader.result as string) || '');
-            reader.onerror = () => resolve('');
-            reader.readAsText(file);
+    const job = processQueueRef.current
+      .then(async () => {
+        if (epoch !== attachmentEpochRef.current) return;
+        const newAttachments: Attachment[] = [];
+        const skipped: string[] = [];
+        // What this message would carry after the new files are added.
+        let payloadBytes = totalPayloadBytes(attachmentsRef.current);
+
+        for (let i = 0; i < files.length; i++) {
+          if (epoch !== attachmentEpochRef.current) return;
+          const file = files[i];
+          if (file.size > MAX_ATTACHMENT_BYTES) {
+            skipped.push(`${file.name} is over ${formatBytesAsMegabytes(MAX_ATTACHMENT_BYTES)}`);
+            continue;
+          }
+
+          const isImage = file.type.startsWith('image/');
+          let content = '';
+          let previewUrl = '';
+          let size = file.size;
+
+          let readFailed = false;
+          if (isImage) {
+            // The data URL is both the preview and the payload sent to the model,
+            // so the thumbnail survives a reload instead of dying with a blob URL.
+            try {
+              const prepared = await prepareImageForModel(file);
+              content = prepared.dataUrl;
+              previewUrl = prepared.dataUrl;
+              size = prepared.bytes;
+            } catch {
+              readFailed = true;
+            }
+          } else {
+            try {
+              content = await new Promise<string>((resolve) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve((reader.result as string) || '');
+                reader.onerror = () => {
+                  readFailed = true;
+                  resolve('');
+                };
+                reader.readAsText(file);
+              });
+            } catch {
+              readFailed = true;
+            }
+          }
+
+          if (readFailed) {
+            skipped.push(`${file.name} could not be read`);
+            continue;
+          }
+          if (epoch !== attachmentEpochRef.current) return;
+          // Images carry their whole data URL; text files are capped so a huge log
+          // does not dominate the prompt.
+          const storedContent = isImage ? content : content.slice(0, 100000);
+          if (!fitsAttachmentBudget(payloadBytes, storedContent.length)) {
+            skipped.push(`${file.name} would take this message over the ${formatBytesAsMegabytes(ATTACHMENT_BUDGET_BYTES)} limit`);
+            continue;
+          }
+          payloadBytes += storedContent.length;
+
+          newAttachments.push({
+            id: `att-${Date.now()}-${Math.random().toString(36).substr(2, 5)}-${i}`,
+            name: file.name,
+            type: isImage ? 'image' : isFolder ? 'folder' : 'file',
+            size,
+            content: storedContent,
+            previewUrl,
+            path: (file as any).webkitRelativePath || file.name,
           });
-        } catch (e) {}
-      }
+        }
 
-      // Images carry their whole data URL; text files are capped so a huge log
-      // does not dominate the prompt.
-      const storedContent = isImage ? content : content.slice(0, 100000);
-      if (!fitsAttachmentBudget(payloadBytes, storedContent.length)) {
-        skipped.push(`${file.name} would take this message over the ${formatBytesAsMegabytes(ATTACHMENT_BUDGET_BYTES)} limit`);
-        continue;
-      }
-      payloadBytes += storedContent.length;
-
-      newAttachments.push({
-        id: `att-${Date.now()}-${Math.random().toString(36).substr(2, 5)}-${i}`,
-        name: file.name,
-        type: isImage ? 'image' : isFolder ? 'folder' : 'file',
-        size,
-        content: storedContent,
-        previewUrl,
-        path: (file as any).webkitRelativePath || file.name,
+        if (epoch !== attachmentEpochRef.current) return;
+        if (newAttachments.length > 0) {
+          attachmentsRef.current = [...attachmentsRef.current, ...newAttachments];
+          setAttachments(attachmentsRef.current);
+        }
+        setAttachmentNotice(
+          skipped.length
+            ? `Not attached — ${skipped.slice(0, 2).join('; ')}${skipped.length > 2 ? `; and ${skipped.length - 2} more` : ''}.`
+            : ''
+        );
+      })
+      .catch((error: unknown) => {
+        if (epoch !== attachmentEpochRef.current) return;
+        const reason = error instanceof Error ? error.message : 'the file could not be read';
+        setAttachmentNotice(`Could not prepare the attachments — ${reason}.`);
       });
-    }
 
-    setAttachmentNotice(
-      skipped.length
-        ? `Not attached — ${skipped.slice(0, 2).join('; ')}${skipped.length > 2 ? `; and ${skipped.length - 2} more` : ''}.`
-        : ''
-    );
-    setAttachments((prev) => [...prev, ...newAttachments]);
+    const trackedJob = job.finally(() => {
+      if (epoch !== attachmentEpochRef.current) return;
+      pendingFileCountRef.current = Math.max(0, pendingFileCountRef.current - files.length);
+      setPendingFileCount(pendingFileCountRef.current);
+    });
+    processQueueRef.current = trackedJob;
+    return trackedJob;
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -453,7 +527,8 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   };
 
   const handleRemoveAttachment = (id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    attachmentsRef.current = attachmentsRef.current.filter((attachment) => attachment.id !== id);
+    setAttachments(attachmentsRef.current);
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -542,6 +617,16 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
    */
   useEffect(() => {
     if (!draftResetKey) return;
+    // Any in-flight read belongs to the old chat/draft. Invalidate it before it
+    // can append a late file to the next conversation.
+    attachmentEpochRef.current += 1;
+    processQueueRef.current = Promise.resolve();
+    attachmentsRef.current = [];
+    pendingFileCountRef.current = 0;
+    setPendingFileCount(0);
+    setAttachments([]);
+    setAttachmentNotice('');
+    setIsInputExpanded(false);
     setDraft('');
     lastDraftLengthRef.current = 0;
     document.documentElement.style.removeProperty('--danav-composer-extra');
@@ -552,23 +637,44 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     if (document.activeElement !== el) el.focus({ preventScroll: true });
   }, [draftResetKey]);
 
-  // Leaving the chat (or the composer) must not leave a gap behind it.
+  // Leaving the chat (or the composer) must not leave a gap or let an unfinished
+  // file read call setState after it has been detached from the UI.
   useEffect(
     () => () => {
+      attachmentEpochRef.current += 1;
+      attachmentsRef.current = [];
       document.documentElement.style.removeProperty('--danav-composer-extra');
     },
     []
   );
 
-  const canSend = (Boolean(draft.trim()) || attachments.length > 0) && !isLoading && !disabled;
+  const canSend =
+    (Boolean(draft.trim()) || attachments.length > 0) &&
+    pendingFileCount === 0 &&
+    !isLoading &&
+    !disabled;
+
+  const attachmentFeedback = pendingFileCount > 0 ? (
+    <p className="flex items-center gap-1.5 px-1 py-1 text-[11px] text-zinc-500 dark:text-zinc-400" role="status" aria-live="polite">
+      <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+      Preparing {pendingFileCount} file{pendingFileCount === 1 ? '' : 's'} — send will be available when ready.
+    </p>
+  ) : attachmentNotice ? (
+    <p className="px-1 py-1 text-[11px] text-amber-600 dark:text-amber-400" role="status" aria-live="polite">
+      {attachmentNotice}
+    </p>
+  ) : null;
 
   const handleTriggerSend = () => {
     if (!canSend) return;
     // The draft is cleared by the app's reset too, but clearing it here keeps the
     // box from holding a stale message for a frame while the request goes out.
-    onSend(attachments, draft);
+    const readyAttachments = attachmentsRef.current;
+    onSend(readyAttachments.length > 0 ? readyAttachments : undefined, draft);
     setDraft('');
+    attachmentsRef.current = [];
     setAttachments([]);
+    setAttachmentNotice('');
     if (textareaRef.current) {
       textareaRef.current.style.height = '';
       textareaRef.current.style.overflowY = 'hidden';
@@ -658,17 +764,13 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                   ) : (
                     <File className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
                   )}
-
-          {attachmentNotice && (
-            <p className="px-3.5 pt-2 text-[11px] text-amber-600 dark:text-amber-400" role="status">
-              {attachmentNotice}
-            </p>
-          )}
-                  <span className="font-mono text-[11px] truncate max-w-[130px]">{att.name}</span>
+                  <span className="font-mono text-[11px] truncate max-w-[130px]" title={att.name}>{att.name}</span>
                   <span className="text-[10px] text-zinc-400">{Math.round(att.size / 1024) || 1}KB</span>
                   <button
                     type="button"
                     onClick={() => handleRemoveAttachment(att.id)}
+                    aria-label={`Remove ${att.name}`}
+                    title={`Remove ${att.name}`}
                     className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 ml-0.5 cursor-pointer"
                   >
                     <X className="w-3 h-3" />
@@ -677,6 +779,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
               ))}
             </div>
           )}
+          {attachmentFeedback}
 
           {/* Full-width Multiline Textarea */}
           <div className="w-full px-3.5 sm:px-4 pt-3 pb-1">
@@ -701,16 +804,32 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
               {/* Attach Plus (+) Button */}
               <div className="relative" ref={plusMenuRef}>
                 <button
+                  ref={attachTriggerRef}
                   type="button"
-                  onClick={() => setPlusMenuOpen(!plusMenuOpen)}
+                  onClick={() => setPlusMenuOpen((open) => !open)}
                   className="flex items-center justify-center w-7 h-7 rounded-full text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                   title="Attach file or folder"
+                  aria-label="Attach file or folder"
+                  aria-expanded={plusMenuOpen}
+                  aria-controls="attachment-options"
                 >
                   <Plus className="w-4 h-4 stroke-[2.2]" />
                 </button>
 
                 {plusMenuOpen && (
-                  <div className="absolute left-0 bottom-full mb-1.5 z-50 w-40 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in duration-100">
+                  <div
+                    id="attachment-options"
+                    role="group"
+                    aria-label="Attachment options"
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Escape') return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setPlusMenuOpen(false);
+                      attachTriggerRef.current?.focus({ preventScroll: true });
+                    }}
+                    className="absolute left-0 bottom-full mb-1.5 z-50 w-40 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in duration-100"
+                  >
                     <button
                       type="button"
                       onClick={() => {
@@ -740,11 +859,15 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
               {/* Compact Model Selector Button */}
               <div className="relative" ref={modelMenuRef}>
                 <button
+                  ref={modelTriggerRef}
                   type="button"
                   onClick={() => {
                     setModelDropdownOpen(!modelDropdownOpen);
                     setThinkingDropdownOpen(false);
                   }}
+                  aria-label={`Select model, current ${cleanModelName}`}
+                  aria-expanded={modelDropdownOpen}
+                  aria-controls="model-selector-popup"
                   className="flex items-center gap-1 h-7 px-2 text-[12px] rounded-lg font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer max-w-[150px] sm:max-w-[200px]"
                   title="Select Model"
                 >
@@ -760,7 +883,10 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                       selectedProviderId={selectedProviderId}
                       selectedModelId={selectedModelId}
                       onSelectModel={onSelectModel}
-                      onClose={() => setModelDropdownOpen(false)}
+                      onClose={() => {
+                        setModelDropdownOpen(false);
+                        modelTriggerRef.current?.focus({ preventScroll: true });
+                      }}
                     />
                   </div>
                 )}
@@ -769,11 +895,15 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
               {/* Think Selector Button */}
               <div className="relative" ref={thinkingMenuRef}>
                 <button
+                  ref={thinkingTriggerRef}
                   type="button"
                   onClick={() => {
-                    setThinkingDropdownOpen(!thinkingDropdownOpen);
+                    setThinkingDropdownOpen((open) => !open);
                     setModelDropdownOpen(false);
                   }}
+                  aria-label={`Reasoning depth: ${currentDisplayThinking}`}
+                  aria-expanded={thinkingDropdownOpen}
+                  aria-controls="thinking-options"
                   className="flex items-center gap-1 h-7 px-2 text-[12px] rounded-lg font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer"
                   title="Reasoning Depth"
                 >
@@ -786,7 +916,19 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                 </button>
 
                 {thinkingDropdownOpen && (
-                  <div className="absolute left-0 bottom-full mb-1.5 z-50 w-48 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in zoom-in-95 duration-100">
+                  <div
+                    id="thinking-options"
+                    role="group"
+                    aria-label="Reasoning depth options"
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Escape') return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setThinkingDropdownOpen(false);
+                      thinkingTriggerRef.current?.focus({ preventScroll: true });
+                    }}
+                    className="absolute left-0 bottom-full mb-1.5 z-50 w-48 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in zoom-in-95 duration-100"
+                  >
                     <div className="px-2.5 py-1 text-[10px] uppercase font-semibold text-zinc-400">
                       Reasoning Depth
                     </div>
@@ -797,7 +939,9 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                         onClick={() => {
                           onSelectThinkingLevel(opt.level);
                           setThinkingDropdownOpen(false);
+                          thinkingTriggerRef.current?.focus({ preventScroll: true });
                         }}
+                        aria-pressed={thinkingLevel === opt.level}
                         className={`flex items-center justify-between w-full px-2.5 py-1.5 text-left transition-colors cursor-pointer ${
                           thinkingLevel === opt.level
                             ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-white font-medium'
@@ -866,16 +1010,32 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   const attachControl = (
     <div className="relative shrink-0" ref={plusMenuRef}>
       <button
+        ref={attachTriggerRef}
         type="button"
-        onClick={() => setPlusMenuOpen(!plusMenuOpen)}
+        onClick={() => setPlusMenuOpen((open) => !open)}
         className="flex items-center justify-center w-7 h-7 rounded-full text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
         title="Attach file or folder"
+        aria-label="Attach file or folder"
+        aria-expanded={plusMenuOpen}
+        aria-controls="attachment-options"
       >
         <Plus className="w-4 h-4 stroke-[2.2]" />
       </button>
 
       {plusMenuOpen && (
-        <div className="absolute left-0 bottom-full mb-2 z-50 w-40 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in duration-100">
+        <div
+          id="attachment-options"
+          role="group"
+          aria-label="Attachment options"
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return;
+            event.preventDefault();
+            event.stopPropagation();
+            setPlusMenuOpen(false);
+            attachTriggerRef.current?.focus({ preventScroll: true });
+          }}
+          className="absolute left-0 bottom-full mb-2 z-50 w-40 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in duration-100"
+        >
           <button
             type="button"
             onClick={() => {
@@ -906,11 +1066,15 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   const thinkControl = (
     <div className="relative" ref={thinkingMenuRef}>
       <button
+        ref={thinkingTriggerRef}
         type="button"
         onClick={() => {
-          setThinkingDropdownOpen(!thinkingDropdownOpen);
+          setThinkingDropdownOpen((open) => !open);
           setModelDropdownOpen(false);
         }}
+        aria-label={`Reasoning depth: ${currentDisplayThinking}`}
+        aria-expanded={thinkingDropdownOpen}
+        aria-controls="thinking-options"
         className="flex items-center gap-1 h-7 px-2 text-[11px] font-medium rounded-full text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer"
         title="Reasoning Depth"
       >
@@ -923,7 +1087,19 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
       </button>
 
       {thinkingDropdownOpen && (
-        <div className="absolute right-0 bottom-full mb-2 z-50 w-48 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in zoom-in-95 duration-100">
+        <div
+          id="thinking-options"
+          role="group"
+          aria-label="Reasoning depth options"
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return;
+            event.preventDefault();
+            event.stopPropagation();
+            setThinkingDropdownOpen(false);
+            thinkingTriggerRef.current?.focus({ preventScroll: true });
+          }}
+          className="absolute right-0 bottom-full mb-2 z-50 w-48 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in zoom-in-95 duration-100"
+        >
           <div className="px-2.5 py-1 text-[10px] uppercase font-semibold text-zinc-400">
             Reasoning Depth
           </div>
@@ -934,7 +1110,9 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
               onClick={() => {
                 onSelectThinkingLevel(opt.level);
                 setThinkingDropdownOpen(false);
+                thinkingTriggerRef.current?.focus({ preventScroll: true });
               }}
+              aria-pressed={thinkingLevel === opt.level}
               className={`flex items-center justify-between w-full px-2.5 py-1.5 text-left transition-colors cursor-pointer ${
                 thinkingLevel === opt.level
                   ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-white font-medium'
@@ -1033,17 +1211,13 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
               ) : (
                 <File className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
               )}
-
-      {attachmentNotice && (
-        <p className="mb-2 px-1 text-[11px] text-amber-600 dark:text-amber-400" role="status">
-          {attachmentNotice}
-        </p>
-      )}
-              <span className="font-mono text-[11px] truncate max-w-[130px]">{att.name}</span>
+              <span className="font-mono text-[11px] truncate max-w-[130px]" title={att.name}>{att.name}</span>
               <span className="text-[10px] text-zinc-400">{Math.round(att.size / 1024) || 1}KB</span>
               <button
                 type="button"
                 onClick={() => handleRemoveAttachment(att.id)}
+                aria-label={`Remove ${att.name}`}
+                title={`Remove ${att.name}`}
                 className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 ml-0.5 cursor-pointer"
               >
                 <X className="w-3 h-3" />
@@ -1052,6 +1226,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
           ))}
         </div>
       )}
+      {attachmentFeedback}
 
       {/* ------------------------------------------------------------------
           Docked controls, out of the way until you reach for them.
@@ -1095,11 +1270,15 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
               {/* Model selector — moved out of the pill into this bar */}
               <div className="relative" ref={modelMenuRef}>
                 <button
+                  ref={modelTriggerRef}
                   type="button"
                   onClick={() => {
                     setModelDropdownOpen(!modelDropdownOpen);
                     setThinkingDropdownOpen(false);
                   }}
+                  aria-label={`Select model, current ${cleanModelName}`}
+                  aria-expanded={modelDropdownOpen}
+                  aria-controls="model-selector-popup"
                   className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px] font-medium border border-zinc-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/60 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer max-w-[200px]"
                   title="Select Model"
                 >
@@ -1115,7 +1294,10 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                       selectedProviderId={selectedProviderId}
                       selectedModelId={selectedModelId}
                       onSelectModel={onSelectModel}
-                      onClose={() => setModelDropdownOpen(false)}
+                      onClose={() => {
+                        setModelDropdownOpen(false);
+                        modelTriggerRef.current?.focus({ preventScroll: true });
+                      }}
                     />
                   </div>
                 )}

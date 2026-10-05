@@ -13,7 +13,7 @@ interface ChatAreaProps {
   onContinueResponse?: (assistantMessageId: string) => void;
   onWatchMedia?: (mediaId: string, mediaType: 'movie' | 'tv' | string, title?: string) => void;
   /** Agent mode: the user answered an "Allow this command?" prompt. */
-  onAgentApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
+  onAgentApproval?: (action: AgentAction, allow: boolean, always: boolean) => void | Promise<void>;
   /** Show the running app the agent built in the docked preview panel. */
   onOpenPreview?: (url: string, title?: string) => void;
   /** Agent mode shows an extra controls row above the input, so leave more room below the messages. */
@@ -81,18 +81,38 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
     [setPinnedBoth]
   );
 
+  const stopSmoothScroll = useCallback(() => {
+    if (performance.now() >= smoothUntilRef.current) return;
+    smoothUntilRef.current = 0;
+    ownScrollTopRef.current = -1;
+    const container = scrollContainerRef.current;
+    if (container) container.scrollTo({ top: container.scrollTop, behavior: 'auto' });
+  }, []);
+
+  const pauseFollowing = useCallback(() => {
+    const container = scrollContainerRef.current;
+    const isSmooth = performance.now() < smoothUntilRef.current;
+    const awayFromBottom = container
+      ? container.scrollHeight - container.scrollTop - container.clientHeight > 1
+      : false;
+    // A wheel at the bottom of a short transcript cannot move anything. Let the
+    // resulting scroll event decide whether following should pause; only force it
+    // here when there is room to scroll or an animation needs to be interrupted.
+    if (!isSmooth && !awayFromBottom) return;
+    setPinnedBoth(false);
+    stopSmoothScroll();
+  }, [setPinnedBoth, stopSmoothScroll]);
+
   /**
    * The user is the only one who can stop the chat following.
    *
    * The intent comes from the device, not from guessing: a wheel turned up, a
-   * finger dragged down, or Page Up means "hold still". Those are exact signals,
-   * and they work while an answer is streaming — which is when someone reads back
-   * over the previous turns. A scroll that lands above where we last put the view
-   * is the fallback, for scrollbars and programmatic moves. Coming back to the
-   * bottom starts the follow again.
+   * finger dragged down, or Page Up means "hold still". Pausing also interrupts a
+   * smooth jump already in flight, so it cannot keep pulling the transcript away
+   * after the user starts reading above it.
    */
   const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (event.deltaY < 0) setPinnedBoth(false);
+    if (event.deltaY < 0) pauseFollowing();
   };
   const onTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
     touchYRef.current = event.touches[0]?.clientY ?? null;
@@ -100,11 +120,11 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
   const onTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
     const y = event.touches[0]?.clientY;
     if (y === undefined || touchYRef.current === null) return;
-    if (y > touchYRef.current + 4) setPinnedBoth(false); // finger down the screen = content up
+    if (y > touchYRef.current + 4) pauseFollowing(); // finger down the screen = content up
     touchYRef.current = y;
   };
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'PageUp' || event.key === 'ArrowUp' || event.key === 'Home') setPinnedBoth(false);
+    if (event.key === 'PageUp' || event.key === 'ArrowUp' || event.key === 'Home') pauseFollowing();
   };
 
   const handleScroll = () => {
@@ -112,7 +132,16 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
     if (!container) return;
     const top = container.scrollTop;
     if (performance.now() < smoothUntilRef.current) {
+      const userMovedUp = top < lastTopRef.current - 6;
       lastTopRef.current = top;
+      // A scrollbar drag has no wheel/touch/key event to announce intent. During
+      // a smooth return-to-latest, an upward delta is the reliable signal.
+      if (userMovedUp) {
+        smoothUntilRef.current = 0;
+        ownScrollTopRef.current = -1;
+        setPinnedBoth(false);
+        container.scrollTo({ top, behavior: 'auto' });
+      }
       return;
     }
     if (ownScrollTopRef.current >= 0 && top >= ownScrollTopRef.current - 2) {
@@ -212,8 +241,11 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
         onKeyDown={onKeyDown}
-        tabIndex={-1}
-        className="h-full overflow-y-auto w-full"
+        tabIndex={0}
+        role="region"
+        aria-label="Conversation messages"
+        aria-busy={isLoading}
+        className="h-full overflow-y-auto w-full focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400/60"
       >
         {/*
           `chat-column` makes this box a container, so the prose inside can size
@@ -280,24 +312,17 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
         </div>
       </div>
 
-      {/* Floating "Scroll to Bottom" hover zone: Centered right above input box.
-          Does not show automatically; becomes visible when mouse cursor moves over its zone */}
+      {/* Return to the newest message after the user pauses auto-follow. */}
       {!pinned && (
-        <div
-          onClick={() => scrollToBottom(true)}
-          className="group absolute bottom-20 sm:bottom-[88px] left-1/2 -translate-x-1/2 z-30 w-14 h-12 flex items-center justify-center cursor-pointer pointer-events-auto"
-        >
+        <div className="absolute bottom-20 sm:bottom-[88px] left-1/2 -translate-x-1/2 z-30 flex items-center justify-center pointer-events-none">
           <button
             type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              scrollToBottom(true);
-            }}
+            onClick={() => scrollToBottom(true)}
             title="Back to the latest"
             aria-label="Scroll to the latest message"
-            className="flex items-center justify-center w-8 h-8 rounded-full bg-white/95 dark:bg-zinc-800/95 text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white border border-zinc-200/90 dark:border-zinc-700 shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer opacity-90 group-hover:opacity-100"
+            className="flex items-center justify-center w-10 h-10 rounded-full bg-white/95 dark:bg-zinc-800/95 text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white border border-zinc-200/90 dark:border-zinc-700 shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer pointer-events-auto"
           >
-            <ArrowDown className="w-3.5 h-3.5 stroke-[2.2]" />
+            <ArrowDown className="w-4 h-4 stroke-[2.2]" />
           </button>
         </div>
       )}

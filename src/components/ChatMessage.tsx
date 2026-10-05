@@ -1,5 +1,5 @@
 import React, { useState, useRef, useSyncExternalStore } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Check, Copy, Brain, ChevronDown, ChevronRight, Pencil, RotateCcw, Play, File, Folder, ExternalLink, PanelRight } from 'lucide-react';
 import { AgentAction, Message, MessageBlock, MovieItem } from '../types';
@@ -60,7 +60,7 @@ const NARRATION_STEP_MS = 1700;
  * a sentence: two words appear, fade out, and the next two take their place,
  * looping for as long as this is the newest line. A fresh line starts over at its
  * own first words. Nothing here is text to keep: the trail holds the lines in its
- * "N line(s) written" rows, and the answer arrives on its own when the run ends.
+ * "N line(s) written" rows, while the accepted answer streams below the work row.
  */
 const NarrationLine: React.FC<{ text: string; lineId?: string }> = ({ text, lineId }) => {
   /** The line in twos: "Ab sab files banata hoon" → ["Ab sab", "files banata", "hoon"]. */
@@ -172,6 +172,7 @@ const AgentWorkRow: React.FC<{
         type="button"
         onClick={toggle}
         aria-expanded={open}
+        aria-controls={`work-details-${messageId}`}
         title={open ? 'Hide what this turn did' : 'Show what this turn did'}
         className="group/work inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5 max-w-full text-left cursor-pointer -mx-1.5 px-1.5 py-1 rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
@@ -219,7 +220,7 @@ const AgentWorkRow: React.FC<{
         where the work is, and a line under the label read as a caption for the
         whole turn instead of the thing being written right now.
       */}
-      <div hidden={!open} className="mt-2 ml-0.5 pl-3 border-l border-zinc-200 dark:border-zinc-800">
+      <div id={`work-details-${messageId}`} hidden={!open} className="mt-2 ml-0.5 pl-3 border-l border-zinc-200 dark:border-zinc-800">
         {children}
         {live && narration ? <NarrationLine text={narration} lineId={narrationId} /> : null}
       </div>
@@ -234,7 +235,7 @@ interface ChatMessageProps {
   onContinueResponse?: (assistantMessageId: string) => void;
   onWatchMedia?: (mediaId: string, mediaType: 'movie' | 'tv' | string, title?: string) => void;
   /** Agent mode: the user answered an "Allow this command?" prompt. */
-  onAgentApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
+  onAgentApproval?: (action: AgentAction, allow: boolean, always: boolean) => void | Promise<void>;
   /** Show the running app the agent built in the docked preview panel. */
   onOpenPreview?: (url: string, title?: string) => void;
 }
@@ -258,6 +259,14 @@ const looksLikeProse = (value: string): boolean => {
   return sentences.length >= 2;
 };
 
+/** Keep ReactMarkdown's protocol filtering, with only the app's safe internal
+ * watch links and raster data-image URLs added back to the allowlist. */
+const safeMarkdownUrl = (uri: string): string => {
+  if (/^watch:\/\/(?:movie|tv)\/\d+(?:[?#/][^\s]*)?$/i.test(uri)) return uri;
+  if (/^data:image\/(?:png|gif|jpe?g|webp);base64,/i.test(uri)) return uri;
+  return defaultUrlTransform(uri);
+};
+
 /**
  * One markdown block, parsed at most thirty times a second while it is the live
  * one. In an agent transcript the answer can be many blocks long, and only the
@@ -267,7 +276,7 @@ const looksLikeProse = (value: string): boolean => {
 const MarkdownBlock: React.FC<{ content: string; streaming?: boolean; components: any }> = ({ content, streaming, components }) => {
   const shown = useThrottledValue(content, 32, Boolean(streaming));
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={(uri) => uri}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={safeMarkdownUrl}>
       {shown}
     </ReactMarkdown>
   );
@@ -305,14 +314,18 @@ const TrailThinkingEntry: React.FC<{
   active?: boolean;
 }> = ({ id, content, duration, active }) => {
   const open = usePanelOpen(trailThoughtStore, id);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const close = React.useCallback(() => trailThoughtStore.close(), []);
+  useDismissOnOutside(rootRef, open, close);
   const toggle = () => (open ? trailThoughtStore.close() : trailThoughtStore.set(id));
 
   return (
-    <div className="my-1">
+    <div ref={rootRef} className="my-1">
       <button
         type="button"
         onClick={toggle}
         aria-expanded={open}
+        aria-controls={`trail-thought-${id}`}
         className="group/think inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 rounded text-[13px] leading-6 text-left cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
         {/* No brain here: inside the trail every row is a plain line, and the
@@ -331,7 +344,7 @@ const TrailThinkingEntry: React.FC<{
         />
       </button>
       {open && content.trim() ? (
-        <div className="panel-scroll mt-1 max-h-56 overflow-y-auto overscroll-y-contain pl-3 py-0.5 border-l border-zinc-200 dark:border-zinc-800 text-[13px] leading-[1.65] text-zinc-500 dark:text-zinc-400 font-sans whitespace-pre-wrap select-text">
+        <div id={`trail-thought-${id}`} className="panel-scroll mt-1 max-h-56 overflow-y-auto overscroll-y-contain pl-3 py-0.5 border-l border-zinc-200 dark:border-zinc-800 text-[13px] leading-[1.65] text-zinc-500 dark:text-zinc-400 font-sans whitespace-pre-wrap select-text">
           {content}
         </div>
       ) : null}
@@ -431,6 +444,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
         type="button"
         onClick={toggle}
         aria-expanded={isExpanded}
+        aria-controls={`thinking-content-${id}`}
         className="inline-flex items-center gap-1.5 py-1 text-xs font-semibold cursor-pointer select-none group/think transition-colors"
       >
         <Brain
@@ -458,7 +472,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
       {/* The reasoning, in a small box of its own — quiet, plain, and never taller
           than a short paragraph, so reading it stays optional. */}
       {isExpanded && (
-        <div className="relative mt-1 animate-in fade-in duration-150">
+        <div id={`thinking-content-${id}`} className="relative mt-1 animate-in fade-in duration-150">
           <div
             ref={thinkBoxRef}
             onScroll={handleThinkBoxScroll}
@@ -1037,10 +1051,9 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
    * What a finished agent turn shows, and what it keeps behind its one line.
    *
    * Every action of the run — every read, edit, command, search, note — folds
-   * into the work row, along with the reasoning and the lines the agent said
-   * along the way. What stays on screen is the answer the run ended with — and
-   * nothing else, at any point: while the run is still going, the answer has not
-   * been written yet, and everything arriving in the meantime is work in progress.
+   * into the work row, along with the reasoning and work-round narration. The
+   * server marks a response as final only after follow-up checks are ruled out;
+   * that accepted answer streams below the row while the turn is still live.
    */
   const textBlocks = blocks.filter((b) => b.type === 'text');
   /**
@@ -1057,28 +1070,27 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
   })();
   const inFold = (block: MessageBlock) => !(previewAction && block.type === 'action' && block.action.id === previewAction.id);
   /**
-   * A run that is still going shows none of its own words in the transcript.
-   *
-   * The text between two actions is narration, and narration that appears for a
-   * moment and then vanishes under the next tool call is the flicker this removes:
-   * a line written after the last action looks exactly like the answer until the
-   * run carries on, and a working run usually does. Every line the run writes while
-   * it works now goes to the working row instead (see NarrationLine), where the work
-   * is, and the answer appears the moment the run ends — which is when it is one.
+   * Work-round prose stays in the trail rather than briefly posing as the answer.
+   * The server only marks a response final after it knows the run will not continue;
+   * that one block is shown here as it streams, directly below the work row.
    */
   const spokenText = textBlocks.filter((b) => !b.notice);
+  const finalAnswer = spokenText.filter((b) => b.finalAnswer);
+  const latestFinalAnswerId = finalAnswer[finalAnswer.length - 1]?.id;
   const visibleText = liveTurn
-    ? textBlocks.filter((b) => b.notice)
-    : spokenText.length
-      ? spokenText.slice(-1)
-      : /* a turn that never spoke: whatever it has is what it has */ textBlocks.slice(-1);
+    ? textBlocks.filter((b) => b.notice || (b.finalAnswer && b.id === latestFinalAnswerId))
+    : finalAnswer.length
+      ? finalAnswer.slice(-1)
+      : spokenText.length
+        ? spokenText.slice(-1)
+        : /* a turn that never spoke: whatever it has is what it has */ textBlocks.slice(-1);
   const visibleTextIds = new Set(visibleText.map((b) => b.id));
   const foldedText = textBlocks.filter((b) => !visibleTextIds.has(b.id));
 
   /** The newest line the agent said while working — the line under the trail rows. */
   const liveNarration = (() => {
     if (!liveTurn) return null;
-    const spoken = textBlocks.filter((b) => !visibleTextIds.has(b.id) && !b.notice && b.content.trim());
+    const spoken = textBlocks.filter((b) => !visibleTextIds.has(b.id) && !b.notice && !b.finalAnswer && b.content.trim());
     return spoken.length ? spoken[spoken.length - 1] : null;
   })();
   const actionCount = blocks.filter((b) => b.type === 'action' && inFold(b)).length;
@@ -1397,7 +1409,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={markdownComponents}
-              urlTransform={(uri) => uri}
+urlTransform={safeMarkdownUrl}
             >
               {(() => {
                 let text = streamedContent;

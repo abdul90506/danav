@@ -23,6 +23,27 @@
   }
 }
 
+/* Sidebar actions should not shift chat titles on hover, and must stay visible
+   on touch devices where the hover-only affordance cannot be reached. */
+.sidebar-actions {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease-out;
+}
+
+.group:hover .sidebar-actions,
+.group:focus-within .sidebar-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .sidebar-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .safe-bottom {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }

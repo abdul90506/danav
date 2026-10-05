@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { useEscapeToClose } from '../utils/useDismissOnOutside';
+import React, { useRef, useState } from 'react';
+import { useEscapeToClose, useFocusTrap } from '../utils/useDismissOnOutside';
 import {
   X,
   Sun,
@@ -24,7 +24,7 @@ import {
   RotateCcw,
   Loader2,
 } from 'lucide-react';
-import { ApiType, Conversation, Model, Provider, Theme } from '../types';
+import { AgentSummaryModelSelection, ApiType, Conversation, Model, Provider, Theme } from '../types';
 import {
   fetchConversationsBackup,
   fetchProviderModels,
@@ -40,6 +40,8 @@ interface SettingsModalProps {
   onThemeChange: (theme: Theme) => void;
   providers: Provider[];
   onSaveProviders: (providers: Provider[]) => Promise<boolean> | boolean | void;
+  agentSummaryModel: AgentSummaryModelSelection | null;
+  onSaveAgentSummaryModel: (selection: AgentSummaryModelSelection | null) => Promise<boolean> | boolean;
   /** The chats this browser is showing, for the export and the Data tab counts. */
   conversations: Conversation[];
   /** Re-read the server's store after a restore, so the UI shows what came back. */
@@ -53,14 +55,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onThemeChange,
   providers,
   onSaveProviders,
+  agentSummaryModel,
+  onSaveAgentSummaryModel,
   conversations,
   onConversationsRestored,
 }) => {
-  const [activeTab, setActiveTab] = useState<'appearance' | 'providers' | 'data'>('appearance');
+  const [activeTab, setActiveTab] = useState<'appearance' | 'providers' | 'agent' | 'data'>('appearance');
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, isOpen);
 
   // Escape closes Settings — through the shared rule, so the key never also stops
-  // a running agent turn.
-  useEscapeToClose(onClose);
+  // a running agent turn. This must only register while the modal is actually open.
+  useEscapeToClose(onClose, isOpen);
 
   // Provider Form State
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
@@ -70,9 +76,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   // Form Fields
   const [formName, setFormName] = useState('');
   const [formBaseUrl, setFormBaseUrl] = useState('');
-  const [formApiKey, setFormApiKey] = useState('');
-  const [formHasStoredApiKey, setFormHasStoredApiKey] = useState(false);
-  const [clearSavedApiKey, setClearSavedApiKey] = useState(false);
+  const [formApiKeys, setFormApiKeys] = useState<string[]>(['']);
+  const [formSavedApiKeyCount, setFormSavedApiKeyCount] = useState(0);
+  const [clearSavedApiKeys, setClearSavedApiKeys] = useState(false);
   const [savingProvider, setSavingProvider] = useState(false);
   const [providerSaveError, setProviderSaveError] = useState('');
   const [formApiType, setFormApiType] = useState<ApiType>('openai');
@@ -92,6 +98,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }>({ loading: false });
 
   const [fetchingStatus, setFetchingStatus] = useState<{
+    loading: boolean;
+    success?: boolean;
+    message?: string;
+  }>({ loading: false });
+  const [summarySaveStatus, setSummarySaveStatus] = useState<{
     loading: boolean;
     success?: boolean;
     message?: string;
@@ -172,16 +183,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     );
   };
 
+  const handleSummaryModelChange = async (event: React.ChangeEvent<HTMLSelectElement>) => {
+    const raw = event.currentTarget.value;
+    let selection: AgentSummaryModelSelection | null = null;
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.providerId === 'string' && typeof parsed?.modelId === 'string') {
+          selection = { providerId: parsed.providerId, modelId: parsed.modelId };
+        }
+      } catch {
+        setSummarySaveStatus({ loading: false, success: false, message: 'That model choice was not valid.' });
+        return;
+      }
+    }
+    setSummarySaveStatus({ loading: true });
+    try {
+      const saved = await onSaveAgentSummaryModel(selection);
+      setSummarySaveStatus({
+        loading: false,
+        success: saved,
+        message: saved ? 'Saved.' : 'Could not save this setting. Check the server connection and try again.',
+      });
+    } catch {
+      setSummarySaveStatus({ loading: false, success: false, message: 'Could not save this setting. Check the server connection and try again.' });
+    }
+  };
+
   if (!isOpen) return null;
+
+  const summaryModelOptions = providers.flatMap((provider) =>
+    provider.enabled !== false && provider.apiType !== 'mock' && provider.baseUrl.trim()
+      ? (provider.models || []).map((model) => ({
+          value: JSON.stringify({ providerId: provider.id, modelId: model.id }),
+          label: `${model.name || model.id} · ${provider.name}`,
+        }))
+      : []
+  );
+  const requestedSummaryValue = agentSummaryModel ? JSON.stringify(agentSummaryModel) : '';
+  const selectedSummaryValue = summaryModelOptions.some((option) => option.value === requestedSummaryValue)
+    ? requestedSummaryValue
+    : '';
 
   const startAddNewProvider = () => {
     setIsAddingNew(true);
     setEditingProviderId(null);
     setFormName('');
     setFormBaseUrl('https://vyceai.com/v1');
-    setFormApiKey('');
-    setFormHasStoredApiKey(false);
-    setClearSavedApiKey(false);
+    setFormApiKeys(['']);
+    setFormSavedApiKeyCount(0);
+    setClearSavedApiKeys(false);
     setShowApiKey(false);
     setFormApiType('openai');
     setFormModels([]);
@@ -199,11 +250,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsAddingNew(false);
     setFormName(p.name);
     setFormBaseUrl(p.baseUrl);
-    // Server keys are never returned to the browser. An empty field keeps the
-    // saved key; entering a value replaces it, and a separate control removes it.
-    setFormApiKey('');
-    setFormHasStoredApiKey(Boolean(p.apiKeyConfigured || p.apiKey));
-    setClearSavedApiKey(false);
+    // Saved values never leave the server; new keys are added as blank form rows.
+    setFormApiKeys(['']);
+    setFormSavedApiKeyCount(p.apiKeyCount ?? (p.apiKeyConfigured || p.apiKey ? 1 : 0));
+    setClearSavedApiKeys(false);
     setShowApiKey(false);
     setFormApiType(p.apiType);
     setFormModels(p.models || []);
@@ -225,12 +275,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setProviderSaveError('');
   };
 
+  const enteredApiKeys = () => [...new Set(formApiKeys.map((key) => key.trim()).filter(Boolean))];
+
   const handleTestConnection = async () => {
     setTestingStatus({ loading: true });
     const result = await testProviderConnection({
       id: editingProviderId || undefined,
       baseUrl: formBaseUrl,
-      apiKey: formApiKey,
+      apiKeys: enteredApiKeys(),
+      clearApiKeys: clearSavedApiKeys,
       apiType: formApiType,
     });
     setTestingStatus({
@@ -246,7 +299,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const result = await fetchProviderModels({
       id: providerId,
       baseUrl: formBaseUrl,
-      apiKey: formApiKey,
+      apiKeys: enteredApiKeys(),
+      clearApiKeys: clearSavedApiKeys,
       apiType: formApiType,
     });
 
@@ -323,7 +377,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         id: providerId,
         name: formName.trim(),
         baseUrl: formBaseUrl.trim(),
-        apiKey: formApiKey.trim(),
+        apiKeyAdditions: enteredApiKeys(),
         apiType: formApiType,
         isCustom: true,
         enabled: true,
@@ -339,10 +393,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           ? buildEditedProvider(p, {
               name: formName,
               baseUrl: formBaseUrl,
-              apiKey: formApiKey,
+              apiKeys: enteredApiKeys(),
               apiType: formApiType,
               models: formModels,
-              clearSavedApiKey,
+              clearSavedApiKeys,
             })
           : p
       );
@@ -397,21 +451,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-900/40 backdrop-blur-sm animate-in fade-in duration-150"
-      onClick={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
     >
       <div
+        ref={dialogRef}
         className="w-full max-w-2xl bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 flex flex-col overflow-hidden max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-dialog-title"
+        tabIndex={-1}
       >
         {/* Modal Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200/80 dark:border-zinc-800">
           <div className="flex items-center gap-2">
-            <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+            <h2 id="settings-dialog-title" className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
               Settings
             </h2>
           </div>
           <button
+            type="button"
             onClick={onClose}
+            aria-label="Close settings"
+            title="Close settings"
             className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
           >
             <X className="w-5 h-5" />
@@ -421,6 +485,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Tabs */}
         <div className="flex px-6 pt-3 border-b border-zinc-200/60 dark:border-zinc-800 gap-4 text-xs font-medium">
           <button
+            type="button"
+            data-dialog-initial-focus
             onClick={() => {
               setActiveTab('appearance');
               cancelProviderForm();
@@ -442,6 +508,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             Providers & Models
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab('agent');
+              cancelProviderForm();
+            }}
+            className={`pb-2.5 transition-colors border-b-2 ${
+              activeTab === 'agent'
+                ? 'border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100 font-semibold'
+                : 'border-transparent text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300'
+            }`}
+          >
+            Agent
           </button>
           <button
             onClick={() => {
@@ -553,9 +632,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           <div className="text-[11px] text-zinc-400 truncate mt-0.5">
                             {prov.baseUrl}
                           </div>
-                          <div className="text-[11px] text-zinc-500 mt-1 flex items-center gap-1">
+                          <div className="text-[11px] text-zinc-500 mt-1 flex items-center gap-1.5">
                             <Layers className="w-3 h-3 opacity-60" />
-                            <span>{prov.models.length} model(s) selected</span>
+                            <span>{prov.models.length} model(s)</span>
+                            {(prov.apiKeyCount ?? (prov.apiKeyConfigured ? 1 : 0)) > 0 && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <Key className="w-3 h-3 opacity-60" />
+                                <span>{prov.apiKeyCount ?? 1} saved key{(prov.apiKeyCount ?? 1) === 1 ? '' : 's'}</span>
+                              </>
+                            )}
                           </div>
                         </div>
 
@@ -650,53 +736,73 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                      API Key / Token
-                    </label>
-                    <div className="relative">
-                      <Key className="absolute left-2.5 top-2 w-3.5 h-3.5 text-zinc-400" />
-                      <input
-                        type={showApiKey ? 'text' : 'password'}
-                        value={formApiKey}
-                        onChange={(e) => {
-                          setFormApiKey(e.target.value);
-                          setClearSavedApiKey(false);
-                        }}
-                        placeholder={formHasStoredApiKey ? 'Saved securely — enter a new key to replace' : 'sk-...'}
-                        className="w-full h-8 pl-8 pr-8 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-400 text-zinc-900 dark:text-zinc-100 font-mono"
-                      />
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                        API Keys / Tokens
+                      </label>
                       <button
                         type="button"
-                        onClick={() => setShowApiKey(!showApiKey)}
-                        className="absolute right-2.5 top-2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
+                        onClick={() => setShowApiKey((value) => !value)}
+                        className="inline-flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+                        aria-label={showApiKey ? 'Hide API keys' : 'Show API keys'}
                       >
-                        {showApiKey ? (
-                          <EyeOff className="w-3.5 h-3.5" />
-                        ) : (
-                          <Eye className="w-3.5 h-3.5" />
-                        )}
+                        {showApiKey ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                        {showApiKey ? 'Hide' : 'Show'}
                       </button>
                     </div>
-                    {formHasStoredApiKey && (
-                      <div className="mt-1 flex items-start justify-between gap-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+                    {formSavedApiKeyCount > 0 && (
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[10px] text-zinc-500 dark:text-zinc-400">
                         <span>
-                          {clearSavedApiKey
-                            ? 'The saved key will be removed when you save.'
-                            : formApiKey
-                              ? 'The new key will replace the one stored on this server.'
-                              : 'A key is stored securely on this server. Leave blank to keep it.'}
+                          {clearSavedApiKeys
+                            ? `${formSavedApiKeyCount} saved key${formSavedApiKeyCount === 1 ? '' : 's'} will be removed when you save.`
+                            : `${formSavedApiKeyCount} key${formSavedApiKeyCount === 1 ? '' : 's'} stored securely. New keys are added to this list.`}
                         </span>
-                        {!formApiKey && (
-                          <button
-                            type="button"
-                            onClick={() => setClearSavedApiKey((value) => !value)}
-                            className="shrink-0 underline hover:text-zinc-800 dark:hover:text-zinc-200"
-                          >
-                            {clearSavedApiKey ? 'Undo' : 'Remove saved key'}
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => setClearSavedApiKeys((value) => !value)}
+                          className="shrink-0 underline hover:text-zinc-800 dark:hover:text-zinc-200"
+                        >
+                          {clearSavedApiKeys ? 'Undo' : 'Remove all saved keys'}
+                        </button>
                       </div>
                     )}
+                    <div className="space-y-1.5">
+                      {formApiKeys.map((key, index) => (
+                        <div key={index} className="flex items-center gap-1.5">
+                          <div className="relative min-w-0 flex-1">
+                            {index === 0 && <Key className="absolute left-2.5 top-2 w-3.5 h-3.5 text-zinc-400" />}
+                            <input
+                              type={showApiKey ? 'text' : 'password'}
+                              value={key}
+                              autoComplete="new-password"
+                              spellCheck={false}
+                              onChange={(e) => setFormApiKeys((prev) => prev.map((item, at) => at === index ? e.target.value : item))}
+                              placeholder={`New API key ${index + 1}`}
+                              className={`w-full h-8 ${index === 0 ? 'pl-8' : 'pl-2.5'} pr-2.5 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-400 text-zinc-900 dark:text-zinc-100 font-mono`}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setFormApiKeys((prev) => prev.filter((_, at) => at !== index))}
+                            className="p-1.5 rounded-md text-zinc-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40"
+                            aria-label={`Remove new API key ${index + 1}`}
+                            title="Remove this unsaved key"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-1 flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setFormApiKeys((prev) => [...prev, ''])}
+                        className="inline-flex items-center gap-1 text-[10px] text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                      >
+                        <Plus className="w-3 h-3" /> Add another key
+                      </button>
+                      <span className="text-[10px] text-zinc-400">Keys stay private and are tried in order.</span>
+                    </div>
                   </div>
 
                   {/* Actions: Test Connection & Fetch Models */}
@@ -940,7 +1046,55 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               )}
             </div>
           )}
-          {/* TAB 3: CHAT DATA */}
+          {/* TAB 3: AGENT MEMORY */}
+          {activeTab === 'agent' && (
+            <div className="space-y-5">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Task-step memory</h3>
+                <p className="text-xs text-zinc-500 mt-1">
+                  Danav keeps short notes about meaningful progress so long tasks can continue without replaying old work.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3">
+                <div>
+                  <label htmlFor="agent-summary-model" className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">
+                    Background summary model
+                  </label>
+                  <p className="text-xs text-zinc-500 mb-3">
+                    Choose a provider/model independently from the chat. Only compact, redacted step summaries, findings,
+                    file paths and check results are sent—not the full chat or file contents. Notes stay in this server's
+                    private run journal; if the provider is unavailable, local checkpoints are kept.
+                  </p>
+                  <select
+                    id="agent-summary-model"
+                    value={selectedSummaryValue}
+                    onChange={handleSummaryModelChange}
+                    disabled={summarySaveStatus.loading}
+                    className="w-full h-10 px-3 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-sm text-zinc-800 dark:text-zinc-200 disabled:opacity-60"
+                  >
+                    <option value="">Use the model running this task (default)</option>
+                    {summaryModelOptions.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                  {!summaryModelOptions.length && (
+                    <p className="text-xs text-amber-700 dark:text-amber-300 mt-2">
+                      Add an enabled provider with a model to choose a separate summary model.
+                    </p>
+                  )}
+                </div>
+                {(summarySaveStatus.message || summarySaveStatus.loading) && (
+                  <div className={`flex items-center gap-1.5 text-xs ${summarySaveStatus.success ? 'text-emerald-600 dark:text-emerald-400' : summarySaveStatus.loading ? 'text-zinc-500' : 'text-rose-600 dark:text-rose-400'}`}>
+                    {summarySaveStatus.loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : summarySaveStatus.success ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+                    <span>{summarySaveStatus.loading ? 'Saving…' : summarySaveStatus.message}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 4: CHAT DATA */}
           {activeTab === 'data' && (
             <div className="space-y-5">
               <div>

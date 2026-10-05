@@ -1,16 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Check, Cloud, ExternalLink, Laptop, Loader2, X } from 'lucide-react';
 import type { AgentConfig, AgentWorkspace } from '../types';
 import { createWorkspace, saveNovitaKey } from '../services/agentApi';
-import { useEscapeToClose } from '../utils/useDismissOnOutside';
+import { useEscapeToClose, useFocusTrap } from '../utils/useDismissOnOutside';
 
 interface WorkspaceDialogProps {
   isOpen: boolean;
   onClose: () => void;
   config: AgentConfig | null;
   /** Called after a workspace was created (and the Novita key, if one was entered, saved). */
-  onCreated: (workspace: AgentWorkspace) => void;
-  onConfigChanged: () => void;
+  onCreated: (workspace: AgentWorkspace) => void | Promise<void>;
+  onConfigChanged: () => void | Promise<unknown>;
 }
 
 const field =
@@ -25,6 +25,8 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
   const [apiKey, setApiKey] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, isOpen);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -58,7 +60,7 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
         if (!apiKey.trim()) throw new Error('Paste your Novita API key first.');
         await saveNovitaKey(apiKey.trim());
         setApiKey('');
-        onConfigChanged();
+        await onConfigChanged();
       }
       const ws = await createWorkspace({
         name: name.trim() || undefined,
@@ -66,7 +68,7 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
         path: kind === 'local' && folder.trim() ? folder.trim() : undefined,
         autoRun: kind === 'local' ? !askFirst : true,
       });
-      onCreated(ws);
+      await onCreated(ws);
     } catch (e: any) {
       setError(e?.message || 'Could not create the workspace.');
     } finally {
@@ -78,6 +80,7 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
     <button
       type="button"
       onClick={() => setKind(value)}
+      aria-pressed={kind === value}
       className={`flex-1 text-left p-3 rounded-xl border transition-colors ${
         kind === value
           ? 'border-zinc-900 dark:border-zinc-100 bg-zinc-50 dark:bg-zinc-800/60'
@@ -95,24 +98,33 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-900/40 backdrop-blur-sm animate-in fade-in duration-150" onMouseDown={() => !busy && onClose()}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-900/40 backdrop-blur-sm animate-in fade-in duration-150"
+      onClick={(event) => {
+        if (!busy && event.target === event.currentTarget) onClose();
+      }}
+    >
       <div
-        className="w-full max-w-md bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden"
-        onMouseDown={(e) => e.stopPropagation()}
+        ref={dialogRef}
+        className="w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800"
+        onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label="New workspace"
+        aria-modal="true"
+        aria-labelledby="workspace-dialog-title"
+        aria-busy={busy}
+        tabIndex={-1}
       >
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-200/80 dark:border-zinc-800">
-          <h2 className="text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">New workspace</h2>
-          <button onClick={onClose} disabled={busy} className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+          <h2 id="workspace-dialog-title" className="text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">New workspace</h2>
+          <button type="button" onClick={onClose} disabled={busy} aria-label="Close workspace dialog" title="Close" className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         <div className="p-5 space-y-4">
           <div>
-            <label className="block text-[12px] font-medium text-zinc-600 dark:text-zinc-300 mb-1.5">Name</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="my-project" className={field} autoFocus data-testid="ws-name" />
+            <label htmlFor="ws-name" className="block text-[12px] font-medium text-zinc-600 dark:text-zinc-300 mb-1.5">Name</label>
+            <input id="ws-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-project" className={field} autoFocus data-testid="ws-name" />
           </div>
 
           <div>
@@ -131,8 +143,9 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
                 </span>
               ) : (
                 <>
-                  <label className="block text-[12px] font-medium text-zinc-600 dark:text-zinc-300 mb-1.5">Novita API key</label>
+                  <label htmlFor="novita-key" className="block text-[12px] font-medium text-zinc-600 dark:text-zinc-300 mb-1.5">Novita API key</label>
                   <input
+                    id="novita-key"
                     type="password"
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
@@ -155,10 +168,10 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
           {kind === 'local' && (
             <div className="space-y-3">
               <div>
-                <label className="block text-[12px] font-medium text-zinc-600 dark:text-zinc-300 mb-1.5">
+                <label htmlFor="ws-folder" className="block text-[12px] font-medium text-zinc-600 dark:text-zinc-300 mb-1.5">
                   Folder <span className="font-normal text-zinc-400">(optional)</span>
                 </label>
-                <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder={`${defaultDir}/${name.trim() ? name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-') : 'my-project'}`} className={`${field} font-mono text-[12px]`} data-testid="ws-folder" />
+                <input id="ws-folder" value={folder} onChange={(e) => setFolder(e.target.value)} placeholder={`${defaultDir}/${name.trim() ? name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-') : 'my-project'}`} className={`${field} font-mono text-[12px]`} data-testid="ws-folder" />
                 <p className="mt-1.5 text-[12px] text-zinc-500 dark:text-zinc-400">
                   {config?.local.allowAnyPath
                     ? 'Any absolute folder works. Leave empty to create a new one.'
@@ -176,19 +189,21 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
           )}
 
           {error && (
-            <div className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 text-[12px] text-rose-700 dark:text-rose-300" data-testid="ws-error">
+            <div role="alert" className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 text-[12px] text-rose-700 dark:text-rose-300" data-testid="ws-error">
               {error}
             </div>
           )}
         </div>
 
         <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900">
-          <button onClick={onClose} disabled={busy} className="h-8 px-3 rounded-lg text-[12px] text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+          <button type="button" onClick={onClose} disabled={busy} className="h-8 px-3 rounded-lg text-[12px] text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800">
             Cancel
           </button>
           <button
+            type="button"
             onClick={submit}
             disabled={busy}
+            aria-disabled={busy}
             className="h-8 px-4 rounded-lg text-[12px] font-medium bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 inline-flex items-center gap-1.5 disabled:opacity-70"
             data-testid="ws-create"
           >

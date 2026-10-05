@@ -51,6 +51,7 @@ export class SmoothStreamer {
   private queue: string[] = [];
   private onFlush: (flushedText: string) => void;
   private onDone?: () => void;
+  private finishWaiters: Array<() => void> = [];
   private frameId: number | null = null;
   private isEnded = false;
   private lastTime = 0;
@@ -91,7 +92,7 @@ export class SmoothStreamer {
       this.rate = MIN_RATE;
       this.budget = 0;
       if (this.isEnded) {
-        this.onDone?.();
+        this.complete();
         return;
       }
       return; // idle — the loop restarts on the next push()
@@ -114,18 +115,23 @@ export class SmoothStreamer {
     this.onFlush(batch);
 
     if (this.queue.length === 0 && this.isEnded) {
-      this.onDone?.();
+      this.complete();
       return;
     }
     this.frameId = schedule(this.tick);
   };
 
-  public finish() {
+  /** Mark the stream complete and resolve once everything already queued is visible. */
+  public finish(): Promise<void> {
     this.isEnded = true;
+    const drained = new Promise<void>((resolve) => this.finishWaiters.push(resolve));
     if (this.queue.length === 0) {
       this.stop();
-      this.onDone?.();
+      this.complete();
+    } else {
+      this.ensureLoop();
     }
+    return drained;
   }
 
   public flushImmediate() {
@@ -135,7 +141,12 @@ export class SmoothStreamer {
       this.onFlush(remaining);
     }
     this.stop();
+    this.complete();
+  }
+
+  private complete() {
     this.onDone?.();
+    for (const resolve of this.finishWaiters.splice(0)) resolve();
   }
 
   public stop() {

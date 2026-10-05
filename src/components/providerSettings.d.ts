@@ -6,8 +6,8 @@ export function buildEditedProvider(
     name: string;
     baseUrl: string;
     apiType: ApiType;
-    apiKey: string;
+    apiKeys: string[];
     models: Model[];
-    clearSavedApiKey?: boolean;
+    clearSavedApiKeys?: boolean;
   },
 ): Provider;

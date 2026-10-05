@@ -27,6 +27,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
   const [view, setView] = useState<'files' | 'memory'>('files');
   const [notes, setNotes] = useState<MemoryNote[]>([]);
   const [runs, setRuns] = useState<MemoryRun[]>([]);
+  const [memoryBusy, setMemoryBusy] = useState<string | null>(null);
   const openRef = useRef(open);
   openRef.current = open;
 
@@ -117,6 +118,34 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
     }
   };
 
+  const forgetNote = async (noteId: string) => {
+    if (memoryBusy) return;
+    setMemoryBusy(`note:${noteId}`);
+    setError('');
+    try {
+      const memory = await deleteMemoryNote(workspace.id, noteId);
+      setNotes(memory.notes);
+    } catch (e: any) {
+      setError(e?.message || 'Could not forget that note.');
+    } finally {
+      setMemoryBusy(null);
+    }
+  };
+
+  const forgetAllNotes = async () => {
+    if (memoryBusy) return;
+    setMemoryBusy('all');
+    setError('');
+    try {
+      const memory = await clearMemory(workspace.id);
+      setNotes(memory.notes);
+    } catch (e: any) {
+      setError(e?.message || 'Could not forget the workspace notes.');
+    } finally {
+      setMemoryBusy(null);
+    }
+  };
+
   const renderDir = (dir: string, depth: number): React.ReactNode => {
     const entries = tree[dir];
     if (!entries) return null;
@@ -132,6 +161,8 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
           <button
             type="button"
             onClick={() => (isDir ? toggleDir(e.path) : openFile(e.path))}
+            aria-expanded={isDir ? expanded : undefined}
+            aria-label={isDir ? `${expanded ? 'Collapse' : 'Expand'} folder ${name}` : `Open file ${name}`}
             className="w-full flex items-center gap-1.5 pr-3 py-[3px] text-left text-[12px] hover:bg-zinc-100 dark:hover:bg-zinc-800/70 rounded-md"
             style={{ paddingLeft: 10 + depth * 14 }}
           >
@@ -164,10 +195,12 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
     <aside
       className="fixed lg:static inset-y-0 right-0 z-40 w-[min(92vw,400px)] lg:w-[380px] shrink-0 flex flex-col h-full bg-white dark:bg-zinc-950 border-l border-zinc-200 dark:border-zinc-800 shadow-xl lg:shadow-none animate-in slide-in-from-right-4 duration-150"
       data-testid="workspace-panel"
+      aria-label={`${workspace.name || 'Workspace'} browser`}
+      aria-busy={loading || fileLoading || Boolean(memoryBusy)}
     >
       <div className="flex items-center gap-2 px-3 py-2.5 border-b border-zinc-200/80 dark:border-zinc-800">
         {file ? (
-          <button onClick={() => setFile(null)} className="p-1 rounded-md text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800" title="Back to files">
+          <button type="button" onClick={() => setFile(null)} aria-label="Back to files" className="p-1 rounded-md text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800" title="Back to files">
             <ArrowLeft className="w-4 h-4" />
           </button>
         ) : workspace.kind === 'sandbox' ? (
@@ -183,10 +216,13 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
           <div className="text-[11px] text-zinc-400 truncate">{file ? `${file.size} bytes${file.truncated ? ' · truncated' : ''}` : workspace.root}</div>
         </div>
         <button
+          type="button"
           onClick={() => {
             setFile(null);
             setView((v) => (v === 'memory' ? 'files' : 'memory'));
           }}
+          aria-label={view === 'memory' ? 'Show workspace files' : 'Show workspace memory'}
+          aria-pressed={view === 'memory'}
           className={`relative p-1.5 rounded-md hover:bg-zinc-100 dark:hover:bg-zinc-800 ${view === 'memory' ? 'text-zinc-900 dark:text-zinc-100 bg-zinc-100 dark:bg-zinc-800' : 'text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200'}`}
           title="What the agent remembers about this workspace"
           data-testid="memory-toggle"
@@ -194,15 +230,15 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
           <Brain className="w-3.5 h-3.5" />
           {notes.length > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-[3px] rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-[10px] leading-[14px] text-center font-medium">{notes.length}</span>}
         </button>
-        <button onClick={refresh} className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800" title="Refresh">
+        <button type="button" onClick={() => void refresh()} disabled={loading} aria-label="Refresh workspace" className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50" title="Refresh">
           {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
         </button>
-        <button onClick={onClose} className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800" title="Close">
+        <button type="button" onClick={onClose} aria-label="Close workspace browser" className="p-1.5 rounded-md text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800" title="Close">
           <X className="w-4 h-4" />
         </button>
       </div>
 
-      {error && <div className="mx-3 mt-2 p-2 rounded-lg text-[12px] bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300">{error}</div>}
+      {error && <div role="alert" className="mx-3 mt-2 p-2 rounded-lg text-[12px] bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300">{error}</div>}
 
       <div className="flex-1 min-h-0 overflow-auto panel-scroll">
         {view === 'memory' && !file ? (
@@ -222,11 +258,15 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
                     {!!n.tags?.length && <div className="text-[10px] text-zinc-400 mt-1">{n.tags.join(' · ')}</div>}
                   </div>
                   <button
-                    onClick={async () => setNotes((await deleteMemoryNote(workspace.id, n.id)).notes)}
-                    className="shrink-0 p-1 rounded text-zinc-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 touch-reveal focus:opacity-100"
-                    title="Forget this"
+                    type="button"
+                    onClick={() => void forgetNote(n.id)}
+                    disabled={Boolean(memoryBusy)}
+                    aria-busy={memoryBusy === `note:${n.id}`}
+                    className="shrink-0 p-1 rounded text-zinc-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 touch-reveal focus:opacity-100 disabled:opacity-50"
+                    aria-label={memoryBusy === `note:${n.id}` ? 'Forgetting note' : `Forget note: ${n.text.slice(0, 60)}`}
+                    title={memoryBusy === `note:${n.id}` ? 'Forgetting…' : 'Forget this'}
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    {memoryBusy === `note:${n.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                   </button>
                 </li>
               ))}
@@ -250,8 +290,8 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({ workspace, refre
               </ul>
             )}
             {notes.length > 1 && (
-              <button onClick={async () => setNotes((await clearMemory(workspace.id)).notes)} className="mt-3 text-[12px] text-zinc-400 hover:text-rose-500">
-                Forget all notes
+              <button type="button" onClick={() => void forgetAllNotes()} disabled={Boolean(memoryBusy)} aria-busy={memoryBusy === 'all'} className="mt-3 text-[12px] text-zinc-400 hover:text-rose-500 disabled:opacity-50">
+                {memoryBusy === 'all' ? 'Forgetting…' : 'Forget all notes'}
               </button>
             )}
           </div>

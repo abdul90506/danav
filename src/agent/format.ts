@@ -449,8 +449,8 @@ function rawLabel(a: AgentAction): ActionLabel {
 
     case 'update_plan':
       return base('Updating plan', 'Updated plan', {
-        meta: r?.total ? `${r.done ?? 0}/${r.total} done` : undefined,
-        expandable: Boolean(r?.todos?.length),
+        meta: [r?.total ? `${r.done ?? 0}/${r.total} done` : undefined, r?.summary || undefined].filter(Boolean).join(' · ') || undefined,
+        expandable: Boolean(r?.todos?.length || r?.findings?.length),
       });
 
     default:

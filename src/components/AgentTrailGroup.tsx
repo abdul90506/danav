@@ -1,9 +1,10 @@
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useMemo, useRef } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { AgentAction } from '../types';
 import { AgentActionRow } from './AgentActionRow';
 import { createPanelStore, usePanelOpen } from './panels';
 import { trailGroupLabel, trailKind } from '../agent/format';
+import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 
 /**
  * A run's actions, the way a run is worth reading: as a few lines, not a log.
@@ -30,7 +31,7 @@ interface TrailProps {
    * changing under the reader's eyes.
    */
   grouped?: boolean;
-  onApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
+  onApproval?: (action: AgentAction, allow: boolean, always: boolean) => void | Promise<void>;
   onOpenPreview?: (url: string, title?: string) => void;
 }
 
@@ -38,21 +39,25 @@ const GroupRow: React.FC<{
   id: string;
   label: string;
   actions: AgentAction[];
-  onApproval?: (action: AgentAction, allow: boolean, always: boolean) => void;
+  onApproval?: (action: AgentAction, allow: boolean, always: boolean) => void | Promise<void>;
   onOpenPreview?: (url: string, title?: string) => void;
 }> = ({ id, label, actions, onApproval, onOpenPreview }) => {
   const open = usePanelOpen(groupStore, id);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => groupStore.close(), []);
+  useDismissOnOutside(rootRef, open, close);
   const toggle = useCallback(
     () => (groupStore.get() === id ? groupStore.close() : groupStore.set(id)),
     [id]
   );
 
   return (
-    <div className="my-0.5">
+    <div ref={rootRef} className="my-0.5">
       <button
         type="button"
         onClick={toggle}
         aria-expanded={open}
+        aria-controls={`trail-group-${id}`}
         className="group/group inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 max-w-full text-left cursor-pointer rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
         <span className="text-[13px] leading-6 text-zinc-500 dark:text-zinc-400 group-hover/group:text-zinc-700 dark:group-hover/group:text-zinc-200 transition-colors">
@@ -66,7 +71,7 @@ const GroupRow: React.FC<{
       </button>
 
       {open && (
-        <div className="mt-0.5 ml-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 animate-in fade-in duration-150">
+        <div id={`trail-group-${id}`} className="mt-0.5 ml-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 animate-in fade-in duration-150">
           {actions.map((a) => (
             <AgentActionRow key={a.id} action={a} onApproval={onApproval} onOpenPreview={onOpenPreview} />
           ))}
@@ -143,15 +148,19 @@ const noteStore = createPanelStore();
  */
 export const TrailNotes: React.FC<{ id: string; notes: string[] }> = ({ id, notes }) => {
   const open = usePanelOpen(noteStore, id);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => noteStore.close(), []);
+  useDismissOnOutside(rootRef, open, close);
   const toggle = useCallback(() => (noteStore.get() === id ? noteStore.close() : noteStore.set(id)), [id]);
   const label = `${notes.length} line${notes.length === 1 ? '' : 's'} written`;
 
   return (
-    <div className="my-0.5">
+    <div ref={rootRef} className="my-0.5">
       <button
         type="button"
         onClick={toggle}
         aria-expanded={open}
+        aria-controls={`trail-notes-${id}`}
         className="group/note inline-flex items-center gap-1.5 py-0.5 -mx-1 px-1 max-w-full text-left cursor-pointer rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
       >
         <span className="text-[13px] leading-6 text-zinc-500 dark:text-zinc-400 group-hover/note:text-zinc-700 dark:group-hover/note:text-zinc-200 transition-colors">
@@ -165,7 +174,7 @@ export const TrailNotes: React.FC<{ id: string; notes: string[] }> = ({ id, note
       </button>
 
       {open && (
-        <div className="mt-0.5 ml-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 space-y-1 animate-in fade-in duration-150">
+        <div id={`trail-notes-${id}`} className="mt-0.5 ml-1 pl-2.5 border-l border-zinc-200 dark:border-zinc-800 space-y-1 animate-in fade-in duration-150">
           {notes.map((note, i) => (
             <p key={i} className="text-[12.5px] leading-[1.4rem] text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap select-text">
               {note}

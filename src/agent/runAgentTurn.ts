@@ -30,12 +30,14 @@ export interface RunAgentTurnOptions {
  *
  * Text and reasoning go through SmoothStreamer for the same fluid typing as the
  * normal chat; before any action event is applied both streamers are flushed,
- * so a sentence never lands after the action that followed it.
+ * so a sentence never lands after the action that followed it. The accepted final
+ * answer is the exception: it stays live below the work row until its stream drains.
  */
 export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
   const state = new AgentTurnState();
   let status = '';
   let errorMessage: string | undefined;
+  let finalAnswerStarted = false;
 
   const sync = () => opts.onUpdate(state.snapshot(), status);
 
@@ -60,7 +62,7 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
     resume: opts.resume,
     signal: opts.signal,
     onStatus: (s) => {
-      status = s;
+      if (!finalAnswerStarted) status = s;
       sync();
     },
     onContent: (c) => {
@@ -69,8 +71,17 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
     },
     onThinking: (t) => thinkingStreamer.push(t),
     onAgent: (ev) => {
-      textStreamer.flushImmediate();
-      thinkingStreamer.flushImmediate();
+      if (ev?.type === 'final_answer_start') {
+        textStreamer.flushImmediate();
+        thinkingStreamer.flushImmediate();
+        finalAnswerStarted = true;
+        status = 'Writing final answer…';
+      } else {
+        // run_end follows the final content event. Let its paced text finish
+        // below the work row instead of dumping the queue in one frame.
+        if (!(ev?.type === 'run_end' && finalAnswerStarted)) textStreamer.flushImmediate();
+        thinkingStreamer.flushImmediate();
+      }
       state.applyAgentEvent(ev);
       sync();
     },
@@ -80,7 +91,8 @@ export async function runAgentTurn(opts: RunAgentTurnOptions): Promise<void> {
     onDone: () => {},
   });
 
-  textStreamer.flushImmediate();
+  if (finalAnswerStarted && !opts.signal.aborted) await textStreamer.finish();
+  else textStreamer.flushImmediate();
   thinkingStreamer.flushImmediate();
   state.finish(opts.signal.aborted ? 'aborted' : errorMessage ? 'error' : undefined);
   const snap = state.snapshot();

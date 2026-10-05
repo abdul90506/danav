@@ -14,7 +14,18 @@ import { registerAgentRoutes, _activeRuns } from './agent/routes.js';
 import { startIdlePauseSweeper } from './agent/idlePause.js';
 import { normalizeAgentBlockForDisk } from './agent/persist.js';
 import { modelForProvider, normalizeThinkingLevel, thinkingParams } from './agent/thinking.js';
-import { mergeSettingsPatch, publicSettings, resolveConfiguredProvider } from './settings.js';
+import { mergeSettingsPatch, providerApiKeys, publicSettings, resolveAgentSummaryModel, resolveConfiguredProvider } from './settings.js';
+import {
+  decodeHtmlEntities,
+  describePageFetchFailure,
+  isGoogleNewsArticleWrapper,
+  isNewsSearchQuery,
+  isTerminalPageStatus,
+  parseBraveNewsSearchResults,
+  parseBraveSearchResults,
+  parseGoogleNewsRss,
+  plainTextFromMarkup,
+} from './webSearch.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,7 +45,7 @@ const PORT = process.env.PORT || 3001;
  * drive Agent mode — the app itself has no other gate. So when the app is
  * reachable beyond localhost (`DANAV_ALLOWED_HOSTS` is set), a code is required:
  * `DANAV_PREVIEW_TOKEN` if the operator gave one, otherwise a generated code kept
- * in `preview-token.txt` in the data directory and printed in the startup banner.
+ * in `preview-token.txt` in the data directory.
  *
  * Local development is untouched: no allowed hosts, no code.
  * `DANAV_DISABLE_PREVIEW_AUTH=1` opts out (for deployments sitting behind their
@@ -184,16 +195,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 9000) {
 
 /** Collapse whitespace and strip tags from a scraped HTML fragment. */
 function textFromHtml(html) {
-  return String(html || '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
+  return plainTextFromMarkup(html);
 }
 
 /**
@@ -227,6 +229,9 @@ function looksLikeBotWall(status, bodyText, headers) {
     'ddos protection',
   ];
   if (strongMarkers.some((m) => text.includes(m))) return true;
+  // DuckDuckGo sometimes answers with HTTP 202 and an anomaly challenge rather
+  // than a 403. Treat its short challenge page as blocked so the next engine runs.
+  if (text.length < 8000 && /anomaly[-_ ]modal|automated queries|request looks automated/i.test(text)) return true;
 
   // Weak markers: only meaningful on a short page (a long article that merely
   // mentions "captcha" once is real content and must not be discarded).
@@ -276,6 +281,15 @@ function htmlToReadableText(html) {
  * Decode it back to the real destination, otherwise the result is useless
  * (and gets filtered out as a bing.com link).
  */
+function safeDecodeUrlComponent(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch {
+    // One malformed outbound link must not discard every result from this engine.
+    return String(value || '');
+  }
+}
+
 function decodeBingUrl(url) {
   try {
     const cleaned = String(url).replace(/&amp;/g, '&');
@@ -300,7 +314,17 @@ function decodeBingUrl(url) {
  * Sites behind a bot wall often 403 a plain fetch but serve these fine, so we
  * cascade through them instead of giving up after a single provider hiccup.
  */
+// r.jina.ai sometimes challenges the full Chrome UA used for origin pages; a
+// minimal UA avoids a false 403 from the reader itself.
+const READER_PROXY_UA = 'Mozilla/5.0';
+
 const READER_PROXIES = [
+  {
+    name: 'r.jina.ai-main',
+    build: (u) => `https://r.jina.ai/${u}`,
+    html: false,
+    headers: { 'X-Target-Selector': 'main' },
+  },
   { name: 'r.jina.ai', build: (u) => `https://r.jina.ai/${u}`, html: false },
   {
     name: 'codetabs',
@@ -321,8 +345,9 @@ async function fetchViaReaderProxy(targetUrl, timeoutMs = 10000) {
         proxy.build(targetUrl),
         {
           headers: {
-            'User-Agent': BROWSER_UA,
+            'User-Agent': READER_PROXY_UA,
             Accept: 'text/plain, text/html, text/markdown;q=0.9, */*;q=0.8',
+            ...(proxy.headers || {}),
             ...(proxy.html ? {} : { 'X-Return-Format': 'markdown' }),
           },
         },
@@ -370,9 +395,14 @@ function resolvePreviewToken() {
     code = generatePreviewCode();
     try {
       fs.writeFileSync(tokenFile, `${code}\n`, { mode: 0o600 });
-      if (process.platform !== 'win32') fs.chmodSync(tokenFile, 0o600);
     } catch (err) {
       console.warn('Could not save the preview access code:', err.message);
+    }
+  }
+  // `mode` only applies to new files; re-tighten an existing token after restart too.
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(tokenFile, 0o600); } catch (err) {
+      console.warn('Could not protect the preview access code file:', err.message);
     }
   }
   PREVIEW_TOKEN = code;
@@ -422,6 +452,7 @@ function atomicWriteFileSync(filePath, contents) {
 }
 
 const DEFAULT_SETTINGS = {
+  agentSummaryModel: null,
   providers: [
     {
       id: 'provider-gemini',
@@ -842,16 +873,13 @@ app.post('/api/chat/title', async (req, res) => {
 
     const endpoint = `${baseUrl}/chat/completions`;
     const headers = { 'Content-Type': 'application/json' };
-    if (provider.apiKey) {
-      headers['Authorization'] = `Bearer ${provider.apiKey.trim()}`;
-    }
 
     const promptText = `Generate a very short, clean 2 to 4 word title in Title Case representing the topic of this user prompt. Do not use quotes, punctuation, or explanations. Respond with ONLY the title.\n\nPrompt: "${message.slice(0, 300)}"`;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 12000);
 
-    const upstream = await fetch(endpoint, {
+    const upstream = await fetchWithProviderKeys(provider, endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -937,10 +965,61 @@ function providerWithStoredCredentials(provider) {
   return resolveConfiguredProvider(provider, readSettingsFromDisk());
 }
 
+const providerKeyCursors = new Map();
+
+function createProviderKeyPool(provider) {
+  const keys = providerApiKeys(provider);
+  const baseUrl = normalizeBaseUrl(provider?.baseUrl);
+  const poolKey = `${String(provider?.id || '')}\n${baseUrl}`;
+  const savedCursor = providerKeyCursors.get(poolKey) || 0;
+  return { keys, poolKey, cursor: keys.length ? savedCursor % keys.length : 0 };
+}
+
+function rememberProviderKeyCursor(pool, cursor) {
+  if (!pool?.keys?.length) return;
+  pool.cursor = cursor % pool.keys.length;
+  providerKeyCursors.set(pool.poolKey, pool.cursor);
+}
+
+function headersWithProviderKey(headers, apiKey) {
+  const next = { ...(headers || {}) };
+  for (const name of Object.keys(next)) {
+    if (name.toLowerCase() === 'authorization') delete next[name];
+  }
+  if (apiKey) next.Authorization = `Bearer ${apiKey}`;
+  return next;
+}
+
+/** Try each configured key for one setup/catalog request; busy retries belong to chat. */
+async function fetchWithProviderKeys(provider, url, options = {}) {
+  const pool = createProviderKeyPool(provider);
+  const attempts = pool.keys.length || 1;
+  const rejectedKeys = new Set();
+  let response;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const keyIndex = pool.keys.length ? (pool.cursor + attempt) % pool.keys.length : 0;
+    const apiKey = pool.keys[keyIndex] || '';
+    response = await fetch(url, { ...options, headers: headersWithProviderKey(options.headers, apiKey) });
+    if (response.ok || ![401, 403, 408, 425, 429, 500, 502, 503, 504].includes(response.status)) {
+      if (response.ok && pool.keys.length) rememberProviderKeyCursor(pool, (keyIndex + 1) % pool.keys.length);
+      return response;
+    }
+    rejectedKeys.add(keyIndex);
+    if (attempt < attempts - 1) {
+      try { await response.body?.cancel?.(); } catch { /* response is already drained */ }
+    }
+  }
+  if (pool.keys.length && rejectedKeys.size) {
+    const lastIndex = (pool.cursor + attempts - 1) % pool.keys.length;
+    rememberProviderKeyCursor(pool, (lastIndex + 1) % pool.keys.length);
+  }
+  return response;
+}
+
 // Test Provider Connection
 app.post('/api/providers/test', async (req, res) => {
   const resolved = providerWithStoredCredentials(req.body || {});
-  const { baseUrl, apiKey, apiType } = resolved;
+  const { baseUrl, apiType } = resolved;
 
   const refusal = metadataUrlRefusal(resolved);
   if (refusal) return res.status(400).json({ success: false, error: refusal });
@@ -961,19 +1040,13 @@ app.post('/api/providers/test', async (req, res) => {
     const timeout = setTimeout(() => controller.abort(), 10000);
 
     let testEndpoint = `${cleanUrl}/models`;
-    let headers = {
-      'Accept': 'application/json',
-    };
-
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey.trim()}`;
-    }
+    const headers = { 'Accept': 'application/json' };
 
     if (apiType === 'ollama') {
       testEndpoint = `${cleanUrl}/api/tags`;
     }
 
-    const response = await fetch(testEndpoint, {
+    const response = await fetchWithProviderKeys(resolved, testEndpoint, {
       method: 'GET',
       headers,
       signal: controller.signal,
@@ -1044,7 +1117,7 @@ function declaredReasoningSupport(model) {
 // Fetch Models
 app.post('/api/providers/models', async (req, res) => {
   const resolved = providerWithStoredCredentials(req.body || {});
-  const { baseUrl, apiKey, apiType } = resolved;
+  const { baseUrl, apiType } = resolved;
 
   const refusal = metadataUrlRefusal(resolved);
   if (refusal) return res.status(400).json({ success: false, error: refusal });
@@ -1085,19 +1158,13 @@ app.post('/api/providers/models', async (req, res) => {
     const timeout = setTimeout(() => controller.abort(), 12000);
 
     let modelsEndpoint = `${cleanUrl}/models`;
-    let headers = {
-      'Accept': 'application/json',
-    };
-
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey.trim()}`;
-    }
+    const headers = { 'Accept': 'application/json' };
 
     if (apiType === 'ollama') {
       modelsEndpoint = `${cleanUrl}/api/tags`;
     }
 
-    const response = await fetch(modelsEndpoint, {
+    const response = await fetchWithProviderKeys(resolved, modelsEndpoint, {
       method: 'GET',
       headers,
       signal: controller.signal,
@@ -1452,47 +1519,136 @@ const isContextLimitError = (text) =>
  * The wait is capped: the user is watching a spinner, so a provider that asks
  * for a minute is reported as a rate limit instead of being waited out.
  */
-const RETRYABLE_UPSTREAM_STATUS = new Set([429, 500, 502, 503, 504]);
-const UPSTREAM_RETRIES = 2;
-const MAX_RETRY_WAIT_MS = 8000;
+const UPSTREAM_RETRIES = 5;
+const retryableUpstreamStatus = (status) => status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599);
+const MAX_RETRY_WAIT_MS = 30_000;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  if (signal?.aborted) {
+    reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+    return;
+  }
+  const onAbort = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+    reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener('abort', onAbort);
+    resolve();
+  }, ms);
+  signal?.addEventListener('abort', onAbort, { once: true });
+});
 
-function retryWaitMs(response, attempt) {
+function retryWaitMs(response, retryNumber) {
   const header = response?.headers?.get?.('retry-after');
+  let retryAfter = 0;
   if (header) {
     const seconds = Number(header);
-    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, MAX_RETRY_WAIT_MS);
-    const when = Date.parse(header);
-    if (!Number.isNaN(when)) return Math.min(Math.max(when - Date.now(), 0), MAX_RETRY_WAIT_MS);
+    if (Number.isFinite(seconds) && seconds >= 0) retryAfter = seconds * 1000;
+    else {
+      const when = Date.parse(header);
+      if (!Number.isNaN(when)) retryAfter = Math.max(when - Date.now(), 0);
+    }
   }
-  return Math.min(1000 * 2 ** attempt, MAX_RETRY_WAIT_MS);
+  const retryBase = Number(process.env.DANAV_CHAT_RETRY_BASE_MS) > 0
+    ? Number(process.env.DANAV_CHAT_RETRY_BASE_MS)
+    : 2000;
+  const backoff = Math.min(retryBase * (2 ** Math.max(0, retryNumber - 1)), MAX_RETRY_WAIT_MS);
+  // Respect an explicit immediate retry once, then resume distinct exponential
+  // waits if the provider keeps returning the same zero-second hint.
+  if (header && retryAfter === 0 && retryNumber === 1) return 0;
+  return Math.min(MAX_RETRY_WAIT_MS, Math.max(backoff, retryAfter));
 }
 
-async function callProviderWithRetry(call, { onRetry, isCancelled } = {}) {
-  for (let attempt = 0; ; attempt++) {
+function isRetryableProviderMessage(value) {
+  return /rate[ _-]?limit|too many requests|overload(?:ed)?|server busy|provider busy|temporar(?:y|ily) unavailable|resource exhausted|capacity|try again later|timed? out/i.test(String(value || ''));
+}
+
+async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provider } = {}) {
+  const pool = createProviderKeyPool(provider);
+  let keyIndex = pool.keys.length ? pool.cursor : 0;
+  let retriesUsed = 0;
+  const rejectedKeys = new Set();
+  const rotateKey = () => {
+    if (!pool.keys.length) return;
+    keyIndex = (keyIndex + 1) % pool.keys.length;
+    rememberProviderKeyCursor(pool, keyIndex);
+  };
+  const reportRetry = async ({ delayMs, reason, attempt = retriesUsed }) => {
+    await onRetry?.({
+      attempt,
+      maxRetries: UPSTREAM_RETRIES,
+      delayMs,
+      reason,
+      credentialIndex: pool.keys.length ? keyIndex + 1 : 0,
+      credentialCount: pool.keys.length,
+    });
+  };
+
+  for (;;) {
+    if (isCancelled?.() || signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+    const apiKey = pool.keys.length ? pool.keys[keyIndex] : '';
     let response;
     try {
-      response = await call();
+      response = await call(apiKey, keyIndex);
     } catch (err) {
-      // A disconnected client is not a provider problem: let it through.
-      if (attempt >= UPSTREAM_RETRIES || isCancelled?.()) throw err;
-      await onRetry?.(attempt, null, err);
-      await sleep(retryWaitMs(null, attempt));
+      if (err?.name === 'AbortError' || isCancelled?.()) throw err;
+      if (retriesUsed >= UPSTREAM_RETRIES) {
+        if (pool.keys.length) rememberProviderKeyCursor(pool, (keyIndex + 1) % pool.keys.length);
+        throw err;
+      }
+      retriesUsed += 1;
+      rotateKey();
+      const delayMs = retryWaitMs(null, retriesUsed);
+      await reportRetry({ delayMs, reason: 'connection problem', attempt: retriesUsed });
+      await sleep(delayMs, signal);
       continue;
     }
-    if (response.ok || attempt >= UPSTREAM_RETRIES || !RETRYABLE_UPSTREAM_STATUS.has(response.status)) {
+
+    if (response.ok) {
+      if (pool.keys.length) rememberProviderKeyCursor(pool, (keyIndex + 1) % pool.keys.length);
       return response;
     }
-    // Drain the failed response so the socket can be reused, then try again.
-    const waitMs = retryWaitMs(response, attempt);
-    try {
-      await response.body?.cancel?.();
-    } catch {
-      /* the body was already unusable */
+
+    if (response.status !== 401 && response.status !== 403) rejectedKeys.clear();
+    if ((response.status === 401 || response.status === 403) && pool.keys.length > 1 && !rejectedKeys.has(keyIndex)) {
+      rejectedKeys.add(keyIndex);
+      if (rejectedKeys.size < pool.keys.length) {
+        try { await response.body?.cancel?.(); } catch { /* response is already drained */ }
+        rotateKey();
+        await reportRetry({ delayMs: 0, reason: 'API key rejected; trying another saved key' });
+        continue;
+      }
     }
-    await onRetry?.(attempt, response);
-    await sleep(waitMs);
+
+    let retryable = retryableUpstreamStatus(response.status);
+    if (!retryable && !response.ok) {
+      try {
+        const text = response.clone ? await response.clone().text() : '';
+        retryable = isRetryableProviderMessage(text);
+      } catch { /* a non-cloneable response can still be returned normally */ }
+    }
+    if (!retryable || retriesUsed >= UPSTREAM_RETRIES || isCancelled?.()) {
+      if (pool.keys.length && ((response.status === 401 || response.status === 403) || retryable)) {
+        rememberProviderKeyCursor(pool, (keyIndex + 1) % pool.keys.length);
+      }
+      return response;
+    }
+
+    retriesUsed += 1;
+    const delayMs = retryWaitMs(response, retriesUsed);
+    const reason = response.status === 429
+      ? 'rate limited'
+      : response.status >= 500
+        ? `provider busy (HTTP ${response.status})`
+        : response.status === 408 || response.status === 425
+          ? 'provider temporarily unavailable'
+          : 'provider busy';
+    try { await response.body?.cancel?.(); } catch { /* the body was already unusable */ }
+    rotateKey();
+    await reportRetry({ delayMs, reason, attempt: retriesUsed });
+    await sleep(delayMs, signal);
   }
 }
 
@@ -1587,10 +1743,6 @@ app.post('/api/chat', async (req, res) => {
     'Accept': 'text/event-stream, application/json',
   };
 
-  if (provider.apiKey) {
-    headers['Authorization'] = `Bearer ${provider.apiKey.trim()}`;
-  }
-
   // Format messages
   const payloadMessages = messages.map((m) => ({
     role: m.role,
@@ -1632,8 +1784,21 @@ app.post('/api/chat', async (req, res) => {
     return body;
   };
 
+  let sseStarted = false;
+  const startSse = () => {
+    if (sseStarted) return;
+    sseStarted = true;
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  };
   const writeEvent = (obj) => {
-    if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    if (res.writableEnded) return;
+    startSse();
+    res.write(`data: ${JSON.stringify(obj)}\n\n`);
   };
 
   try {
@@ -1647,12 +1812,12 @@ app.post('/api/chat', async (req, res) => {
     // retried before this turn got its answer.
     let upstreamRetries = 0;
 
-    const callProvider = (withTools, withThinking, messageList) => {
+    const callProvider = (withTools, withThinking, messageList, apiKey = '') => {
       const body = buildRequestBody(withTools, withThinking);
       if (messageList) body.messages = messageList;
       return fetch(endpoint, {
         method: 'POST',
-        headers,
+        headers: headersWithProviderKey(headers, apiKey),
         body: JSON.stringify(body),
         signal: controller.signal,
       });
@@ -1811,8 +1976,14 @@ app.post('/api/chat', async (req, res) => {
 
       const result = await runSearchTool(name, args);
 
-      const ok = Boolean(result && result.success);
+      const ok = Boolean(
+        result && (result.success || (name === 'web_search' && result.status === 'no_results'))
+      );
       const detail = String(result?.output || result?.error || '').trim();
+      const failureDetail = String(
+        result?.error || result?.output ||
+        (result ? 'the tool returned no diagnostic details' : 'the tool returned no result object')
+      ).trim();
 
       if (name === 'image_search') {
         writeEvent({
@@ -1861,7 +2032,7 @@ app.post('/api/chat', async (req, res) => {
 
       const text = ok
         ? detail
-        : `${name} failed: ${result?.error || 'unknown error'}. Do not invent the ` +
+        : `${name} failed: ${failureDetail}. Do not invent the ` +
           `information — try a different query or source, or tell the user it could not be fetched.`;
 
       return { event: null, text: text || '(no content)' };
@@ -1895,14 +2066,21 @@ app.post('/api/chat', async (req, res) => {
       for (let i = 0; i < ladder.length; i++) {
         const step = ladder[i];
         failedStep = step;
-        upstreamResponse = await callProviderWithRetry(() => callProvider(step.tools, step.thinking), {
+        upstreamResponse = await callProviderWithRetry((apiKey) => callProvider(step.tools, step.thinking, undefined, apiKey), {
+          provider,
+          signal: controller.signal,
           isCancelled: () => controller.signal.aborted,
-          onRetry: (attempt, response) => {
-            upstreamRetries += 1;
-            console.log(
-              `Provider ${response ? `answered HTTP ${response.status}` : 'did not answer'} on ${model}; ` +
-                `retrying in ${Math.round(retryWaitMs(response, attempt) / 1000)}s (attempt ${attempt + 2}).`
-            );
+          onRetry: (info) => {
+            const keyRetry = info.reason === 'API key rejected; trying another saved key';
+            if (!keyRetry) upstreamRetries += 1;
+            const keyStatus = info.credentialCount ? ` (key ${info.credentialIndex} of ${info.credentialCount})` : '';
+            const status = keyRetry
+              ? `${info.reason}${keyStatus}`
+              : `Provider is busy — retry ${info.attempt} of ${info.maxRetries} ${info.delayMs === 0 ? 'now' : `in ${Math.ceil(info.delayMs / 1000)}s`}${keyStatus}…`;
+            writeEvent({ status });
+            if (!keyRetry) {
+              console.log(`Provider ${info.reason} on ${model}; retry ${info.attempt} of ${info.maxRetries}${info.delayMs === 0 ? ' now' : ` in ${Math.ceil(info.delayMs / 1000)}s`}.`);
+            }
           },
         });
         if (upstreamResponse.ok) {
@@ -1977,18 +2155,15 @@ app.post('/api/chat', async (req, res) => {
         errorMsg = `The provider rejected the selected ${selectedThinkingLevel} thinking effort. Danav did not lower or remove it; check that this model and endpoint support that level. (${errorMsg})`;
       }
 
+      if (sseStarted) {
+        writeEvent({ error: errorMsg.slice(0, 1000), ...(code ? { code } : {}) });
+        return res.end();
+      }
       return res.status(upstreamResponse.status).json({ error: errorMsg.slice(0, 1000), ...(code ? { code } : {}) });
     }
 
-    // Set SSE headers
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    });
-    if (typeof res.flushHeaders === 'function') {
-      res.flushHeaders();
-    }
+    // A retry may already have started the event stream to show its status.
+    startSse();
 
     const startupNotices = [];
     // A turn that only answered because it was retried is worth saying out loud:
@@ -2023,9 +2198,17 @@ app.post('/api/chat', async (req, res) => {
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (round > 0) {
-        upstream = await callProviderWithRetry(() => callProvider(toolsActive, thinkingActive), {
+        upstream = await callProviderWithRetry((apiKey) => callProvider(toolsActive, thinkingActive, undefined, apiKey), {
+          provider,
+          signal: controller.signal,
           isCancelled: () => controller.signal.aborted,
-          onRetry: () => writeEvent({ status: 'The provider is busy — retrying…' }),
+          onRetry: (info) => {
+            const keyRetry = info.reason === 'API key rejected; trying another saved key';
+            const keyStatus = info.credentialCount ? ` (key ${info.credentialIndex} of ${info.credentialCount})` : '';
+            writeEvent({ status: keyRetry
+              ? `${info.reason}${keyStatus}`
+              : `Provider is busy — retry ${info.attempt} of ${info.maxRetries} ${info.delayMs === 0 ? 'now' : `in ${Math.ceil(info.delayMs / 1000)}s`}${keyStatus}…` });
+          },
         });
         if (!upstream.ok) {
           const body = await upstream.text().catch(() => '');
@@ -2098,9 +2281,17 @@ app.post('/api/chat', async (req, res) => {
         });
       }
 
-      const finalRes = await callProviderWithRetry(() => callProvider(false, thinkingActive, flat), {
+      const finalRes = await callProviderWithRetry((apiKey) => callProvider(false, thinkingActive, flat, apiKey), {
+        provider,
+        signal: controller.signal,
         isCancelled: () => controller.signal.aborted,
-        onRetry: () => writeEvent({ status: 'The provider is busy — retrying…' }),
+        onRetry: (info) => {
+            const keyRetry = info.reason === 'API key rejected; trying another saved key';
+            const keyStatus = info.credentialCount ? ` (key ${info.credentialIndex} of ${info.credentialCount})` : '';
+            writeEvent({ status: keyRetry
+              ? `${info.reason}${keyStatus}`
+              : `Provider is busy — retry ${info.attempt} of ${info.maxRetries} ${info.delayMs === 0 ? 'now' : `in ${Math.ceil(info.delayMs / 1000)}s`}${keyStatus}…` });
+          },
       });
       if (!finalRes.ok) {
         const body = await finalRes.text().catch(() => '');
@@ -2167,31 +2358,66 @@ async function handleSearchTool(req, res) {
         const MAX_RESULTS = 8;
         const domainCounts = new Map();
         let enginesBlocked = 0;
+        let answeredSearchEngines = 0;
+        const searchFailures = [];
+        let skippedGoogleNewsWrappers = 0;
+        const noteSearchFailure = (engine, reason) => {
+          if (searchFailures.length < 8) searchFailures.push(`${engine}: ${reason}`);
+        };
+        const observeSearchResponse = (engine, response, body) => {
+          if (looksLikeBotWall(response.status, body, response.headers)) {
+            enginesBlocked++;
+            noteSearchFailure(engine, `blocked or challenged (HTTP ${response.status})`);
+            return false;
+          }
+          if (!response.ok) {
+            noteSearchFailure(engine, `HTTP ${response.status}`);
+            return false;
+          }
+          if (String(body || '').trim().length < 40) {
+            noteSearchFailure(engine, 'empty response');
+            return false;
+          }
+          answeredSearchEngines++;
+          return true;
+        };
+        const noteSearchException = (engine, error) => {
+          const reason = error?.name === 'AbortError'
+            ? 'timed out'
+            : error?.name === 'SyntaxError'
+              ? 'invalid response'
+              : 'network error';
+          noteSearchFailure(engine, reason);
+        };
 
         /** Accept a result only if it is a real, distinct, useful page. */
-        const addResult = (title, url, snippet) => {
-          if (!title || !url || results.length >= MAX_RESULTS) return;
-          if (!/^https?:\/\//i.test(url)) return;
-          if (/duckduckgo\.com|bing\.com|google\.com\/search|w3\.org/i.test(url)) return;
+        const addResult = (title, url, snippet, sourceName = '', sourceUrl = '') => {
+          const resultUrl = decodeHtmlEntities(url).trim();
+          const publisherUrl = /^https?:\/\//i.test(sourceUrl) ? decodeHtmlEntities(sourceUrl).trim() : resultUrl;
+          const cleanTitle = textFromHtml(title);
+          if (!cleanTitle || !resultUrl || results.length >= MAX_RESULTS) return;
+          if (!/^https?:\/\//i.test(resultUrl)) return;
+          if (isGoogleNewsArticleWrapper(resultUrl)) return;
+          if (/duckduckgo\.com|bing\.com|google\.com\/search|w3\.org/i.test(resultUrl)) return;
 
           let host = '';
           try {
-            host = new URL(url).hostname.replace(/^www\./, '');
+            host = new URL(publisherUrl).hostname.replace(/^www\./, '');
           } catch {
             return;
           }
 
-          // Cap 2 results per domain so one site cannot dominate the list.
+          // Cap 2 results per publisher so one site cannot dominate the list.
           const count = domainCounts.get(host) || 0;
           if (count >= 2) return;
-          if (results.some((r) => r.url === url)) return;
+          if (results.some((r) => r.url === resultUrl)) return;
 
           domainCounts.set(host, count + 1);
           results.push({
-            title: textFromHtml(title).slice(0, 200),
-            url,
+            title: cleanTitle.slice(0, 200),
+            url: resultUrl,
             snippet: textFromHtml(snippet).slice(0, 500),
-            source: host,
+            source: textFromHtml(sourceName).slice(0, 120) || host,
           });
         };
 
@@ -2215,26 +2441,112 @@ async function handleSearchTool(req, res) {
           return out;
         };
 
-        // Tier 1: DuckDuckGo HTML endpoint (best snippet quality)
-        try {
-          const ddgHtmlRes = await fetchWithTimeout(
-            'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query),
-            {
-              headers: {
-                'User-Agent': BROWSER_UA,
-                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
+        // News queries should return dated article headlines with direct publisher
+        // URLs, not just category pages or JavaScript-only Google News wrappers.
+        if (isNewsSearchQuery(query)) {
+          const stopWords = new Set([
+            'a', 'an', 'and', 'are', 'as', 'at', 'by', 'current', 'events', 'affairs', 'for', 'from',
+            'headlines', 'headline', 'in', 'latest', 'live', 'news', 'now', 'of', 'on', 'the', 'this',
+            'today', 'tomorrow', 'updates', 'update', 'what', 'when', 'where', 'who', 'why', 'with',
+            'week', 'month', 'year', 'yesterday', 'breaking', 'jan', 'january', 'feb', 'february',
+            'mar', 'march', 'apr', 'april', 'may', 'jun', 'june', 'jul', 'july', 'aug', 'august',
+            'sep', 'sept', 'september', 'oct', 'october', 'nov', 'november', 'dec', 'december',
+          ]);
+          const topicTerms = [...new Set((query.toLowerCase().match(/[a-z0-9]+/g) || [])
+            .filter((term) => term.length > 1 && !stopWords.has(term) && !/^\d+$/.test(term)))];
+          const isOnTopic = (item) => {
+            if (!topicTerms.length) return true;
+            const words = new Set(`${item.title} ${item.snippet} ${item.source}`.toLowerCase().match(/[a-z0-9]+/g) || []);
+            return topicTerms.some((term) => words.has(term));
+          };
+
+          // Brave's News vertical returns publisher article URLs and timestamps,
+          // so fetch_url can actually read the source instead of a JS wrapper.
+          try {
+            const newsRes = await fetchWithTimeout(
+              'https://search.brave.com/news?q=' + encodeURIComponent(query),
+              {
+                headers: {
+                  'User-Agent': BROWSER_UA,
+                  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                  'Accept-Language': 'en-US,en;q=0.9',
+                },
               },
-            },
-            9000
-          );
+              9000
+            );
+            const html = await newsRes.text();
+            if (observeSearchResponse('Brave News', newsRes, html)) {
+              const articles = parseBraveNewsSearchResults(html)
+                .filter(isOnTopic)
+                .sort((a, b) => a.ageMinutes - b.ageMinutes);
+              for (const article of articles) {
+                addResult(article.title, article.url, article.snippet, article.source);
+                if (results.length >= MAX_RESULTS) break;
+              }
+            }
+          } catch (error) {
+            noteSearchException('Brave News', error);
+          }
 
-          if (ddgHtmlRes.ok) {
+          // If the direct news vertical is unavailable, Google News RSS may still
+          // supply timestamped headlines. Its article links can be JavaScript-only
+          // shells, so skip those and let the regular search tiers look for a
+          // direct publisher page instead of returning an unreadable wrapper.
+          if (results.length === 0) {
+            try {
+              const region = /\b(?:Pakistan|Pakistani|Islamabad|Karachi|Lahore)\b/i.test(query) ? 'PK' : 'US';
+              const language = region === 'PK' ? 'en-PK' : 'en-US';
+              const newsUrl =
+                `https://news.google.com/rss/search?q=${encodeURIComponent(query)}` +
+                `&hl=${language}&gl=${region}&ceid=${region}:${language.slice(0, 2)}`;
+              const newsRes = await fetchWithTimeout(
+                newsUrl,
+                {
+                  headers: {
+                    'User-Agent': BROWSER_UA,
+                    Accept: 'application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
+                  },
+                },
+                9000
+              );
+              const xml = await newsRes.text();
+              if (observeSearchResponse('Google News', newsRes, xml)) {
+                for (const item of parseGoogleNewsRss(xml)) {
+                  if (!isOnTopic(item)) continue;
+                  if (isGoogleNewsArticleWrapper(item.url)) {
+                    skippedGoogleNewsWrappers++;
+                    continue;
+                  }
+                  addResult(item.title, item.url, item.snippet, item.source, item.sourceUrl);
+                  if (results.length >= MAX_RESULTS) break;
+                }
+              }
+            } catch (error) {
+              noteSearchException('Google News', error);
+            }
+          }
+        }
+
+        // Search-engine category pages are less useful than real headlines; only
+        // fall back to general web results if the news feed returned nothing.
+        const foundNewsHeadlines = results.length > 0;
+        if (!foundNewsHeadlines) {
+          // Tier 1: DuckDuckGo HTML endpoint (best snippet quality)
+          try {
+            const ddgHtmlRes = await fetchWithTimeout(
+              'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query),
+              {
+                headers: {
+                  'User-Agent': BROWSER_UA,
+                  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                  'Accept-Language': 'en-US,en;q=0.9',
+                },
+              },
+              9000
+            );
+
             const html = await ddgHtmlRes.text();
-
-            if (looksLikeBotWall(ddgHtmlRes.status, html, ddgHtmlRes.headers)) {
-              enginesBlocked++;
-            } else {
+            if (observeSearchResponse('DuckDuckGo', ddgHtmlRes, html)) {
               // Preferred markup: class-tagged title/snippet anchors, paired by order.
               const titleMatches = [
                 ...html.matchAll(
@@ -2248,7 +2560,7 @@ async function handleSearchTool(req, res) {
               for (let i = 0; i < titleMatches.length; i++) {
                 let url = titleMatches[i][1];
                 const uddg = url.match(/uddg=([^&]+)/);
-                if (uddg) url = decodeURIComponent(uddg[1]);
+                if (uddg) url = safeDecodeUrlComponent(uddg[1]);
                 const snippet = snippetMatches[i] ? snippetMatches[i][1] : '';
                 addResult(titleMatches[i][2], url, snippet);
               }
@@ -2261,16 +2573,42 @@ async function handleSearchTool(req, res) {
                 while ((m = genericRegex.exec(html)) !== null) {
                   const snippetSub = html.slice(m.index, m.index + 900);
                   const snipMatch = /class=["']result__snippet["'][^>]*>([\s\S]*?)<\/(?:a|div|span)>/i.exec(snippetSub);
-                  addResult(m[2], decodeURIComponent(m[1]), snipMatch ? snipMatch[1] : '');
+                  addResult(m[2], safeDecodeUrlComponent(m[1]), snipMatch ? snipMatch[1] : '');
                 }
               }
             }
-          } else if (ddgHtmlRes.status === 403 || ddgHtmlRes.status === 429 || ddgHtmlRes.status === 503) {
-            enginesBlocked++;
+          } catch (error) {
+            noteSearchException('DuckDuckGo', error);
           }
-        } catch (e) {}
+        }
 
-        // Tier 2: DuckDuckGo Lite
+        // Tier 2: Brave Search HTML (independent index; avoids depending on one scraper).
+        if (results.length === 0) {
+          try {
+            const braveRes = await fetchWithTimeout(
+              'https://search.brave.com/search?q=' + encodeURIComponent(query),
+              {
+                headers: {
+                  'User-Agent': BROWSER_UA,
+                  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                  'Accept-Language': 'en-US,en;q=0.9',
+                },
+              },
+              9000
+            );
+            const html = await braveRes.text();
+            if (observeSearchResponse('Brave Search', braveRes, html)) {
+              for (const result of parseBraveSearchResults(html)) {
+                addResult(result.title, result.url, result.snippet);
+                if (results.length >= MAX_RESULTS) break;
+              }
+            }
+          } catch (error) {
+            noteSearchException('Brave Search', error);
+          }
+        }
+
+        // Tier 3: DuckDuckGo Lite
         if (results.length === 0) {
           try {
             const ddgRes = await fetchWithTimeout(
@@ -2286,30 +2624,26 @@ async function handleSearchTool(req, res) {
               9000
             );
 
-            if (ddgRes.ok) {
-              const html = await ddgRes.text();
-              if (looksLikeBotWall(ddgRes.status, html, ddgRes.headers)) {
-                enginesBlocked++;
-              } else {
-                const linkMatches = extractLinksByClass(html, 'result-link');
-                const snippetMatches = [
-                  ...html.matchAll(/<td[^>]+class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi),
-                ];
+            const html = await ddgRes.text();
+            if (observeSearchResponse('DuckDuckGo Lite', ddgRes, html)) {
+              const linkMatches = extractLinksByClass(html, 'result-link');
+              const snippetMatches = [
+                ...html.matchAll(/<td[^>]+class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi),
+              ];
 
-                for (let i = 0; i < linkMatches.length; i++) {
-                  let url = linkMatches[i].url;
-                  const udMatch = url.match(/uddg=([^&]+)/);
-                  if (udMatch) url = decodeURIComponent(udMatch[1]);
-                  addResult(linkMatches[i].title, url, snippetMatches[i] ? snippetMatches[i][1] : '');
-                }
+              for (let i = 0; i < linkMatches.length; i++) {
+                let url = linkMatches[i].url;
+                const udMatch = url.match(/uddg=([^&]+)/);
+                if (udMatch) url = safeDecodeUrlComponent(udMatch[1]);
+                addResult(linkMatches[i].title, url, snippetMatches[i] ? snippetMatches[i][1] : '');
               }
-            } else if (ddgRes.status === 403 || ddgRes.status === 429 || ddgRes.status === 503) {
-              enginesBlocked++;
             }
-          } catch (e) {}
+          } catch (error) {
+            noteSearchException('DuckDuckGo Lite', error);
+          }
         }
 
-        // Tier 3: Bing HTML — a completely independent index, so a DuckDuckGo
+        // Tier 4: Bing HTML — a completely independent index, so a DuckDuckGo
         // block/rate-limit no longer leaves the search with nothing.
         if (results.length === 0) {
           try {
@@ -2324,28 +2658,24 @@ async function handleSearchTool(req, res) {
               },
               9000
             );
-            if (bingRes.ok) {
-              const html = await bingRes.text();
-              if (looksLikeBotWall(bingRes.status, html, bingRes.headers)) {
-                enginesBlocked++;
-              } else {
-                // Bing wraps each organic result in <li class="b_algo">.
-                const blocks = html.split(/<li class="b_algo"/i).slice(1);
-                for (const chunk of blocks) {
-                  const link = /<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i.exec(chunk);
-                  if (!link) continue;
-                  const snip = /<p[^>]*>([\s\S]*?)<\/p>/i.exec(chunk);
-                  addResult(link[2], decodeBingUrl(link[1]), snip ? snip[1] : '');
-                  if (results.length >= MAX_RESULTS) break;
-                }
+            const html = await bingRes.text();
+            if (observeSearchResponse('Bing', bingRes, html)) {
+              // Bing wraps each organic result in <li class="b_algo">.
+              const blocks = html.split(/<li class="b_algo"/i).slice(1);
+              for (const chunk of blocks) {
+                const link = /<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i.exec(chunk);
+                if (!link) continue;
+                const snip = /<p[^>]*>([\s\S]*?)<\/p>/i.exec(chunk);
+                addResult(link[2], decodeBingUrl(link[1]), snip ? snip[1] : '');
+                if (results.length >= MAX_RESULTS) break;
               }
-            } else if (bingRes.status === 403 || bingRes.status === 429 || bingRes.status === 503) {
-              enginesBlocked++;
             }
-          } catch (e) {}
+          } catch (error) {
+            noteSearchException('Bing', error);
+          }
         }
 
-        // Tier 4: Mojeek — small independent crawler, very scrape-friendly and
+        // Tier 5: Mojeek — small independent crawler, very scrape-friendly and
         // it does not serve JS challenges for plain fetches.
         if (results.length === 0) {
           try {
@@ -2360,31 +2690,27 @@ async function handleSearchTool(req, res) {
               },
               9000
             );
-            if (mjRes.ok) {
-              const html = await mjRes.text();
-              if (looksLikeBotWall(mjRes.status, html, mjRes.headers)) {
-                enginesBlocked++;
-              } else {
-                let links = extractLinksByClass(html, 'ob');
-                if (links.length === 0) {
-                  // Mojeek markup shifts occasionally — fall back to the h2 anchor.
-                  links = [...html.matchAll(/<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)].map(
-                    (m) => ({ url: m[1], title: m[2] })
-                  );
-                }
-                const snips = [...html.matchAll(/<p class=["']s["'][^>]*>([\s\S]*?)<\/p>/gi)];
-                for (let i = 0; i < links.length; i++) {
-                  addResult(links[i].title, links[i].url, snips[i] ? snips[i][1] : '');
-                  if (results.length >= MAX_RESULTS) break;
-                }
+            const html = await mjRes.text();
+            if (observeSearchResponse('Mojeek', mjRes, html)) {
+              let links = extractLinksByClass(html, 'ob');
+              if (links.length === 0) {
+                // Mojeek markup shifts occasionally — fall back to the h2 anchor.
+                links = [...html.matchAll(/<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)].map(
+                  (m) => ({ url: m[1], title: m[2] })
+                );
               }
-            } else if (mjRes.status === 403 || mjRes.status === 429 || mjRes.status === 503) {
-              enginesBlocked++;
+              const snips = [...html.matchAll(/<p class=["']s["'][^>]*>([\s\S]*?)<\/p>/gi)];
+              for (let i = 0; i < links.length; i++) {
+                addResult(links[i].title, links[i].url, snips[i] ? snips[i][1] : '');
+                if (results.length >= MAX_RESULTS) break;
+              }
             }
-          } catch (e) {}
+          } catch (error) {
+            noteSearchException('Mojeek', error);
+          }
         }
 
-        // Tier 5: DuckDuckGo Instant Answer API (direct abstract when available)
+        // Tier 6: DuckDuckGo Instant Answer API (direct abstract when available)
         if (results.length === 0) {
           try {
             const apiRes = await fetchWithTimeout(
@@ -2392,8 +2718,9 @@ async function handleSearchTool(req, res) {
               { headers: { 'User-Agent': BROWSER_UA } },
               7000
             );
-            if (apiRes.ok) {
-              const data = await apiRes.json();
+            const body = await apiRes.text();
+            if (observeSearchResponse('DuckDuckGo Instant Answer', apiRes, body)) {
+              const data = JSON.parse(body);
               if (data.AbstractText && data.AbstractURL) {
                 addResult(data.Heading || query, data.AbstractURL, data.AbstractText);
               }
@@ -2403,10 +2730,12 @@ async function handleSearchTool(req, res) {
                 }
               }
             }
-          } catch (e) {}
+          } catch (error) {
+            noteSearchException('DuckDuckGo Instant Answer', error);
+          }
         }
 
-        // Tier 6: Wikipedia OpenSearch — a genuine last resort only.
+        // Tier 7: Wikipedia OpenSearch — a genuine last resort only.
         // This used to run whenever fewer than 3 hits were found, which injected
         // unrelated encyclopaedia links into technical searches and made the
         // agent cite the wrong sources.
@@ -2419,8 +2748,9 @@ async function handleSearchTool(req, res) {
               { headers: { 'User-Agent': BROWSER_UA } },
               7000
             );
-            if (wikiRes.ok) {
-              const data = await wikiRes.json();
+            const body = await wikiRes.text();
+            if (observeSearchResponse('Wikipedia OpenSearch', wikiRes, body)) {
+              const data = JSON.parse(body);
               const titles = data[1] || [];
               const snippets = data[2] || [];
               const urls = data[3] || [];
@@ -2430,7 +2760,9 @@ async function handleSearchTool(req, res) {
                 }
               }
             }
-          } catch (e) {}
+          } catch (error) {
+            noteSearchException('Wikipedia OpenSearch', error);
+          }
         }
 
         const formatted = results
@@ -2440,21 +2772,31 @@ async function handleSearchTool(req, res) {
           )
           .join('\n\n');
 
+        const searchUnavailable = results.length === 0 && answeredSearchEngines === 0;
+        const status = results.length > 0 ? 'ok' : searchUnavailable ? 'unavailable' : 'no_results';
+        const sourceProblems = searchFailures.slice(0, 4).join('; ');
+        const error = searchUnavailable
+          ? `Search sources could not return usable results${sourceProblems ? ` (${sourceProblems})` : ''}.`
+          : undefined;
         const guidance =
           results.length === 0
-            ? enginesBlocked > 0
-              ? `No results for "${query}". ${enginesBlocked} search engine(s) blocked the request (rate-limit / bot protection). Do NOT invent an answer — wait a moment and try again, or rephrase with 2-5 keywords.`
-              : `No results found for "${query}". Do NOT invent an answer. Try again with a shorter, more specific query (2-5 keywords), or use a different tool.`
+            ? searchUnavailable
+              ? `Web search is temporarily unavailable${sourceProblems ? `: ${sourceProblems}` : ''}. Do not invent an answer — try again shortly or rephrase the query.`
+              : skippedGoogleNewsWrappers > 0
+                ? `The news feed returned Google News redirect shells, not direct articles, and the other search sources found no direct publisher pages. Do not report those wrappers as readable sources. Try a shorter, more specific query (2-5 keywords), or include a publisher name.`
+                : `No results found for "${query}". Do NOT invent an answer. Try a shorter, more specific query (2-5 keywords), or use another source.`
             : results.length < 3
             ? `Only ${results.length} result(s). If this is not enough, refine the query and search again, or fetch one of these pages with <fetch_url> for full details.`
             : 'If you need exact API details, code samples or version numbers, open the most relevant link with <fetch_url>. Always cite the sources you actually used as markdown links.';
 
         return res.json({
           success: results.length > 0,
+          status,
           tool: 'web_search',
           query,
           results,
           enginesBlocked,
+          ...(error ? { error } : {}),
           output: results.length > 0 ? `${formatted}\n\n${guidance}` : guidance,
         });
       } catch (err) {
@@ -2757,7 +3099,9 @@ async function handleSearchTool(req, res) {
       let bodyText = '';
       let pageTitle = '';
       let blocked = false;
+      let botWallDetected = false;
       let statusCode = 0;
+      let statusText = '';
       let fetchNote = '';
       // The address actually read: after a redirect chain it may differ from the
       // one asked for, and that is the URL the model is told about.
@@ -2794,11 +3138,45 @@ async function handleSearchTool(req, res) {
           });
           finalUrl = resolvedUrl;
           statusCode = pageRes.status;
+          statusText = pageRes.statusText || '';
           const contentType = pageRes.headers.get('content-type') || '';
           const raw = await pageRes.text();
 
-          if (!pageRes.ok || looksLikeBotWall(pageRes.status, raw, pageRes.headers)) {
+          // A 404/410 (and other permanent client errors) describes the actual
+          // page state; reader proxies cannot make a missing URL exist.
+          if (isTerminalPageStatus(statusCode)) {
+            const failure = describePageFetchFailure(statusCode, statusText);
+            const nextStep = statusCode === 404 || statusCode === 410
+              ? 'The search result may be stale or the URL may be mistyped; search for the title or try another result.'
+              : 'Try a different public source for this page.';
+            return res.json({
+              success: false,
+              tool: 'fetch_url',
+              url: finalUrl,
+              httpStatus: statusCode,
+              error: failure,
+              output: `Could not read ${finalUrl}: ${failure} ${nextStep}`,
+            });
+          }
+
+          if (pageRes.ok && isGoogleNewsArticleWrapper(finalUrl)) {
+            const failure = 'This Google News URL is a JavaScript-only redirect page, not the publisher article.';
+            return res.json({
+              success: false,
+              tool: 'fetch_url',
+              url: finalUrl,
+              httpStatus: statusCode,
+              error: failure,
+              output:
+                `Could not read ${finalUrl}: ${failure} ` +
+                'Search for the exact headline to get a direct publisher URL, then fetch that source instead.',
+            });
+          }
+
+          const botWall = looksLikeBotWall(pageRes.status, raw, pageRes.headers);
+          if (!pageRes.ok || botWall) {
             blocked = true;
+            if (botWall && (statusCode === 200 || statusCode === 403 || statusCode === 429)) botWallDetected = true;
             // A 5xx / 403 on the first try is often transient — retry once.
             if (attempt < USER_AGENTS.length - 1) {
               await new Promise((r) => setTimeout(r, 400));
@@ -2831,6 +3209,7 @@ async function handleSearchTool(req, res) {
           }
           blocked = true;
           statusCode = 0;
+          statusText = '';
           if (attempt < USER_AGENTS.length - 1) {
             await new Promise((r) => setTimeout(r, 400));
             continue;
@@ -2869,7 +3248,9 @@ async function handleSearchTool(req, res) {
       if (blocked || bodyText.length < 120) {
         const proxied = await fetchViaReaderProxy(finalUrl);
         if (proxied) {
-          bodyText = proxied;
+          const proxyTitle = /^Title:\s*(.+)$/m.exec(proxied)?.[1]?.trim();
+          if (proxyTitle) pageTitle = proxyTitle.slice(0, 200);
+          bodyText = proxied.replace(/^Title:\s*.+(?:\r?\n)+/, '').trim();
           blocked = false;
           fetchNote = '(retrieved via a reader proxy after the site blocked direct access)';
         }
@@ -2877,15 +3258,19 @@ async function handleSearchTool(req, res) {
 
       // Give up honestly rather than feeding the model a captcha page.
       if (blocked || !bodyText.trim()) {
-        const reason = statusCode ? `HTTP ${statusCode}` : 'network error or timeout';
+        const failure = botWallDetected && statusCode === 200
+          ? 'The site returned an anti-bot/security challenge (HTTP 200).'
+          : describePageFetchFailure(statusCode, statusText);
+        const error = `Could not read ${finalUrl}: ${failure}`;
         return res.json({
           success: false,
           tool: 'fetch_url',
           url: finalUrl,
-          error: `Could not read ${finalUrl} (${reason}). The site likely blocks automated access.`,
+          httpStatus: statusCode || undefined,
+          error,
           output:
-            `Could not read ${finalUrl} (${reason}) — the page is behind a bot/security wall or is unreachable.\n` +
-            `Do NOT invent its contents. Either try a different link from your web search, or answer from the search snippets and clearly say what you could not verify.`,
+            `${error}\n` +
+            'Do NOT invent the page contents. Try a different search result or answer from search snippets, clearly saying what you could not verify.',
         });
       }
 
@@ -2947,7 +3332,11 @@ async function handleSearchTool(req, res) {
 app.post('/api/search', handleSearchTool);
 
 // Agent mode: workspaces, files, commands, and the agent run itself.
-registerAgentRoutes(app, { runSearchTool, resolveProvider: providerWithStoredCredentials });
+registerAgentRoutes(app, {
+  runSearchTool,
+  resolveProvider: providerWithStoredCredentials,
+  resolveSummaryModel: (provider, model) => resolveAgentSummaryModel(readSettingsFromDisk(), provider, model),
+});
 
 // A cloud sandbox bills while it is RUNNING, so one left behind after a run is
 // pure cost. This sweeper pauses app-managed sandboxes once they go quiet, and
@@ -3074,8 +3463,7 @@ const listen = () => {
   if (previewAuthMode === 'generated') {
     console.log('');
     console.log('  This server is reachable beyond localhost, so the API needs an access code.');
-    console.log(`  Preview access code: ${PREVIEW_TOKEN}`);
-    console.log(`  (saved in ${path.join(DATA_DIR, 'preview-token.txt')}; set DANAV_PREVIEW_TOKEN to choose your own)`);
+    console.log(`  (the generated code is saved privately in ${path.join(DATA_DIR, 'preview-token.txt')}; set DANAV_PREVIEW_TOKEN to choose your own)`);
     console.log('');
   }
 };

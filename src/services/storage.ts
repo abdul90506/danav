@@ -75,11 +75,25 @@ export function sanitizeProvidersForClient(providers: Provider[]): Provider[] {
   return (Array.isArray(providers) ? providers : [])
     .filter((provider): provider is Provider => Boolean(provider && typeof provider === 'object'))
     .map((provider) => {
-      const { apiKey, ...safeProvider } = provider;
-      delete safeProvider.clearApiKey;
+      const { apiKey, apiKeys, apiKeyAdditions, clearApiKey, clearApiKeys, ...safeProvider } = provider;
+      const reportedCount = Number.isFinite(provider.apiKeyCount)
+        ? Math.max(0, Math.floor(provider.apiKeyCount || 0))
+        : 0;
+      const storedCount = Math.max(
+        reportedCount,
+        Number(Boolean(provider.apiKeyConfigured || (typeof apiKey === 'string' && apiKey.trim()))),
+        Array.isArray(apiKeys)
+          ? new Set(apiKeys.flatMap((key) => typeof key === 'string' && key.trim() ? [key.trim()] : [])).size
+          : 0,
+      );
+      const additions = Array.isArray(apiKeyAdditions)
+        ? [...new Set(apiKeyAdditions.filter((key) => typeof key === 'string').map((key) => key.trim()).filter(Boolean))]
+        : [];
+      const apiKeyCount = clearApiKeys || clearApiKey ? additions.length : storedCount + additions.length;
       return {
         ...safeProvider,
-        apiKeyConfigured: Boolean((typeof apiKey === 'string' && apiKey.trim()) || provider.apiKeyConfigured),
+        apiKeyCount,
+        apiKeyConfigured: apiKeyCount > 0,
       };
     });
 }
@@ -100,10 +114,16 @@ export function getStoredProviders(): Provider[] {
         // A successful settings read/save replaces this with a key-free server view.
         const safe = sanitizeProvidersForClient(parsed);
         saveStoredProviders(safe);
-        return parsed.map((provider: Provider) => {
+        return safe.map((provider) => {
+          const legacy = parsed.find((candidate: Provider) => candidate?.id === provider.id);
           const copy = { ...provider };
-          delete copy.clearApiKey;
-          copy.apiKeyConfigured = Boolean((typeof provider.apiKey === 'string' && provider.apiKey.trim()) || provider.apiKeyConfigured);
+          // Only the old single-key field is kept in memory for the existing
+          // one-time backend migration. Multi-key values and all edit intents
+          // are stripped before this provider state reaches React.
+          if (typeof legacy?.apiKey === 'string' && legacy.apiKey.trim()) {
+            copy.apiKey = legacy.apiKey;
+            copy.apiKeyConfigured = true;
+          }
           return copy;
         });
       }

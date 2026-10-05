@@ -7,12 +7,13 @@ import path from 'node:path';
 import express from 'express';
 import { startFakeLlm, HTML, CSS } from '../fake-llm.js';
 import { runAgent, pruneMessages, revealPlan, worklogLines, verificationLabel } from '../../server/agent/loop.js';
+import { streamCompletion } from '../../server/agent/llm.js';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
 import { registerAgentRoutes, _activeRuns } from '../../server/agent/routes.js';
 import { resolveApproval } from '../../server/agent/approvals.js';
 import { countLines } from '../../server/agent/textops.js';
 import { normalizeAgentBlockForDisk } from '../../server/agent/persist.js';
-import { readRunJournal } from '../../server/agent/journal.js';
+import { readRunJournal, recentRunsForPrompt, taskKeyFor } from '../../server/agent/journal.js';
 import { genId } from '../../server/agent/util.js';
 import { _resetStoreCache } from '../../server/agent/store.js';
 
@@ -137,6 +138,29 @@ function assertConsistentTranscript(messages) {
     }
   }
 }
+
+test('successful tool work is saved as an automatic task checkpoint and appears in the next model context', async () => {
+  const dataDir = tmp('danav-task-memory-loop-');
+  const taskId = 'assistant-message-task-memory-test';
+  const previousDataDir = process.env.DANAV_DATA_DIR;
+  process.env.DANAV_DATA_DIR = dataDir;
+  try {
+    const { requests, result } = await agentRun({ model: 'fake-mangled', taskId, dataDir });
+    assert.equal(result.stopReason, 'completed');
+    const requestContext = JSON.stringify(requests.at(-1).messages);
+    assert.match(requestContext, /\[task-step memory\]/, 'the checkpoint was added before the next model turn');
+    assert.match(requestContext, /index\.html/, 'the useful changed path reached context');
+
+    const run = readRunJournal('ws-loop').find((item) => item.taskKey === taskKeyFor(taskId));
+    assert.ok(run?.memories?.length, 'the checkpoint was persisted to the local journal');
+    const handoff = recentRunsForPrompt('ws-loop', 'continue the page', 3000, 8, { resume: true, taskKey: taskKeyFor(taskId) });
+    assert.match(handoff, /index\.html/, 'the same task can retrieve its saved checkpoint on Continue');
+  } finally {
+    if (previousDataDir === undefined) delete process.env.DANAV_DATA_DIR;
+    else process.env.DANAV_DATA_DIR = previousDataDir;
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
 
 // ---------------------------------------------------------------------------
 
@@ -726,7 +750,7 @@ test('a run that changed code and checked nothing is asked to run the project\'s
   const { events, requests, result } = await agentRun({ model: 'fake-verify', workspace: ws });
 
   const finalMessages = requests.at(-1).messages.map((m) => String(m.content || ''));
-  const asks = finalMessages.filter((c) => c.includes('ran none of the project'));
+  const asks = finalMessages.filter((c) => c.includes('ran no relevant check'));
   assert.equal(asks.length, 1, 'the model was told to verify, exactly once');
   assert.match(asks[0], /run_checks/, 'and told exactly how');
   assert.match(finalMessages.filter((c) => c.includes('Tests 1 passed')).join('\n'), /Tests 1 passed/, 'the check result reached the transcript');
@@ -919,6 +943,17 @@ test('context pruning: old tool output and file bodies are elided first; whole r
   const c = build();
   assert.equal(pruneMessages(c, 1_000_000).pruned, false);
   assert.equal(c.length, 26);
+
+  const pinnedMemory = { role: 'user', content: '[task-step memory] The auth guard runs before the protected route; continue from the invalid-session check.' };
+  const withMemory = [{ role: 'system', content: 'sys' }, pinnedMemory, { role: 'user', content: 'current request' }];
+  for (let i = 0; i < 4; i++) {
+    withMemory.push({ role: 'assistant', content: null, tool_calls: [{ id: `m${i}`, type: 'function', function: { name: 'read_file', arguments: '{}' } }] });
+    withMemory.push({ role: 'tool', tool_call_id: `m${i}`, content: 'large result '.repeat(400) });
+  }
+  pruneMessages(withMemory, 2200);
+  assert.ok(withMemory.includes(pinnedMemory), 'automatic task memory survives context pruning');
+  assert.ok(withMemory.some((m) => m.role === 'user' && m.content === 'current request'), 'the active request survives beside the memory');
+  assertConsistentTranscript(withMemory);
 });
 
 test('compaction keeps the decisive tail diagnostic instead of the first terminal lines', () => {
@@ -998,12 +1033,42 @@ test('provider errors surface as a clear error event (after retrying), and the r
     const { events, result, requests } = await agentRun({ model: 'fake-http-500' });
     assert.equal(result.stopReason, 'error');
     assert.match(events.find((e) => e.error).error, /upstream exploded/);
-    assert.equal(requests.length, 4, 'a 5xx is retried three times before giving up');
-    assert.ok(events.some((e) => /retrying in/.test(e.status || '')), 'the user is told it is retrying');
+    assert.equal(requests.length, 6, 'a 5xx gets five retries after the initial request');
+    assert.ok(events.some((e) => /retry 1 of 5/.test(e.status || '')), 'the user is told which retry is happening');
     assert.equal(agentEvents(events, 'run_end').length, 1);
     const noTools = await agentRun({ model: 'fake-no-tools' });
     assert.match(noTools.events.find((e) => e.error).error, /does not support tool calling/);
     assert.equal(noTools.requests.length, 1, 'a 400 is not retried');
+  } finally {
+    delete process.env.DANAV_LLM_RETRY_BASE_MS;
+  }
+});
+
+test('Agent provider retries rotate saved keys and use five distinct backoff waits', async () => {
+  const l = await getLlm();
+  l.requests.length = 0;
+  l.authorizations.length = 0;
+  process.env.DANAV_LLM_RETRY_BASE_MS = '1';
+  const retries = [];
+  try {
+    await assert.rejects(streamCompletion({
+      provider: { id: `retry-test-${Date.now()}`, baseUrl: l.baseUrl, apiKeys: ['first-fake-key', 'second-fake-key'] },
+      model: 'fake-http-500',
+      thinkingLevel: 'Auto',
+      messages: [{ role: 'user', content: 'retry this request' }],
+      tools: [],
+      signal: new AbortController().signal,
+      onText: () => {},
+      onRetry: (info) => retries.push(info),
+    }), /upstream exploded/);
+    assert.equal(l.requests.length, 6, 'five retries follow the initial request');
+    assert.deepEqual(l.authorizations, [
+      'Bearer first-fake-key', 'Bearer second-fake-key', 'Bearer first-fake-key',
+      'Bearer second-fake-key', 'Bearer first-fake-key', 'Bearer second-fake-key',
+    ]);
+    assert.deepEqual(retries.map((retry) => retry.attempt), [1, 2, 3, 4, 5]);
+    assert.deepEqual(retries.map((retry) => retry.delayMs), [1, 2, 4, 8, 16]);
+    assert.ok(retries.every((retry) => retry.maxRetries === 5 && retry.credentialCount === 2));
   } finally {
     delete process.env.DANAV_LLM_RETRY_BASE_MS;
   }
@@ -1578,6 +1643,8 @@ test('work that goes deep without a plan is reminded once, and the plan is kept'
   assert.equal(plans.length, 1, 'the plan reached the chat');
   assert.equal(plans[0].agent.result.todos[1].status, 'in_progress');
   assert.equal(plans[0].agent.result.done, 1);
+  assert.equal(plans[0].agent.result.summary, 'Add the feature', 'the visible plan line names the current milestone');
+  assert.deepEqual(plans[0].agent.result.findings, []);
 });
 
 test('a plan survives the trimming of the round that produced it', () => {
@@ -1696,10 +1763,10 @@ test('a run that goes quiet is asked to narrate, and a talkative one is left alo
   // The closing summary is required, and its LENGTH is the model's judgement of
   // the run — a one-file change reads differently from a long, risky one. The old
   // flat "500 characters is plenty" is gone on purpose.
-  assert.match(system, /End with a summary that fits the work/, 'a closing summary is required');
-  assert.match(system, /one small change, one obvious answer → one or two lines/, 'small work is summarised small');
-  assert.match(system, /Five to ten sentences of real explanation is right for a run like that/, 'big work is explained properly');
-  assert.match(system, /never pad, never under-report/, 'and the rule is fit, not length');
+  assert.match(system, /End with a brief summary that fits the work/, 'a closing summary is required');
+  assert.match(system, /small change or direct answer gets one or two short sentences/, 'small work is summarised small');
+  assert.match(system, /multi-file feature or meaningful fix gets a few short sentences/, 'bigger work gets enough explanation without padding');
+  assert.match(system, /never pad, repeat the plan, or under-report/, 'and the rule is fit, not length');
   assert.match(system, /NO headings, NO bold section labels, NO file-by-file inventory/, 'the shape stays readable');
   assert.ok(!/500 characters is plenty/.test(system), 'the flat length cap is gone');
   assert.match(system, /never describe work you did not do/i, 'the prompt forbids claiming work that never happened');

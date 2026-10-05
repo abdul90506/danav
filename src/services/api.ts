@@ -1,4 +1,5 @@
 import type {
+  AgentSummaryModelSelection,
   ChatMessageContent,
   ChatRequestPayload,
   Conversation,
@@ -23,7 +24,7 @@ export interface FetchModelsResponse {
 }
 
 export async function testProviderConnection(
-  provider: Pick<Provider, 'baseUrl' | 'apiKey' | 'apiType'> & { id?: string }
+  provider: Pick<Provider, 'baseUrl' | 'apiKey' | 'apiKeys' | 'apiType' | 'clearApiKeys'> & { id?: string }
 ): Promise<TestProviderResponse> {
   try {
     const res = await fetch('/api/providers/test', {
@@ -52,7 +53,7 @@ export async function testProviderConnection(
 }
 
 export async function fetchProviderModels(
-  provider: Pick<Provider, 'id' | 'baseUrl' | 'apiKey' | 'apiType'>
+  provider: Pick<Provider, 'id' | 'baseUrl' | 'apiKey' | 'apiKeys' | 'apiType' | 'clearApiKeys'>
 ): Promise<FetchModelsResponse> {
   try {
     const res = await fetch('/api/providers/models', {
@@ -295,6 +296,7 @@ export async function fetchBackendSettings(): Promise<{
   theme?: any;
   lastSelectedProviderId?: string;
   lastSelectedModelId?: string;
+  agentSummaryModel?: AgentSummaryModelSelection | null;
 } | null> {
   try {
     const res = await fetch('/api/settings', { headers: previewAuthHeaders() });
@@ -313,6 +315,7 @@ export async function saveBackendSettings(settings: {
   theme?: string;
   lastSelectedProviderId?: string;
   lastSelectedModelId?: string;
+  agentSummaryModel?: AgentSummaryModelSelection | null;
 }): Promise<boolean> {
   try {
     const res = await fetch('/api/settings', {

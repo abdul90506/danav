@@ -26,17 +26,53 @@ export class LlmError extends Error {
 }
 
 const normalizeBaseUrl = (url) => String(url || '').trim().replace(/\/+$/, '');
+const MAX_PROVIDER_RETRIES = 5;
+const MAX_RETRY_WAIT_MS = 30_000;
+const credentialCursors = new Map();
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => {
-      clearTimeout(t);
+    if (signal?.aborted) {
       reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
-    }, { once: true });
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 
-/** Base of the retry backoff (ms). Overridable so tests don't wait half a minute. */
+/** Base of retry backoff (ms). Overridable so focused tests do not wait. */
 const retryBaseMs = () => (Number(process.env.DANAV_LLM_RETRY_BASE_MS) > 0 ? Number(process.env.DANAV_LLM_RETRY_BASE_MS) : 2000);
+
+function retryAfterMs(value) {
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? 0 : Math.max(0, date - Date.now());
+}
+
+const retryDelayMs = (retry, retryAfter = 0) =>
+  Math.min(MAX_RETRY_WAIT_MS, Math.max(retryBaseMs() * (2 ** Math.max(0, retry - 1)), retryAfter));
+const retryableStatus = (status) => status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599);
+const retryableMessage = (value) => /rate[ _-]?limit|too many requests|overload(?:ed)?|server busy|provider busy|temporar(?:y|ily) unavailable|resource exhausted|capacity|try again later|timed? out|bad gateway|internal server error/i.test(String(value || ''));
+
+function credentialList(provider) {
+  const values = Array.isArray(provider?.apiKeys) && provider.apiKeys.length
+    ? provider.apiKeys
+    : [provider?.apiKey];
+  return [...new Set(values.flatMap((value) => {
+    if (typeof value !== 'string') return [];
+    const key = value.trim();
+    return key ? [key] : [];
+  }))];
+}
 
 export const maxTokens = () => (Number(process.env.DANAV_MAX_TOKENS) > 0 ? Number(process.env.DANAV_MAX_TOKENS) : 32768);
 
@@ -85,7 +121,37 @@ export async function streamCompletion({
     ? Math.max(256, Math.min(maxTokens(), Math.floor(maxOutputTokens)))
     : maxTokens();
   const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' };
-  if (provider.apiKey) headers.Authorization = `Bearer ${String(provider.apiKey).trim()}`;
+  const apiKeys = credentialList(provider);
+  const cursorKey = `${String(provider.id || '')}\n${baseUrl}`;
+  let credentialIndex = apiKeys.length ? (credentialCursors.get(cursorKey) || 0) % apiKeys.length : 0;
+  let requestCredentialIndex = credentialIndex;
+  let retriesUsed = 0;
+
+  const scheduleRetry = async ({ reason, retryAfter = 0, rotateCredential = true }) => {
+    if (retriesUsed >= MAX_PROVIDER_RETRIES) return false;
+    retriesUsed += 1;
+    if (rotateCredential && apiKeys.length) {
+      credentialIndex = (credentialIndex + 1) % apiKeys.length;
+      credentialCursors.set(cursorKey, credentialIndex);
+    }
+    const delayMs = retryDelayMs(retriesUsed, retryAfter);
+    onRetry?.({
+      attempt: retriesUsed,
+      maxRetries: MAX_PROVIDER_RETRIES,
+      delayMs,
+      reason,
+      credentialIndex: apiKeys.length ? credentialIndex + 1 : 0,
+      credentialCount: apiKeys.length,
+    });
+    await sleep(delayMs, signal);
+    return true;
+  };
+
+  const headersForCredential = (credential) => {
+    const next = { ...headers };
+    if (credential) next.Authorization = `Bearer ${credential}`;
+    return next;
+  };
 
   const build = (withThinking) => {
     const body = { model: requestModel, messages, stream: true, max_tokens: tokenLimit };
@@ -98,22 +164,31 @@ export async function streamCompletion({
     return body;
   };
 
-  // ---- open the stream (retrying whatever is retryable) --------------------
+  // ---- open the stream (retrying provider-busy failures) --------------------
   let withThinking = hasThinkingConfig;
-  const maxAttempts = 4;
-  /** Open (or re-open) the provider stream. Throws once the retries are spent. */
+  /** Open (or re-open) the provider stream. */
   const openUpstream = async () => {
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const rejectedCredentials = new Set();
+    for (;;) {
+      if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+      requestCredentialIndex = credentialIndex;
+      const credential = apiKeys.length ? apiKeys[requestCredentialIndex] : '';
       let res;
       try {
-        res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(build(withThinking)), signal });
+        res = await fetch(endpoint, {
+          method: 'POST',
+          headers: headersForCredential(credential),
+          body: JSON.stringify(build(withThinking)),
+          signal,
+        });
       } catch (err) {
         if (err?.name === 'AbortError' || signal?.aborted) throw err;
-        if (attempt === maxAttempts) throw new LlmError(`Could not reach the provider: ${err?.cause?.code || err?.message || 'network error'}`);
-        const delayMs = Math.round(retryBaseMs() * 0.75) * attempt * attempt;
-        onRetry?.({ attempt, delayMs, reason: 'connection problem' });
-        await sleep(delayMs, signal);
-        continue;
+        if (await scheduleRetry({ reason: 'connection problem' })) continue;
+        if (apiKeys.length) {
+          credentialIndex = (requestCredentialIndex + 1) % apiKeys.length;
+          credentialCursors.set(cursorKey, credentialIndex);
+        }
+        throw new LlmError(`Could not reach the provider: ${err?.cause?.code || err?.message || 'network error'}`);
       }
       if (res.ok) return res;
 
@@ -129,25 +204,55 @@ export async function streamCompletion({
         // Auto has no requested effort to preserve. Retry without optional thought
         // summaries if a compatible endpoint rejects that display-only parameter.
         withThinking = false;
-        attempt--;
         continue;
       }
-      const retryable = res.status === 429 || res.status >= 500;
-      if (retryable && attempt < maxAttempts) {
-        const retryAfter = Number(res.headers.get('retry-after'));
-        const delayMs = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 20_000) : retryBaseMs() * attempt * attempt;
-        onRetry?.({ attempt, delayMs, reason: res.status === 429 ? 'rate limited' : `provider error ${res.status}` });
-        await sleep(delayMs, signal);
-        continue;
+
+      // An invalid saved key should not prevent trying the remaining keys. This
+      // credential-only rotation is immediate; it does not consume a busy retry.
+      if (res.status !== 401 && res.status !== 403) rejectedCredentials.clear();
+      if ((res.status === 401 || res.status === 403) && apiKeys.length > 1 && !rejectedCredentials.has(requestCredentialIndex)) {
+        rejectedCredentials.add(requestCredentialIndex);
+        if (rejectedCredentials.size < apiKeys.length) {
+          credentialIndex = (requestCredentialIndex + 1) % apiKeys.length;
+          credentialCursors.set(cursorKey, credentialIndex);
+          onRetry?.({
+            attempt: retriesUsed,
+            maxRetries: MAX_PROVIDER_RETRIES,
+            delayMs: 0,
+            reason: 'API key rejected; trying another saved key',
+            credentialIndex: credentialIndex + 1,
+            credentialCount: apiKeys.length,
+          });
+          continue;
+        }
+      }
+
+      const retryable = retryableStatus(res.status) || retryableMessage(text);
+      if (retryable) {
+        const reason = res.status === 429
+          ? 'rate limited'
+          : res.status >= 500
+            ? `provider busy (HTTP ${res.status})`
+            : res.status === 408 || res.status === 425
+              ? 'provider temporarily unavailable'
+              : 'provider busy';
+        if (await scheduleRetry({ reason, retryAfter: retryAfterMs(res.headers.get('retry-after')) })) continue;
+        if (apiKeys.length) {
+          credentialIndex = (requestCredentialIndex + 1) % apiKeys.length;
+          credentialCursors.set(cursorKey, credentialIndex);
+        }
       }
       if (res.status === 400 && /tool|function/i.test(text)) {
         throw new LlmError(`This model or provider does not support tool calling, which Agent mode needs. Pick a different model. (${errorMessageFrom(400, text, model)})`, { status: 400, code: 'no_tools' });
       }
+      if ((res.status === 401 || res.status === 403) && apiKeys.length) {
+        credentialIndex = (requestCredentialIndex + 1) % apiKeys.length;
+        credentialCursors.set(cursorKey, credentialIndex);
+      }
       throw new LlmError(errorMessageFrom(res.status, text, model), { status: res.status });
     }
-    throw new LlmError('The provider did not answer.');
   };
-  const upstream = await openUpstream();
+  let upstream = await openUpstream();
 
   // ---- read it, and pick it back up if the connection dies ------------------
   //
@@ -178,9 +283,47 @@ export async function streamCompletion({
     onThinking?.(s);
   };
 
+  let streamedToolDelta = false;
+  const forwardToolDelta = (index, slot) => {
+    streamedToolDelta = true;
+    onToolDelta?.(index, slot);
+  };
+  const rememberNextCredential = (usedIndex) => {
+    if (!apiKeys.length) return;
+    credentialIndex = (usedIndex + 1) % apiKeys.length;
+    credentialCursors.set(cursorKey, credentialIndex);
+  };
+  const readWithBusyRetries = async () => {
+    for (;;) {
+      const usedIndex = requestCredentialIndex;
+      try {
+        const result = await readStream(upstream, { emitText, emitThinking, onToolDelta: forwardToolDelta });
+        rememberNextCredential(usedIndex);
+        return result;
+      } catch (err) {
+        const hasOutput = Boolean(emitted.text || emitted.thinking || streamedToolDelta);
+        const isBusy = retryableStatus(err?.status) || retryableMessage(err?.message);
+        if (signal?.aborted || hasOutput || !isBusy) throw err;
+        const reason = err?.status === 429
+          ? 'rate limited'
+          : err?.status
+            ? `provider busy (HTTP ${err.status})`
+            : 'provider busy';
+        if (!(await scheduleRetry({ reason, retryAfter: retryAfterMs(upstream?.headers?.get('retry-after')) }))) {
+          if (apiKeys.length) {
+            credentialIndex = (usedIndex + 1) % apiKeys.length;
+            credentialCursors.set(cursorKey, credentialIndex);
+          }
+          throw err;
+        }
+        upstream = await openUpstream();
+      }
+    }
+  };
+
   let round;
   try {
-    round = await readStream(upstream, { emitText, emitThinking, onToolDelta });
+    round = await readWithBusyRetries();
   } catch (err) {
     if (err?.code !== 'stream_dropped' || signal?.aborted || !(emitted.text || emitted.thinking)) throw err;
 
@@ -203,6 +346,7 @@ export async function streamCompletion({
     try {
       retryUpstream = await openUpstream();
       retried = await readStream(retryUpstream, { emitText, emitThinking });
+      rememberNextCredential(requestCredentialIndex);
     } catch (retryErr) {
       if (retryErr?.name === 'AbortError' || signal?.aborted) throw retryErr;
       // Unreachable as well? Then there is nothing more to ask for.
@@ -269,7 +413,15 @@ async function readStream(upstream, { emitText, emitThinking, onToolDelta }) {
   };
 
   const handleChunk = (parsed) => {
-    if (parsed.error) throw new LlmError(parsed.error.message || 'The provider stopped mid-answer.');
+    if (parsed.error) {
+      const providerError = parsed.error;
+      const status = Number(providerError?.status);
+      const message = typeof providerError === 'string' ? providerError : providerError?.message;
+      throw new LlmError(message || 'The provider stopped mid-answer.', {
+        status: Number.isFinite(status) && status > 0 ? status : undefined,
+        code: providerError?.code ? String(providerError.code) : undefined,
+      });
+    }
     if (parsed.usage) usage = parsed.usage;
     const choice = parsed.choices?.[0];
     if (choice?.finish_reason) finishReason = choice.finish_reason;

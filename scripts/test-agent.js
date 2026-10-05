@@ -15,8 +15,12 @@ import path from 'node:path';
 
 // Never let tests write their fake agent memories or workspaces into the real app data directory.
 const previousDataDir = process.env.DANAV_DATA_DIR;
+const previousTaskSummaryTestFlag = process.env.DANAV_AGENT_TEST_SKIP_SUMMARIES;
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-agent-suite-'));
 process.env.DANAV_DATA_DIR = testDataDir;
+// Scripted model responses are deterministic. Background summaries use the focused
+// task-memory unit test's injected summarizer rather than consuming fake-LLM rounds.
+process.env.DANAV_AGENT_TEST_SKIP_SUMMARIES = '1';
 
 const results = { passed: 0, failed: 0 };
 const failures = [];
@@ -283,6 +287,8 @@ await runAll();
 console.log(`\n${results.passed} passed, ${results.failed} failed`);
 if (previousDataDir === undefined) delete process.env.DANAV_DATA_DIR;
 else process.env.DANAV_DATA_DIR = previousDataDir;
+if (previousTaskSummaryTestFlag === undefined) delete process.env.DANAV_AGENT_TEST_SKIP_SUMMARIES;
+else process.env.DANAV_AGENT_TEST_SKIP_SUMMARIES = previousTaskSummaryTestFlag;
 fs.rmSync(testDataDir, { recursive: true, force: true });
 // Servers started by the tests (fake LLM, temp apps) would keep the process alive.
 process.exit(results.failed ? 1 : 0);

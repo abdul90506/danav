@@ -146,10 +146,11 @@ export function formatChecksHint(checks) {
   if (!checks?.lines?.length) return '';
   return (
     '# How this project checks itself\n' +
-    'Detected from the workspace. Run the relevant one before you call code work done, and fix what it reports ' +
-    'instead of describing it as a known issue. **run_checks runs them all in one call** — fastest first, stopping at ' +
-    'the first real failure and handing back its error lines — or run one directly with run_command when you only ' +
-    'want that one. A new project with no checks of its own is the exception: write the check you can actually run ' +
+    'Detected from the workspace. Prefer the narrowest check that directly covers the change: run_checks with `only` ' +
+    'runs matching checks, or use run_command for one exact test command. Without `only`, run_checks runs all detected ' +
+    'checks, fastest first, stopping at the first real failure and returning its error lines; use that broader path only ' +
+    'when it is warranted. Do not run the whole test suite by habit. Fix what a check reports instead of describing it as ' +
+    'a known issue. A new project with no checks of its own is the exception: write the check you can actually run ' +
     '(a small test file, or the app started and its output inspected).\n' +
     checks.lines.join('\n')
   );

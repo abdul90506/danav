@@ -14,7 +14,7 @@ import {
   Check,
 } from 'lucide-react';
 import { Conversation } from '../types';
-import { useDismissOnOutside } from '../utils/useDismissOnOutside';
+import { useDismissOnOutside, useEscapeToClose, useFocusTrap } from '../utils/useDismissOnOutside';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -53,19 +53,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   /** The row whose "more" menu is open — the menu closes when you click away from it. */
   const menuWrapRef = useRef<HTMLDivElement>(null);
+  const asideRef = useRef<HTMLElement>(null);
   const closeMenu = useCallback(() => setMenuOpenId(null), []);
+  const closeSearch = useCallback(() => {
+    setIsSearchOpen(false);
+    setSearchQuery('');
+  }, []);
+  const closeMobileDrawer = useCallback(() => {
+    closeSearch();
+    onCloseMobile();
+  }, [closeSearch, onCloseMobile]);
   useDismissOnOutside(menuWrapRef, menuOpenId !== null, closeMenu);
+  useEscapeToClose(closeMobileDrawer, isMobileOpen);
+  // Search is a small revealed surface too: Escape clears it before it can reach
+  // the chat's stop-generation shortcut.
+  useEscapeToClose(closeSearch, isSearchOpen && (!isCollapsed || isMobileOpen));
+  useFocusTrap(asideRef, isMobileOpen);
 
-  // Filter conversations by search query
+  const orderedConversations = useMemo(
+    () => [...conversations].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
+    [conversations]
+  );
+
+  // Filter conversations by title, message text, and attached filename.
   const filteredConversations = useMemo(() => {
-    if (!searchQuery.trim()) return conversations;
-    const q = searchQuery.toLowerCase();
-    return conversations.filter(
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return orderedConversations;
+    return orderedConversations.filter(
       (c) =>
         c.title.toLowerCase().includes(q) ||
-        c.messages.some((m) => m.content.toLowerCase().includes(q))
+        c.messages.some(
+          (m) =>
+            m.content.toLowerCase().includes(q) ||
+            m.attachments?.some((attachment) => attachment.name.toLowerCase().includes(q))
+        )
     );
-  }, [conversations, searchQuery]);
+  }, [orderedConversations, searchQuery]);
 
   // Separate into Pinned and Recent
   const pinnedConversations = useMemo(
@@ -106,17 +129,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
     setMenuOpenId(null);
   };
 
+  const selectChat = (id: string) => {
+    closeSearch();
+    onSelectChat(id);
+    if (isMobileOpen) onCloseMobile();
+  };
+
   // Render individual chat item
-  const renderChatItem = (chat: Conversation, isPinnedSection: boolean) => {
+  const renderChatItem = (chat: Conversation) => {
     const isActive = chat.id === activeChatId;
     const isEditing = chat.id === editingChatId;
 
-    if (isCollapsed) {
+    // `isCollapsed` is a desktop-only layout. The mobile drawer must always show
+    // names and actions, even if the desktop sidebar was collapsed beforehand.
+    if (isCollapsed && !isMobileOpen) {
       return (
         <button
           key={chat.id}
-          onClick={() => onSelectChat(chat.id)}
+          type="button"
+          onClick={() => selectChat(chat.id)}
           title={chat.title}
+          aria-label={chat.title}
+          aria-current={isActive ? 'page' : undefined}
           className={`w-9 h-9 mx-auto flex items-center justify-center rounded-xl transition-colors ${
             isActive
               ? 'bg-zinc-200/90 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-sm'
@@ -131,21 +165,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
     return (
       <div
         key={chat.id}
-        onClick={() => {
-          onSelectChat(chat.id);
-          if (isMobileOpen) onCloseMobile();
-        }}
-        className={`group relative flex items-center justify-between w-full h-9 px-3 rounded-xl text-xs cursor-pointer select-none transition-all ${
+        className={`group relative flex items-center justify-between w-full h-9 px-2 rounded-xl text-xs select-none transition-all ${
           isActive
             ? 'bg-zinc-200/80 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 font-medium shadow-sm'
             : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-100'
         }`}
       >
         {isEditing ? (
-          <div
-            className="flex items-center gap-1.5 w-full pr-1"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="flex items-center gap-1.5 w-full pr-1">
             <input
               type="text"
               value={editTitle}
@@ -154,17 +181,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 if (e.key === 'Enter') handleSaveRename(chat.id);
                 if (e.key === 'Escape') setEditingChatId(null);
               }}
+              aria-label={`Rename ${chat.title}`}
               autoFocus
               className="flex-1 h-6 px-1.5 text-xs bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-1 focus:ring-zinc-400"
             />
             <button
+              type="button"
               onClick={() => handleSaveRename(chat.id)}
+              title="Save chat name"
+              aria-label="Save chat name"
               className="p-1 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 rounded"
             >
               <Check className="w-3.5 h-3.5" />
             </button>
             <button
+              type="button"
               onClick={() => setEditingChatId(null)}
+              title="Cancel rename"
+              aria-label="Cancel rename"
               className="p-1 text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded"
             >
               <X className="w-3.5 h-3.5" />
@@ -172,18 +206,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         ) : (
           <>
-            <div className="min-w-0 flex-1 pr-1 flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => selectChat(chat.id)}
+              aria-current={isActive ? 'page' : undefined}
+              title={chat.title}
+              className="min-w-0 flex-1 h-full pr-1 flex items-center gap-1.5 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/70 rounded-lg"
+            >
               <span className="truncate block">{chat.title}</span>
-            </div>
+            </button>
 
-            {/* Hover Actions: Pin & More Options */}
-            <div className="flex items-center gap-0.5 shrink-0">
-              {/* Pin button */}
+            {/* Actions stay in a stable spot, appear on hover/focus, and remain
+                visible on touch screens where hover does not exist. */}
+            <div className="sidebar-actions flex items-center gap-0.5 shrink-0">
               <button
+                type="button"
                 onClick={(e) => handlePin(chat.id, e)}
                 title={chat.isPinned ? 'Unpin chat' : 'Pin chat'}
                 aria-label={chat.isPinned ? 'Unpin chat' : 'Pin chat'}
-                className={`hidden group-hover:flex items-center justify-center w-6 h-6 rounded-md transition-colors ${
+                className={`flex items-center justify-center w-6 h-6 rounded-md transition-colors ${
                   chat.isPinned
                     ? 'text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white'
                     : 'text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-300/40 dark:hover:bg-zinc-700/50'
@@ -192,26 +233,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <Pin className={`w-3.5 h-3.5 ${chat.isPinned ? 'fill-current' : ''}`} />
               </button>
 
-              {/* More menu trigger button */}
               <div
                 className="relative"
                 ref={menuOpenId === chat.id ? menuWrapRef : undefined}
-                onClick={(e) => e.stopPropagation()}
               >
                 <button
-                  onClick={() =>
-                    setMenuOpenId(menuOpenId === chat.id ? null : chat.id)
-                  }
-                  aria-label="Chat options"
-                  className="hidden group-hover:flex items-center justify-center w-6 h-6 rounded-md text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-300/40 dark:hover:bg-zinc-700/50 transition-colors"
+                  type="button"
+                  onClick={() => setMenuOpenId(menuOpenId === chat.id ? null : chat.id)}
+                  aria-label={`Options for ${chat.title}`}
+                  aria-expanded={menuOpenId === chat.id}
+                  aria-controls={`chat-options-${chat.id}`}
+                  title="Chat options"
+                  className="flex items-center justify-center w-6 h-6 rounded-md text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-300/40 dark:hover:bg-zinc-700/50 transition-colors"
                 >
                   <MoreHorizontal className="w-3.5 h-3.5" />
                 </button>
 
-                {/* Dropdown popup */}
                 {menuOpenId === chat.id && (
-                  <div className="absolute right-0 top-7 z-50 w-32 py-1 bg-white dark:bg-zinc-800 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-700 text-xs animate-in fade-in duration-100">
+                  <div id={`chat-options-${chat.id}`} role="group" aria-label={`Options for ${chat.title}`} className="absolute right-0 top-7 z-50 w-32 py-1 bg-white dark:bg-zinc-800 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-700 text-xs animate-in fade-in duration-100">
                     <button
+                      type="button"
                       onClick={(e) => handlePin(chat.id, e)}
                       className="flex items-center gap-2 w-full px-3 py-1.5 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700/60 transition-colors"
                     >
@@ -219,6 +260,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       <span>{chat.isPinned ? 'Unpin' : 'Pin'}</span>
                     </button>
                     <button
+                      type="button"
                       onClick={(e) => handleStartRename(chat, e)}
                       className="flex items-center gap-2 w-full px-3 py-1.5 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700/60 transition-colors"
                     >
@@ -226,6 +268,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       <span>Rename</span>
                     </button>
                     <button
+                      type="button"
                       onClick={(e) => handleDelete(chat.id, e)}
                       className="flex items-center gap-2 w-full px-3 py-1.5 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
                     >
@@ -247,8 +290,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {/* Mobile Backdrop */}
       {isMobileOpen && (
         <div
+          aria-hidden="true"
           className="fixed inset-0 z-40 bg-zinc-900/40 backdrop-blur-sm lg:hidden"
-          onClick={onCloseMobile}
+          onClick={closeMobileDrawer}
         />
       )}
 
@@ -257,6 +301,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           the floating reveal button the app renders in its place. On mobile the
           drawer is driven by `isMobileOpen`, so it is unaffected. */}
       <aside
+        ref={asideRef}
+        role={isMobileOpen ? 'dialog' : undefined}
+        aria-modal={isMobileOpen ? 'true' : undefined}
+        aria-label={isMobileOpen ? 'Chat history' : undefined}
+        tabIndex={isMobileOpen ? -1 : undefined}
         className={`fixed top-0 bottom-0 left-0 z-50 flex flex-col bg-[#f9f9f9] dark:bg-[#171717] border-r border-zinc-200/70 dark:border-zinc-800/80 transition-all duration-200 ease-in-out lg:static ${
           isMobileOpen ? 'translate-x-0 w-72' : '-translate-x-full lg:translate-x-0'
         } ${isCollapsed ? 'lg:hidden' : 'lg:w-64'}`}
@@ -273,9 +322,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {/* Header Action Icons: Leveled and aligned */}
           <div className="flex items-center gap-0.5 sm:gap-1">
             <button
-              onClick={() => setIsSearchOpen(!isSearchOpen)}
+              type="button"
+              onClick={() => (isSearchOpen ? closeSearch() : setIsSearchOpen(true))}
               title="Search chats"
               aria-label="Search chats"
+              aria-expanded={isSearchOpen}
+              aria-controls="sidebar-chat-search"
               className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
                 isSearchOpen
                   ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
@@ -287,7 +339,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
             {/* Close Sidebar button */}
             <button
-              onClick={onToggleCollapse}
+              type="button"
+              onClick={() => {
+                closeSearch();
+                onToggleCollapse();
+              }}
               title="Close sidebar"
               aria-label="Close sidebar"
               className="hidden lg:flex p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
@@ -297,7 +353,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
             {/* Mobile close */}
             <button
-              onClick={onCloseMobile}
+              type="button"
+              onClick={closeMobileDrawer}
+              aria-label="Close sidebar"
+              title="Close sidebar"
               className="lg:hidden p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 cursor-pointer"
             >
               <X className="w-4 h-4 stroke-[1.75]" />
@@ -308,7 +367,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* New Chat Button: Transparent by default, highlighted only on hover */}
         <div className="px-3 pt-2.5 pb-1">
           <button
+            type="button"
             onClick={() => {
+              closeSearch();
               onNewChat();
               if (isMobileOpen) onCloseMobile();
             }}
@@ -321,20 +382,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* Search input (when toggled open) */}
         {isSearchOpen && (
-          <div className="px-3 py-2 animate-in fade-in duration-150">
+          <div id="sidebar-chat-search" className="px-3 py-2 animate-in fade-in duration-150">
             <div className="relative flex items-center">
-              <Search className="absolute left-2.5 w-3.5 h-3.5 text-zinc-400" />
+              <Search className="absolute left-2.5 w-3.5 h-3.5 text-zinc-400" aria-hidden="true" />
               <input
                 type="text"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  if (e.target.value.trim()) setIsRecentsCollapsed(false);
+                }}
                 placeholder="Search chats..."
+                aria-label="Search chats by title, message, or attachment"
                 className="w-full h-8 pl-8 pr-7 text-xs bg-white dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700/60 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 shadow-sm"
                 autoFocus
               />
               {searchQuery && (
                 <button
+                  type="button"
                   onClick={() => setSearchQuery('')}
+                  aria-label="Clear chat search"
+                  title="Clear search"
                   className="absolute right-2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -359,7 +427,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     Pinned
                   </div>
                   <div className="space-y-0.5 mt-0.5">
-                    {pinnedConversations.map((chat) => renderChatItem(chat, true))}
+                    {pinnedConversations.map((chat) => renderChatItem(chat))}
                   </div>
                 </div>
               )}
@@ -369,6 +437,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsRecentsCollapsed(!isRecentsCollapsed)}
+                  aria-expanded={!isRecentsCollapsed}
+                  aria-controls="sidebar-recent-chats"
                   className="w-full flex items-center justify-between px-3 py-1 text-[11px] font-semibold text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 uppercase tracking-wider select-none transition-colors"
                 >
                   <span>Recents</span>
@@ -379,11 +449,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   />
                 </button>
 
-                {!isRecentsCollapsed && (
-                  <div className="space-y-0.5 mt-0.5">
-                    {recentConversations.map((chat) => renderChatItem(chat, false))}
-                  </div>
-                )}
+                <div
+                  id="sidebar-recent-chats"
+                  className="space-y-0.5 mt-0.5"
+                  hidden={isRecentsCollapsed}
+                >
+                  {recentConversations.map((chat) => renderChatItem(chat))}
+                </div>
               </div>
             </>
           )}
@@ -392,11 +464,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* Bottom bar with Settings */}
         <div className="p-2 border-t border-zinc-200/60 dark:border-zinc-800/70">
           <button
+            type="button"
             onClick={() => {
+              closeSearch();
               onOpenSettings();
               if (isMobileOpen) onCloseMobile();
             }}
             title="Settings"
+            aria-label="Settings"
             className="flex items-center gap-2.5 w-full h-10 px-3 rounded-xl text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors select-none cursor-pointer"
           >
             <SettingsIcon className="w-4 h-4 shrink-0 text-zinc-500 dark:text-zinc-400 stroke-[1.75]" />

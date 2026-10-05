@@ -6,9 +6,9 @@ import { useEffect, useRef, type RefObject } from 'react';
  * opened — the last one wins, so the user never has to close a menu before
  * opening the next one.
  *
- * Every menu that appears on click needs this, and every menu that forgets it
- * leaves the user clicking the same little button again to get rid of it, or
- * staring at two menus at once.
+ * Nested details are allowed (a trail can contain an open action row). Escape
+ * closes the most recently opened surface first, rather than collapsing every
+ * accordion in the chain at once.
  *
  * @param ref      element that contains BOTH the trigger and the popover
  * @param open     whether the popover is currently showing
@@ -17,9 +17,27 @@ import { useEffect, useRef, type RefObject } from 'react';
 
 /** Broadcast on open; every other open popover closes when it sees an id that is not its own. */
 const OPEN_EVENT = 'danav:popover-open';
-let popoverSeq = 0;
+let surfaceSeq = 0;
 /** How many dismissible surfaces are open right now — see `hasOpenPopover`. */
 let openPopovers = 0;
+/** Open order lets nested surfaces answer Escape one at a time. */
+let openSurfaceOrder: string[] = [];
+
+function registerSurface(id: string): void {
+  if (!openSurfaceOrder.includes(id)) openPopovers += 1;
+  openSurfaceOrder = openSurfaceOrder.filter((openId) => openId !== id);
+  openSurfaceOrder.push(id);
+}
+
+function unregisterSurface(id: string): void {
+  if (!openSurfaceOrder.includes(id)) return;
+  openSurfaceOrder = openSurfaceOrder.filter((openId) => openId !== id);
+  openPopovers = Math.max(0, openPopovers - 1);
+}
+
+function isTopSurface(id: string): boolean {
+  return openSurfaceOrder[openSurfaceOrder.length - 1] === id;
+}
 
 /**
  * Is anything revealed at this moment (a menu, an action row's detail, an open
@@ -39,7 +57,7 @@ export function useDismissOnOutside(
   onDismiss: () => void
 ): void {
   const idRef = useRef('');
-  if (!idRef.current) idRef.current = `popover-${++popoverSeq}`;
+  if (!idRef.current) idRef.current = `surface-${++surfaceSeq}`;
   // The callback is usually an inline arrow: keeping it in a ref means the
   // listeners are not torn down and re-added on every render of the caller.
   const dismissRef = useRef(onDismiss);
@@ -48,7 +66,7 @@ export function useDismissOnOutside(
 
   useEffect(() => {
     if (!open) return;
-    openPopovers += 1;
+    registerSurface(idRef.current);
     // Tell the others, then listen for whichever of them opens next.
     window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: { id: idRef.current, node: ref.current } }));
     const onOther = (event: Event) => {
@@ -63,24 +81,28 @@ export function useDismissOnOutside(
     };
     window.addEventListener(OPEN_EVENT, onOther);
     return () => {
-      openPopovers = Math.max(0, openPopovers - 1);
+      unregisterSurface(idRef.current);
       window.removeEventListener(OPEN_EVENT, onOther);
     };
   }, [open]);
 
   useEffect(() => {
     if (!open) return;
-    const onDown = (event: MouseEvent) => {
+    const onDown = (event: PointerEvent) => {
       const node = ref.current;
       if (node && event.target instanceof Node && !node.contains(event.target)) dismiss();
     };
     const onKey = (event: Event) => {
-      if ((event as globalThis.KeyboardEvent).key === 'Escape') dismiss();
+      const keyboardEvent = event as globalThis.KeyboardEvent;
+      if (keyboardEvent.key !== 'Escape' || !isTopSurface(idRef.current)) return;
+      dismiss();
+      keyboardEvent.preventDefault();
+      keyboardEvent.stopPropagation();
     };
-    document.addEventListener('mousedown', onDown);
+    document.addEventListener('pointerdown', onDown);
     document.addEventListener('keydown', onKey);
     return () => {
-      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('pointerdown', onDown);
       document.removeEventListener('keydown', onKey);
     };
   }, [ref, open]);
@@ -95,19 +117,97 @@ export function useDismissOnOutside(
  * the dialog and stop a running agent turn at the same time.
  */
 export function useEscapeToClose(onClose: () => void, enabled = true): void {
+  const idRef = useRef('');
+  if (!idRef.current) idRef.current = `surface-${++surfaceSeq}`;
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
   useEffect(() => {
     if (!enabled) return;
-    openPopovers += 1;
+    registerSurface(idRef.current);
     const onKey = (event: Event) => {
-      if ((event as globalThis.KeyboardEvent).key === 'Escape') closeRef.current();
+      const keyboardEvent = event as globalThis.KeyboardEvent;
+      if (keyboardEvent.key !== 'Escape' || !isTopSurface(idRef.current)) return;
+      closeRef.current();
+      keyboardEvent.preventDefault();
+      keyboardEvent.stopPropagation();
     };
     document.addEventListener('keydown', onKey);
     return () => {
-      openPopovers = Math.max(0, openPopovers - 1);
+      unregisterSurface(idRef.current);
       document.removeEventListener('keydown', onKey);
     };
   }, [enabled]);
+}
+
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'area[href]',
+  'button:not([disabled])',
+  'input:not([disabled]):not([type="hidden"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  'iframe',
+  'object',
+  'embed',
+  '[contenteditable="true"]',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+/** Keep keyboard focus inside a revealed modal/drawer, and return it on close. */
+export function useFocusTrap(
+  ref: RefObject<HTMLElement | null>,
+  enabled = true
+): void {
+  useEffect(() => {
+    if (!enabled) return;
+    const container = ref.current;
+    if (!container) return;
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const getFocusable = () =>
+      Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((element) => {
+        if (element.matches(':disabled') || element.closest('[hidden], [aria-hidden="true"]')) return false;
+        const style = window.getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+      });
+
+    const preferred = container.querySelector<HTMLElement>('[data-dialog-initial-focus]');
+    if (!container.contains(document.activeElement)) {
+      const first = preferred || getFocusable()[0] || container;
+      first.focus({ preventScroll: true });
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+      const focusable = getFocusable();
+      if (focusable.length === 0) {
+        event.preventDefault();
+        container.focus({ preventScroll: true });
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (!container.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && (active === first || active === container)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    container.addEventListener('keydown', onKeyDown);
+    return () => {
+      container.removeEventListener('keydown', onKeyDown);
+      if (previouslyFocused?.isConnected) previouslyFocused.focus({ preventScroll: true });
+    };
+  }, [enabled, ref]);
 }

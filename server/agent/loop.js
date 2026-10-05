@@ -17,6 +17,7 @@ import { detectChecks, formatChecksHint } from './verify.js';
 import { formatRepoState, readRepoState } from './githistory.js';
 import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun, taskKeyFor } from './journal.js';
+import { createTaskMemory } from './taskMemory.js';
 import { buildToolset, pickFailureLines, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint } from './tools.js';
 import { checkAction, createLedger, observeOwned } from './policy.js';
 import { splitLines } from './textops.js';
@@ -350,6 +351,22 @@ function dropToolRound(messages, round) {
 
 /** The marker that identifies the compact record of trimmed work in a message. */
 export const WORKLOG_MARKER = '[work so far]';
+const TASK_MEMORY_MARKER = '[task-step memory]';
+
+const isTaskMemory = (message) => message.role === 'user' && typeof message.content === 'string' && message.content.startsWith(TASK_MEMORY_MARKER);
+
+/** Keep the live run's small auto-summary pinned while older tool rounds are compacted. */
+function updateTaskMemoryMessage(messages, text) {
+  const index = messages.findIndex(isTaskMemory);
+  const content = String(text || '').trim();
+  if (!content) {
+    if (index >= 0) messages.splice(index, 1);
+    return;
+  }
+  const message = { role: 'user', content: `${TASK_MEMORY_MARKER} ${content}` };
+  if (index >= 0) messages[index] = message;
+  else messages.splice(Math.min(1, messages.length), 0, message);
+}
 
 const digestLine = (s, n = 200) => {
   const one = String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -524,11 +541,11 @@ export function pruneMessages(messages, budgetChars) {
     if (totalSize(messages) <= budget) break;
     // Only plain strings can be clipped; a multimodal array is left alone.
     if (typeof m.content !== 'string') continue;
-    if (isWorklog(m) || protectedPlain.has(m) || m.content.length <= 1200) continue;
+    if (isWorklog(m) || isTaskMemory(m) || protectedPlain.has(m) || m.content.length <= 1200) continue;
     m.content = clipWithin(m.content, 1000, 'older conversation');
   }
   while (totalSize(messages) > budget) {
-    const oldest = plain().find((m) => !protectedPlain.has(m) && !isWorklog(m));
+    const oldest = plain().find((m) => !protectedPlain.has(m) && !isWorklog(m) && !isTaskMemory(m));
     if (!oldest) break;
     const idx = messages.indexOf(oldest);
     if (idx >= 0) messages.splice(idx, 1);
@@ -710,8 +727,16 @@ export async function runAgent({
   taskId = '',
   /** The client's Continue button: the same task, picked up where it stopped. */
   resume = false,
+  /** Optional independently selected provider/model for private task-step summaries. */
+  summaryProvider: configuredSummaryProvider = null,
+  summaryModel: configuredSummaryModel = '',
 }) {
-  const redact = createRedactor([provider.apiKey]);
+  const taskSummaryProvider = configuredSummaryProvider || provider;
+  const taskSummaryModel = configuredSummaryModel || model;
+  const redact = createRedactor([
+    ...(Array.isArray(provider?.apiKeys) ? provider.apiKeys : []), provider?.apiKey,
+    ...(Array.isArray(taskSummaryProvider?.apiKeys) ? taskSummaryProvider.apiKeys : []), taskSummaryProvider?.apiKey,
+  ]);
   const taskKey = taskKeyFor(taskId);
   const priorTaskRun = resume && taskKey
     ? readRunJournal(workspace.id, 30).find((run) => run.taskKey === taskKey) || null
@@ -729,6 +754,28 @@ export async function runAgent({
      */
     ledger: createLedger(),
   };
+  let messages = null;
+  let runActive = true;
+  const taskMemory = createTaskMemory({
+    workspaceId: workspace.id,
+    runId,
+    taskKey,
+    provider: taskSummaryProvider,
+    model: taskSummaryModel,
+    signal,
+    redact,
+    // End-to-end tests use deterministic scripted providers; taskMemory's focused
+    // unit test exercises the background summarizer without consuming their scripts.
+    maxSummaries: process.env.DANAV_AGENT_TEST_SKIP_SUMMARIES === '1' ? 0 : undefined,
+    onUpdate: (text) => { if (messages) updateTaskMemoryMessage(messages, text); },
+    onRetry: ({ attempt, maxRetries, delayMs, reason }) => {
+      if (!runActive) return;
+      const status = delayMs === 0
+        ? `Task notes: ${reason}…`
+        : `Task summary provider is busy — retry ${attempt} of ${maxRetries} in ${Math.max(1, Math.round(delayMs / 1000))}s…`;
+      send({ status });
+    },
+  });
 
   // Child runs are deliberately read-only: their only context is a small set of
   // explicitly selected, redacted file excerpts. They have no tools, shell or
@@ -912,7 +959,7 @@ export async function runAgent({
     } catch {
       /* no history is a normal state, not a failure */
     }
-    const messages = [
+    messages = [
       { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, repo: repoBlock, activity, skills, repoMap, relevantFiles, indexSummary, resume: Boolean(resume && priorTaskRun), budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
       ...priorMessages,
     ];
@@ -1116,9 +1163,15 @@ export async function runAgent({
       };
 
       let round;
+      let roundText = '';
+      let publishedText = '';
       let contextAttempts = 0;
       for (;;) {
+        let attemptText = '';
+        let toolCallStarted = false;
+        publishedText = '';
         try {
+          updateTaskMemoryMessage(messages, taskMemory.promptText());
           round = await streamCompletion({
             provider,
             model,
@@ -1126,14 +1179,41 @@ export async function runAgent({
             messages,
             tools: useTools ? tools.definitions : undefined,
             signal,
-            onText: (t) => send({ content: t }),
+            onText: (t) => {
+              attemptText += t;
+              if (toolCallStarted) {
+                send({ content: t });
+                publishedText += t;
+              }
+            },
             onThinking: (t) => send({ thinking: t }),
-            onToolDelta: (_i, slot) => onDelta(slot),
-            onRetry: ({ delayMs, reason }) => send({ status: `Provider busy (${reason}) — retrying in ${Math.round(delayMs / 1000)}s…` }),
+            onToolDelta: (_i, slot) => {
+              if (slot?.name && !toolCallStarted) {
+                toolCallStarted = true;
+                if (attemptText) {
+                  send({ content: attemptText });
+                  publishedText += attemptText;
+                }
+              }
+              onDelta(slot);
+            },
+            onRetry: ({ attempt, maxRetries, delayMs, reason, credentialIndex, credentialCount }) => {
+              if (reason === 'the answer was cut off') {
+                send({ status: 'The answer was cut off — reconnecting…' });
+                return;
+              }
+              const keyStatus = credentialCount > 1 ? ` (key ${credentialIndex} of ${credentialCount})` : '';
+              const status = delayMs === 0
+                ? `${reason}${keyStatus}`
+                : `Provider is busy — retry ${attempt} of ${maxRetries} in ${Math.max(1, Math.round(delayMs / 1000))}s${keyStatus}…`;
+              send({ status });
+            },
             onStreamRestart: () => {
-              // The answer is being read again from the start: settle anything the
-              // chat still shows for the abandoned attempt, so no row keeps
-              // spinning for a call that will never run.
+              // The answer is being read again from the start: discard its buffered
+              // text and settle any action rows from the abandoned attempt.
+              attemptText = '';
+              publishedText = '';
+              toolCallStarted = false;
               for (const st of live.values()) {
                 send({ agent: { type: 'action_end', id: st.uiId, status: 'error', ok: false, error: 'Interrupted' } });
               }
@@ -1141,6 +1221,7 @@ export async function runAgent({
               send({ agent: { type: 'notice', message: 'The connection dropped mid-answer — asking the provider again.' } });
             },
           });
+          roundText = typeof round.text === 'string' ? round.text : attemptText;
           break;
         } catch (err) {
           if (!isContextLimitError(err) || contextAttempts >= 3) throw err;
@@ -1157,18 +1238,22 @@ export async function runAgent({
       send({ status: 'Working…' });
 
       const calls = useTools ? round.toolCalls.filter((c) => c.name) : [];
+      const unstreamedRoundText = roundText.startsWith(publishedText)
+        ? roundText.slice(publishedText.length)
+        : publishedText ? '' : roundText;
 
       // ---- the model is done talking -----------------------------------------
       if (calls.length === 0) {
-        const said = round.text.trim();
+        const said = roundText.trim();
 
         // The provider stopped because the ANSWER itself hit the output limit (not
         // a tool call): the user is looking at a sentence that breaks off mid-word.
         // Ask for the rest — once or twice — instead of shipping half a reply.
         if (said && round.finishReason === 'length' && !wrapUp && continuations < 2) {
           continuations++;
+          if (roundText) send({ content: roundText });
           send({ agent: { type: 'notice', message: 'The answer hit the output limit — asking the model to continue where it stopped.' } });
-          messages.push({ role: 'assistant', content: round.text });
+          messages.push({ role: 'assistant', content: roundText });
           messages.push({
             role: 'user',
             content:
@@ -1219,19 +1304,23 @@ export async function runAgent({
          * not. Silent, bounded, and only while there is real budget to act on it.
          */
         const checkList = detectedChecks?.commands || [];
-        if (said && !wrapUp && roomLeft && !verifyNudged && state.changed.size > 0 && state.checks.length === 0 && checkList.length) {
+        const checkableChanges = [...state.changed.keys()].some((filePath) => !/\.(?:md|txt|rst|adoc|csv)$/i.test(filePath));
+        if (said && !wrapUp && roomLeft && !verifyNudged && checkableChanges && state.checks.length === 0 && checkList.length) {
           verifyNudged = true;
+          if (roundText) send({ content: roundText });
           messages.push({
             role: 'user',
             content:
-              `[system notice] This run changed ${state.changed.size} file${state.changed.size === 1 ? '' : 's'} but ran none of the project's checks. Do not write the summary yet. ` +
-              `Call run_checks now — one call, it runs the project's own checks (${checkList.slice(0, 3).join(' · ')}${checkList.length > 3 ? ' · …' : ''}) fastest-first, stops at the first real failure and gives you the exact error lines to fix. ` +
-              `If a check genuinely cannot run here (no dependencies installed, service missing), run the closest thing you can, or say in one line in the summary which check you could not run and why. Never describe changed code as verified when nothing was checked.`,
+              `[system notice] This run changed ${state.changed.size} code/config file${state.changed.size === 1 ? '' : 's'} but ran no relevant check. Do not write the summary yet. ` +
+              `Choose the narrowest test or check that covers the changed behavior. The detected project commands are ${checkList.slice(0, 3).join(' · ')}${checkList.length > 3 ? ' · …' : ''}. ` +
+              `If run_checks has a genuinely focused match, pass only="…"; do not call it unfiltered or run the whole test suite by default. Otherwise use one focused run_command (test file/name filter) or a relevant typecheck/build. ` +
+              `If no meaningful check can run here, say why. Never describe changed code as verified when nothing was checked.`,
           });
           continue;
         }
         if (said && open.length && planFinishNudges < 1 && roomLeft) {
           planFinishNudges++;
+          if (roundText) send({ content: roundText });
           messages.push({
             role: 'user',
             content:
@@ -1242,8 +1331,14 @@ export async function runAgent({
           });
           continue;
         }
+        if (said) {
+          send({ agent: { type: 'final_answer_start' } });
+          send({ content: roundText });
+        }
         break;
       }
+
+      if (unstreamedRoundText) send({ content: unstreamedRoundText });
 
       // ---- echo the assistant turn, then run each tool -------------------------
       const prepared = calls.map((slot) => {
@@ -1263,11 +1358,11 @@ export async function runAgent({
       // Did this turn actually say anything to the user? A turn that only fires
       // tool calls is silent, and a run of silent turns is a run the user cannot
       // follow — see the narration nudge at the end of this round.
-      silentSteps = round.text.trim() ? 0 : silentSteps + 1;
+      silentSteps = roundText.trim() ? 0 : silentSteps + 1;
 
       messages.push({
         role: 'assistant',
-        content: round.text || null,
+        content: roundText || null,
         tool_calls: prepared.map(({ slot, modelId }) => {
           let argText = slot.args || '{}';
           try { JSON.parse(argText); } catch { argText = '{}'; } // a broken blob would poison the next request
@@ -1601,11 +1696,11 @@ export async function runAgent({
             durationMs: Date.now() - t0,
           },
         });
-        return { name, modelId, modelIds, rawArgs: slot.args, res };
+        return { name, modelId, modelIds, rawArgs: slot.args, args, res };
       };
 
       /** In order: repeated failures get a nudge, then a stop; the model reads each result back. @returns true to stop the round */
-      const settle = ({ name, modelId, modelIds, rawArgs, res }) => {
+      const settle = ({ name, modelId, modelIds, rawArgs, args, res }) => {
         let output = truncateMiddle(String(res.output ?? ''), limits.maxOutputChars, 'output');
         let stop = false;
 
@@ -1640,6 +1735,7 @@ export async function runAgent({
             stop = true;
           }
         }
+        taskMemory.capture({ name, args: args || {}, result: res, state });
         const answeredIds = Array.isArray(modelIds) && modelIds.length ? modelIds : [modelId];
         if (answeredIds.length > 1) {
           messages.push({
@@ -1752,8 +1848,11 @@ export async function runAgent({
       }
       await w.rollback().catch(() => {});
     }
+    runActive = false;
+    try { taskMemory.finish(state); } catch { /* task notes must never prevent run cleanup */ }
     try {
       recordRun(workspace.id, {
+        runId,
         taskKey,
         stopReason,
         changed: [...state.changed].map(([filePath, counts]) => ({ path: filePath, ...counts })),

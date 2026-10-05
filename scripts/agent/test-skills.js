@@ -36,11 +36,17 @@ test('discovers standard skill packs, keeps their bodies out of the prompt, and 
     assert.ok(first.some((s) => s.key === 'syntax' && /quoted colon/.test(s.description)));
     assert.ok(first.some((s) => s.key === 'review [.agents/skills]'));
     assert.ok(first.some((s) => s.key === 'review [.claude/skills]'));
+    assert.ok(first.some((s) => s.key === 'systematic-debugging' && s.source === 'Danav built-in'));
+    assert.ok(first.some((s) => s.key === 'focused-verification' && /smallest meaningful/.test(s.description)));
     assert.ok(!first.some((s) => s.key === 'deeper' || s.key === 'nested'));
 
     const prompt = registry.promptText();
     assert.match(prompt, /accessible-ui/);
     assert.doesNotMatch(prompt, /Trace untrusted inputs/, 'full playbook is progressive-disclosure only');
+    assert.doesNotMatch(prompt, /Write down one testable cause/, 'bundled skill bodies are also loaded only on demand');
+    const debugging = await registry.load('systematic-debugging');
+    assert.equal(debugging.source, 'Danav built-in');
+    assert.match(debugging.body, /one testable cause/);
     const loaded = await registry.load('review [.claude/skills]');
     assert.equal(loaded.path, '.claude/skills/review/SKILL.md');
     assert.match(loaded.body, /Trace untrusted inputs to the privileged operation/);
@@ -73,8 +79,9 @@ test('skips likely-secret skill content and cannot follow a skill symlink outsid
     await ws.init();
     const registry = createSkillRegistry(ws);
     const catalog = await registry.discover();
-    assert.equal(catalog.length, 0, 'secret-bearing and outside-linked skill files are not exposed');
-    await assert.rejects(() => registry.load('escape'), /No project skills were found/);
+    assert.equal(catalog.length, 2, 'only the two curated built-ins remain; secret-bearing and outside-linked project files are hidden');
+    assert.equal(catalog.some((skill) => skill.key === 'leaky' || skill.key === 'escape'), false);
+    await assert.rejects(() => registry.load('escape'), /No project skill named/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(outside, { recursive: true, force: true });

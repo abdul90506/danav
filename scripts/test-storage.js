@@ -11,9 +11,16 @@ import { getStoredProviders, sanitizeConversations, sanitizeProvidersForClient, 
  */
 
 let passed = 0;
+let skipped = 0;
 const failures = [];
+const onlyArg = process.argv.indexOf('--only');
+const onlyTest = onlyArg >= 0 ? String(process.argv[onlyArg + 1] || '').toLowerCase() : '';
 
 async function test(name, fn) {
+  if (onlyTest && !name.toLowerCase().includes(onlyTest)) {
+    skipped++;
+    return;
+  }
   try {
     await fn();
     passed++;
@@ -108,7 +115,8 @@ await test('legacy provider keys are removed from localStorage but available for
   const key = 'danav_chat_providers_v2';
   const secret = 'storage-legacy-provider-secret';
   const values = new Map([[key, JSON.stringify([{
-    id: 'legacy', name: 'Legacy', baseUrl: 'https://example.test/v1', apiType: 'openai', apiKey: secret, models: [],
+    id: 'legacy', name: 'Legacy', baseUrl: 'https://example.test/v1', apiType: 'openai', apiKey: secret,
+    apiKeyConfigured: false, apiKeyCount: 0, models: [],
   }])]]);
   const previous = globalThis.localStorage;
   Object.defineProperty(globalThis, 'localStorage', {
@@ -119,10 +127,48 @@ await test('legacy provider keys are removed from localStorage but available for
     const loaded = getStoredProviders();
     assert.equal(loaded[0].apiKey, secret, 'the current app boot can migrate a legacy key');
     assert.equal(loaded[0].apiKeyConfigured, true);
+    assert.equal(loaded[0].apiKeyCount, 1, 'a stale zero count cannot hide a legacy key being migrated');
     assert.doesNotMatch(values.get(key), /storage-legacy-provider-secret/, 'the saved browser copy has no key');
     const safe = sanitizeProvidersForClient(loaded);
     assert.equal(safe[0].apiKey, undefined);
     assert.equal(safe[0].apiKeyConfigured, true);
+  } finally {
+    if (previous === undefined) delete globalThis.localStorage;
+    else Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: previous });
+  }
+});
+
+await test('multi-key values and one-shot key intents are removed from browser state', () => {
+  const secrets = ['browser-key-one-secret', 'browser-key-two-secret', 'browser-key-three-secret'];
+  const safe = sanitizeProvidersForClient([{
+    id: 'multi', name: 'Multi', baseUrl: 'https://example.test/v1', apiType: 'openai', models: [],
+    apiKeys: secrets.slice(0, 2), apiKeyAdditions: [secrets[2]], clearApiKeys: false,
+  }])[0];
+  assert.equal(safe.apiKey, undefined);
+  assert.equal(safe.apiKeys, undefined);
+  assert.equal(safe.apiKeyAdditions, undefined);
+  assert.equal(safe.clearApiKeys, undefined);
+  assert.equal(safe.apiKeyCount, 3);
+  assert.equal(safe.apiKeyConfigured, true);
+  assert.doesNotMatch(JSON.stringify(safe), /browser-key-(?:one|two|three)-secret/);
+
+  const storageKey = 'danav_chat_providers_v2';
+  const values = new Map([[storageKey, JSON.stringify([{
+    id: 'multi', name: 'Multi', baseUrl: 'https://example.test/v1', apiType: 'openai', models: [],
+    apiKeys: secrets.slice(0, 2), apiKeyAdditions: [secrets[2]], clearApiKeys: false,
+  }])]]);
+  const previous = globalThis.localStorage;
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) },
+  });
+  try {
+    const loaded = getStoredProviders()[0];
+    assert.equal(loaded.apiKeys, undefined);
+    assert.equal(loaded.apiKeyAdditions, undefined);
+    assert.equal(loaded.clearApiKeys, undefined);
+    assert.doesNotMatch(JSON.stringify(loaded), /browser-key-(?:one|two|three)-secret/);
+    assert.doesNotMatch(values.get(storageKey), /browser-key-(?:one|two|three)-secret/);
   } finally {
     if (previous === undefined) delete globalThis.localStorage;
     else Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: previous });
@@ -157,7 +203,7 @@ await test("a store too large to post keeps the open chat's images and sheds the
 
 console.log('\n====================================================');
 if (failures.length === 0) {
-  console.log(`\uD83C\uDF89 ALL ${passed} STORAGE TESTS PASSED`);
+  console.log(`\uD83C\uDF89 ${passed} STORAGE TEST${passed === 1 ? '' : 'S'} PASSED${skipped ? ` (${skipped} unrelated checks skipped)` : ''}`);
 } else {
   console.log(`${passed} passed, ${failures.length} FAILED:`);
   for (const f of failures) console.log(`  - ${f.name}: ${f.err.message}`);

@@ -9,9 +9,10 @@
  */
 
 import { looksLikeSecret } from './memory.js';
+import { BUILTIN_SKILLS } from './builtinSkills.js';
 
 const SKILL_ROOTS = ['.danav/skills', '.agents/skills', '.claude/skills', '.cursor/skills'];
-const MAX_SKILLS = 24;
+const MAX_SKILLS = 26;
 const MAX_SKILL_BYTES = 48_000;
 const MAX_DISCOVERY_BYTES = 480_000;
 const MAX_SKILL_CHARS = 16_000;
@@ -72,7 +73,7 @@ export function createSkillRegistry(workspace, redact = (text) => text) {
   async function discover(workspaceListing) {
     if (discovered) return catalog.map(({ key, name, description, path, source }) => ({ key, name, description, path, source }));
     discovered = true;
-    const candidates = [];
+    const candidates = BUILTIN_SKILLS.map((skill) => ({ ...skill, size: skill.body.length }));
     let inspectedBytes = 0;
     const visibleRootDirs = workspaceListing && !workspaceListing.truncated && Array.isArray(workspaceListing.entries)
       ? new Set(workspaceListing.entries.filter((entry) => entry.type === 'dir').map((entry) => String(entry.path || '').split('/')[0]))
@@ -139,6 +140,12 @@ export function createSkillRegistry(workspace, redact = (text) => text) {
         : 'No project skills were found. Skills are Markdown playbooks in .danav/skills, .agents/skills, .claude/skills, or .cursor/skills.');
     }
 
+    if (item.bundled) {
+      const body = String(redact(item.body || ''));
+      if (!body.trim() || looksLikeSecret(body)) throw new Error(`Built-in skill "${item.key}" could not be loaded safely.`);
+      return { key: item.key, name: item.name, description: item.description, path: item.path, source: item.source, body };
+    }
+
     const abs = await safePath(item.path);
     const stat = await workspace.stat(abs);
     if (stat.type !== 'file' || stat.size > MAX_SKILL_BYTES) throw new Error(`Skill "${item.key}" changed or is too large to load; re-discover the skill before using it.`);
@@ -155,7 +162,7 @@ export function createSkillRegistry(workspace, redact = (text) => text) {
       const tail = contentBudget - head;
       parsed.body = `${parsed.body.slice(0, head)}${marker}${tail ? parsed.body.slice(-tail) : ''}`;
     }
-    return { key: item.key, name: parsed.name, description: item.description, path: item.path, body: parsed.body };
+    return { key: item.key, name: parsed.name, description: item.description, path: item.path, source: item.source, body: parsed.body };
   }
 
   function promptText() {
