@@ -1601,6 +1601,11 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         if (start > coveredThrough + 1) break;
         coveredThrough = Math.max(coveredThrough, end);
       }
+      // Whether this read stopped short of the end of the file on its own. Computed
+      // here, above the repeat check, so the stub below reports the same shape: a
+      // result that left the key off made every repeated read carry
+      // `truncated: undefined`, which the UI then has to defend against.
+      const truncated = !many && last < total && args.end_line === undefined;
       // Keep exact ranges in a versioned ledger. If the model requests an
       // unchanged range it already received, nudge it once instead of sending the
       // same body again; a second request returns the text in case compaction made
@@ -1627,7 +1632,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         const ranges = shown.map(([start, end]) => start === end ? `L${start}` : `L${start}-L${end}`).join(', ');
         return {
           output: safe(`${rel(abs)} is unchanged; you already received ${ranges} in this run. I skipped the repeated text once to save context. If that earlier text is no longer in your context and you still need it, request this range again.`),
-          ui: { kind: 'read', path: rel(abs), startLine: first, endLine: last, totalLines: total, ...(many ? { ranges: shown } : {}), repeated: true },
+          ui: { kind: 'read', path: rel(abs), startLine: first, endLine: last, totalLines: total, truncated, ...(many ? { ranges: shown } : {}), repeated: true },
         };
       }
       if (body === rawBody) {
@@ -1635,7 +1640,6 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
           observeFileRange(ctx.state, abs, { startLine, endLine, totalLines: total, version: hash });
         }
       }
-      const truncated = !many && last < total && args.end_line === undefined;
       const header = many ? `${rel(abs)} — ${total} lines; ${shown.length} chunks: ${shown.map(([a0, b0]) => `${a0}-${b0}`).join(', ')}` : `${rel(abs)} — lines ${first}-${last} of ${total}`;
       /**
        * The part of a long file you have not read yet, named from the index when it
@@ -1756,20 +1760,38 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       guardWrite(abs);
       if (typeof args.content !== 'string' || args.content === '') throw new ToolError('Missing required argument "content" (string).');
       const { content } = fixDoubleEscaped(args.content);
-      const { exists, text } = await readExisting(abs);
+      // The loop may already have paced this part onto disk so the row could count up.
+      // The file then holds our own draft, so append to what was there BEFORE it —
+      // reading the file here would append the draft to itself.
+      const liveWriter = args._liveWriter && typeof args._liveWriter.isCurrent === 'function' ? args._liveWriter : null;
+      const { exists, text } = liveWriter
+        ? { exists: Boolean(liveWriter.existed), text: typeof args._original === 'string' ? args._original : '' }
+        : await readExisting(abs);
       if (exists && !hasInspectedContent(ctx.state, abs)) {
         throw new ToolError(`${rel(abs)} appeared before the append, and its complete contents have not been read in this run. Read the whole current file and retry.`);
       }
       const expectedVersion = expectedFileVersion(ctx.state, abs);
       const observedVersion = exists ? expectedVersion || fileVersion(text) : null;
-      if (exists && expectedVersion && fileVersion(text) !== expectedVersion) {
+      if (liveWriter) {
+        // The draft is ours; the writer tracks whether anything else moved underneath it.
+        if (!(await liveWriter.isCurrent())) {
+          throw new ToolError(`${rel(abs)} changed while it was being written. Read the whole current file with read_file, reconcile the append, and retry.`);
+        }
+      } else if (exists && expectedVersion && fileVersion(text) !== expectedVersion) {
         throw new ToolError(`${rel(abs)} changed after it was read. Read the whole current file with read_file, reconcile the append, and retry.`);
       }
       // a file that was cut off mid-line (or never ended with a newline) must not glue the next part onto it
       const glue = exists && text !== '' && !text.endsWith('\n') && !content.startsWith('\n') ? '\n' : '';
       const next = text + glue + content;
       if (next.length > limits.maxWriteChars) throw new ToolError(`Appending would make ${rel(abs)} ${next.length} characters, and one file can hold at most ${limits.maxWriteChars} here. Write the rest to another file, or generate the whole file with a script (run_command).`);
-      if (observedVersion) {
+      // Recheck at the write boundary, in case the file moved between the diff and here.
+      if (liveWriter) {
+        // Comparing versions is meaningless now: what is on disk is our own draft, so
+        // ask the writer, which knows the draft it last wrote.
+        if (!(await liveWriter.isCurrent())) {
+          throw new ToolError(`${rel(abs)} changed while it was being written. Read the whole current file with read_file, reconcile the append, and retry.`);
+        }
+      } else if (observedVersion) {
         if ((await currentFileVersion(ws, abs)) !== observedVersion) {
           throw new ToolError(`${rel(abs)} changed after it was read. Read the whole current file with read_file, reconcile the append, and retry.`);
         }

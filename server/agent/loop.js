@@ -1043,11 +1043,22 @@ export async function runAgent({
         return st.writerPromise;
       };
 
-      const queueLiveWrite = (st, pathText, body, args, { force = false, minGapMs = PROGRESS_THROTTLE_MS } = {}) => {
+      const queueLiveWrite = (st, pathText, body, args, { force = false, minGapMs = PROGRESS_THROTTLE_MS, appendTo = null, tool = 'write_file' } = {}) => {
         st.writeQueue = st.writeQueue.then(async () => {
           const writer = await writerFor(st, pathText);
           if (!writer || signal.aborted) return;
-          await writer.push(body, { force });
+          // append_file adds to what is already on disk, so the draft goes AFTER the
+          // original — joined exactly the way append_file itself will join them, or the
+          // file would gain a line break the finished version does not have. `appendTo`
+          // is the complete part being appended; the glue cannot be decided from a
+          // prefix, whose first character is all that matters and never changes.
+          let text = body;
+          if (appendTo !== null) {
+            const base = writer.existed ? writer.original : '';
+            const glue = base !== '' && !base.endsWith('\n') && !appendTo.startsWith('\n') ? '\n' : '';
+            text = base + glue + body;
+          }
+          await writer.push(text, { force });
           if (signal.aborted || !writer.hasWritten()) return;
           const progress = writer.progress(); // numbers and tail come from the file now on disk
           const key = JSON.stringify([progress.added, progress.removed, progress.tail]);
@@ -1059,7 +1070,7 @@ export async function runAgent({
             agent: {
               type: 'action_update',
               id: st.uiId,
-              patch: { args: tools.displayArgs('write_file', args), progress },
+              patch: { args: tools.displayArgs(tool, args), progress },
             },
           });
         }).catch(() => {});
@@ -1428,32 +1439,46 @@ export async function runAgent({
             await writer.settle();
           }
         } else if (
-          name === 'write_file' && !argError && limits.revealEnabled() &&
+          (name === 'write_file' || name === 'append_file') && !argError && limits.revealEnabled() &&
           typeof args.path === 'string' && args.path &&
           typeof args.content === 'string' && args.content.length >= REVEAL_MIN_CHARS
         ) {
           // The provider sent this whole call in one frame, so there were no deltas to
           // follow. Write the real body in chunks instead: the row opens at
           // "Creating <file> +0" and climbs as those lines actually land on disk.
-          const shown = tools.displayArgs(name, args);
-          if (isNew) {
-            send({ agent: { type: 'action_start', id, tool: name, args: shown } });
-            isNew = false; // the row exists now; do not open a second one below
+          // Long files arrive as write_file + several append_file calls, so an append
+          // has to climb too — otherwise every part after the first is silent.
+          //
+          // Take the writer FIRST. liveWrite refuses a file this run has not read, or
+          // one that changed since, and returns null; there is then nothing to pace, and
+          // revealing anyway would sit on "+0" for seconds before the real tool ran.
+          const paced = await writerFor(st, args.path);
+          if (paced) {
+            const shown = tools.displayArgs(name, args);
+            if (isNew) {
+              send({ agent: { type: 'action_start', id, tool: name, args: shown } });
+              isNew = false; // the row exists now; do not open a second one below
+            }
+            st.rowShownAt = Date.now();
+            send({ agent: { type: 'action_update', id, patch: { status: 'running', args: shown, progress: ZERO_PROGRESS() } } });
+            await revealBody({
+              body: args.content,
+              signal,
+              onStep: async (prefix, done) => {
+                // queueLiveWrite publishes the count the writer read back off the file,
+                // never the length of the prefix we just handed it.
+                queueLiveWrite(st, args.path, prefix, args, {
+                  force: done,
+                  minGapMs: REVEAL_PROGRESS_GAP_MS,
+                  appendTo: name === 'append_file' ? args.content : null,
+                  tool: name,
+                });
+                await st.writeQueue;
+              },
+            });
+            writer = paced;
+            await writer.settle();
           }
-          st.rowShownAt = Date.now();
-          send({ agent: { type: 'action_update', id, patch: { status: 'running', args: shown, progress: ZERO_PROGRESS() } } });
-          await revealBody({
-            body: args.content,
-            signal,
-            onStep: async (prefix, done) => {
-              // queueLiveWrite publishes the count the writer read back off the file,
-              // never the length of the prefix we just handed it.
-              queueLiveWrite(st, args.path, prefix, args, { force: done, minGapMs: REVEAL_PROGRESS_GAP_MS });
-              await st.writeQueue;
-            },
-          });
-          writer = await (st.writerPromise || Promise.resolve(null));
-          if (writer) await writer.settle();
         }
         if (signal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
 

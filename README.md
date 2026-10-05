@@ -272,15 +272,51 @@ the next run can see rather than a claim.
 | `DANAV_ALLOWED_HOSTS` | loopback only | extra hostnames for `/api/agent/*` (e.g. `.trycloudflare.com`); also switches on the preview access code |
 | `DANAV_PREVIEW_TOKEN` | generated | the access code a public preview must send |
 | `DANAV_DISABLE_PREVIEW_AUTH` | off | `1` serves publicly with no access code (behind your own auth) |
-| `NOVITA_SANDBOX_TIMEOUT_MINUTES` | 30 | idle time before a sandbox pauses |
+| `NOVITA_SANDBOX_TIMEOUT_MINUTES` | 15 | platform backstop: Novita pauses the sandbox itself this long after the last activity |
+| `DANAV_SANDBOX_IDLE_PAUSE_SECONDS` | 180 | silence in a workspace before Danav pauses its sandbox |
+| `DANAV_SANDBOX_RUN_GRACE_SECONDS` | 90 | shorter clock once a run has just finished |
 | `DANAV_AGENT_MAX_STEPS` / `_MAX_RUN_MINUTES` | 80 / 45 | limits for one run |
 | `DANAV_AGENT_COMMAND_TIMEOUT_SECONDS` | 120 | default per-command timeout (max 900) |
 | `DANAV_AGENT_CONTEXT_CHARS` | 420000 | old tool output is trimmed beyond this |
 | `DANAV_MAX_TOKENS` | 32768 | output cap per model round |
+| `DANAV_DATA_DIR` | `server/data` | where settings, chats and workspace memory are kept |
+| `DANAV_SHELL` | PowerShell on Windows | set to `cmd` for `cmd.exe` |
+| `DANAV_REVEAL` | on | `0` stops pacing a file body that arrived in one frame (see below) |
+| `DANAV_REVEAL_CHARS_PER_SEC` | 1100 | how fast such a body is revealed |
+| `DANAV_REVEAL_MIN_MS` / `_MAX_MS` | 900 / 4000 | floor and cap on one reveal |
+| `DANAV_ROW_MIN_MS` | 420 | shortest time a row naming a file stays on screen (`0` = off) |
 | `TMDB_API_KEY` | TMDB's published sample key | the key behind `movie_search`; your own gets a private quota |
 | `FLIXRAID_API_URL` | – | optional self-hosted catalogue API used when TMDB returns nothing |
 
 On **Windows**, local commands run in PowerShell (set `DANAV_SHELL=cmd` for `cmd.exe`).
+
+#### Watching a file being written
+
+Only some endpoints stream a tool call's *arguments*. Gemini does once Danav sends
+`stream_function_call_arguments`, so a `write_file` row follows the model token by
+token and counts up on its own.
+
+Everything else measured here sends the whole call in a single SSE frame — check
+any model yourself:
+
+```bash
+node scripts/probe-raw.js 'deepseek-ai/DeepSeek-V4-Flash-0731'
+#   2003ms  tool_call name=write_file + 1900B  gap=0ms
+#   >>> ONE-SHOT: the provider does NOT stream tool arguments.
+```
+
+With no token stream there is nothing to follow, and a local write finishes in a
+few milliseconds — the row would appear and vanish before it could be read. Danav
+therefore writes that body to the real file in chunks, so the row reads
+`Creating app.js +0` and climbs as those lines land. **Every count is read back off
+the file**; nothing is estimated from the model's buffer. Only the cadence is
+chosen, and `DANAV_REVEAL=0` turns it off.
+
+A file longer than one call arrives as `write_file` plus several `append_file`
+parts, and each part climbs the same way — an append is paced onto the end of the
+real file, so the count carries on instead of going quiet after the first chunk.
+Pacing never begins on a file the run has not read, so the guard that refuses a
+blind overwrite still fires and the file is left untouched.
 
 ## 🧪 Testing
 

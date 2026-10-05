@@ -17,13 +17,16 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { dataDir } from '../server/agent/config.js';
+import { providerApiKeys } from '../server/settings.js';
 import { registerAgentRoutes } from '../server/agent/routes.js';
 import { _resetStoreCache } from '../server/agent/store.js';
 
 const model = process.argv[2] || 'models/gemini-3.5-flash-lite';
 const settings = JSON.parse(fs.readFileSync(path.join(dataDir(), 'settings.json'), 'utf8'));
 const provider = settings.providers.find((p) => p.models?.some((m) => m.id === model));
-if (!provider?.apiKey) {
+// Settings keep a list of keys; older files had a single `apiKey`. Read both.
+const [apiKey] = providerApiKeys(provider);
+if (!apiKey) {
   console.error(`No provider in settings.json offers "${model}" with a key.`);
   process.exit(2);
 }
@@ -72,7 +75,7 @@ const res = await fetch(`${base}/api/agent/chat`, {
   method: 'POST',
   headers: H,
   body: JSON.stringify({
-    provider: { id: provider.id, name: provider.name, baseUrl: provider.baseUrl, apiKey: provider.apiKey },
+    provider: { id: provider.id, name: provider.name, baseUrl: provider.baseUrl, apiKey },
     model,
     thinkingLevel: 'Auto',
     workspaceId: ws.id,

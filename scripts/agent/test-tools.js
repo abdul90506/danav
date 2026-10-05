@@ -320,11 +320,26 @@ test('read_file: numbered lines, ranges, clamping, and paging hint', async () =>
   assert.match(first.output, /Continue with read_file start_line=2001/);
   assert.match(first.output, /\n\s+1\tline 1\n/);
 
-  const slice = await run('read_file', { path: 'big.txt', start_line: 100, end_line: 104 });
-  assert.equal(slice.ui.startLine, 100);
-  assert.equal(slice.ui.endLine, 104);
+  // Past line 2000, so this is text the first read did not already hand over —
+  // a range it DID cover comes back as the "already read" stub (below).
+  const slice = await run('read_file', { path: 'big.txt', start_line: 2100, end_line: 2104 });
+  assert.equal(slice.ui.startLine, 2100);
+  assert.equal(slice.ui.endLine, 2104);
   assert.equal(slice.ui.truncated, false);
-  assert.match(slice.output, /lines 100-104 of 2500/);
+  assert.match(slice.output, /lines 2100-2104 of 2500/);
+
+  // A range already received in this run is not sent twice; the row still carries
+  // the same shape, so the UI never has to defend against a missing key.
+  const again = await run('read_file', { path: 'big.txt', start_line: 100, end_line: 104 });
+  assert.equal(again.ui.repeated, true);
+  assert.equal(again.ui.truncated, false, 'a repeated read reports the shape of a normal one');
+  assert.equal(again.ui.startLine, 100);
+  assert.equal(again.ui.endLine, 104);
+  assert.match(again.output, /already received L100-L104/);
+  // ...and asking a second time hands the text over, in case the first copy is gone.
+  const third = await run('read_file', { path: 'big.txt', start_line: 100, end_line: 104 });
+  assert.match(third.output, /lines 100-104 of 2500/);
+  assert.notEqual(third.ui.repeated, true);
 
   const clamp = await run('read_file', { path: 'big.txt', start_line: 2495, end_line: 99999 });
   assert.equal(clamp.ui.endLine, 2500);
@@ -1165,6 +1180,74 @@ test('append_file: builds a big file in parts, never glues onto a half-written l
   assert.equal(fs.readFileSync(path.join(dir, 'big.txt'), 'utf8'), 'one\ntwo\nthree\nfour\nfive-half\nsix\n');
   assert.equal((await run('append_file', { path: 'big.txt', content: '' })).ok, false);
   assert.equal((await run('append_file', { path: '.git/x', content: 'a' })).ok, false);
+});
+
+test('append_file: a part paced onto disk counts up for real and is not appended twice', async () => {
+  const { run, dir, tools, ctx } = await setup();
+  const read = (p) => fs.readFileSync(path.join(dir, p), 'utf8');
+  const part1 = Array.from({ length: 150 }, (_, i) => `line ${i + 1}`).join('\n') + '\n';
+  const part2 = Array.from({ length: 150 }, (_, i) => `line ${i + 151}`).join('\n') + '\n';
+  await run('write_file', { path: 'big.txt', content: part1 });
+
+  // Long files arrive as write_file + append_file parts. The loop paces each part onto
+  // the real file so the row climbs; the tool must then append to what was there BEFORE
+  // the draft, or the part lands twice.
+  const w = await tools.liveWrite('big.txt', ctx.state);
+  assert.ok(w, 'a file this run just wrote may be paced');
+  assert.deepEqual([w.existed, w.original], [true, part1]);
+  const counts = [];
+  for (const frac of [0.1, 0.3, 0.6, 1]) {
+    await w.push(w.original + part2.slice(0, Math.floor(part2.length * frac)), { force: true });
+    const added = w.progress().added;
+    // the published number must be the one actually on disk, never the draft's length
+    assert.equal(added, read('big.txt').split('\n').length - part1.split('\n').length);
+    counts.push(added);
+  }
+  w.close();
+  await w.settle();
+  assert.deepEqual(counts, [...counts].sort((x, y) => x - y), `counts must only climb: ${counts}`);
+  assert.ok(counts[0] > 0 && counts.at(-1) === 150, `climbed ${counts}`);
+
+  const res = await run('append_file', { path: 'big.txt', content: part2, _liveWriter: w, _original: w.original, _originalExisted: w.existed });
+  assert.equal(res.ok, true, res.output);
+  assert.equal(read('big.txt'), part1 + part2, 'exactly part1+part2 — the draft was not appended to itself');
+  assert.deepEqual([res.ui.added, res.ui.totalLines], [150, 300]);
+});
+
+test('append_file: pacing never starts on a file this run has not read', async () => {
+  const { run, dir, tools, ctx } = await setup();
+  const read = (p) => fs.readFileSync(path.join(dir, p), 'utf8');
+  fs.writeFileSync(path.join(dir, 'stranger.txt'), 'already here\n');
+  // No writer, so nothing is written early and the usual guard still speaks up.
+  assert.equal(await tools.liveWrite('stranger.txt', ctx.state), null);
+  assert.equal(read('stranger.txt'), 'already here\n');
+  const blocked = await run('append_file', { path: 'stranger.txt', content: 'more\n' });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.output, /have not been read in this run/);
+  assert.equal(read('stranger.txt'), 'already here\n', 'left untouched');
+
+  // A file with no trailing newline gains exactly one break, draft and tool agreeing.
+  await run('write_file', { path: 'nonl.txt', content: 'first' });
+  const w = await tools.liveWrite('nonl.txt', ctx.state);
+  assert.ok(w);
+  await w.push(`${w.original}\nsec`, { force: true });
+  w.close();
+  await w.settle();
+  const res = await run('append_file', { path: 'nonl.txt', content: 'second\nthird\n', _liveWriter: w, _original: w.original, _originalExisted: w.existed });
+  assert.equal(res.ok, true, res.output);
+  assert.equal(read('nonl.txt'), 'first\nsecond\nthird\n');
+
+  // A brand-new file created through a paced append.
+  const w2 = await tools.liveWrite('fresh.txt', ctx.state);
+  assert.ok(w2);
+  assert.equal(w2.existed, false);
+  await w2.push('alpha\n', { force: true });
+  w2.close();
+  await w2.settle();
+  const made = await run('append_file', { path: 'fresh.txt', content: 'alpha\nbeta\n', _liveWriter: w2, _original: w2.original, _originalExisted: w2.existed });
+  assert.equal(made.ok, true, made.output);
+  assert.equal(read('fresh.txt'), 'alpha\nbeta\n');
+  assert.equal(made.ui.created, true);
 });
 
 test('replace_in_files: literal text with regex characters, many files, one call', async () => {

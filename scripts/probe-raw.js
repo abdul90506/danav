@@ -12,16 +12,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir } from '../server/agent/config.js';
+import { providerApiKeys } from '../server/settings.js';
 
 const model = process.argv[2] || 'agnes-3.0-flash';
 const settings = JSON.parse(fs.readFileSync(path.join(dataDir(), 'settings.json'), 'utf8'));
 const provider = settings.providers.find((p) => p.models?.some((m) => m.id === model));
-// Settings store a list of keys (several may be rotated); older files had a single
-// `apiKey`. Accept both, so this probe works against whatever is configured.
-const apiKey = [...(Array.isArray(provider?.apiKeys) ? provider.apiKeys : []), provider?.apiKey]
-  .find((k) => typeof k === 'string' && k.trim());
+// Settings keep a LIST of keys (several can be rotated); older files had a single
+// `apiKey`. providerApiKeys reads both, so this probe works against whatever the
+// app itself is configured with instead of silently finding no key.
+if (!provider) {
+  // Saying "no key" here would send you looking in the wrong place: the model
+  // simply is not in settings. Show what IS there so the id can be copied.
+  const known = settings.providers.flatMap((p) => (p.models || []).map((m) => `  ${m.id}  (${p.name})`));
+  console.error(`No provider in settings has a model "${model}".`);
+  console.error(known.length ? `Configured models:\n${known.join('\n')}` : 'No models are configured yet.');
+  process.exit(2);
+}
+const [apiKey] = providerApiKeys(provider);
 if (!apiKey) {
-  console.error(`No key for "${model}".`);
+  console.error(`Provider "${provider.name}" has model "${model}" but no API key saved.`);
   process.exit(2);
 }
 
