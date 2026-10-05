@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { startFakeLlm, HTML, CSS } from '../fake-llm.js';
-import { runAgent, pruneMessages, worklogLines, verificationLabel } from '../../server/agent/loop.js';
+import { runAgent, pruneMessages, worklogLines, verificationLabel, revealPlan } from '../../server/agent/loop.js';
 import { streamCompletion } from '../../server/agent/llm.js';
 import { buildSystemPrompt } from '../../server/agent/prompt.js';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
@@ -27,6 +27,14 @@ let llm;
 const getLlm = async () => (llm ||= await startFakeLlm({ chunkDelayMs: 0 }));
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 
+// A one-frame file body is revealed, and a file row is held on screen for a beat so it
+// can be read. Both are wall-clock time on every write in this file, so the suite runs
+// them fast; the tests that check the pacing itself set their own values.
+process.env.DANAV_ROW_MIN_MS ??= '20';
+process.env.DANAV_REVEAL_CHARS_PER_SEC ??= '40000';
+process.env.DANAV_REVEAL_MIN_MS ??= '150';
+process.env.DANAV_REVEAL_MAX_MS ??= '400';
+
 test('the system prompt distinguishes a full overwrite read from an outline or partial range', () => {
   const prompt = buildSystemPrompt({
     workspace: { kind: 'local', name: 'fixture', root: '/workspace', describeEnv: () => '' },
@@ -38,18 +46,93 @@ test('the system prompt distinguishes a full overwrite read from an outline or p
   assert.match(prompt, /read them with fetch_url before relying on details/);
 });
 
-test('a completed tool call is written once, with no synthetic progress replay', async () => {
-  const { events, dir } = await agentRun({ model: 'fake-burst' });
-  const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
-  const running = events.findIndex((e, i) => i > start && e.agent?.patch?.status === 'running');
-  const end = events.findIndex((e, i) => i > running && e.agent?.type === 'action_end' && e.agent.result?.kind === 'write');
-  assert.ok(start >= 0 && running > start && end > running, `start < running < end (${start}, ${running}, ${end})`);
+test('the reveal of a one-frame tool call is paced for a person to watch', () => {
+  // Gemini streams a tool call's arguments when asked; agnes, claude, deepseek and
+  // qwen through Vyce hand over the whole write_file call in ONE SSE frame (see
+  // scripts/probe-raw.js). For those there is nothing to follow, so this pacing is
+  // the only thing that can show a file being written.
+  const minMs = Number(process.env.DANAV_REVEAL_MIN_MS) || 900;
+  const maxMs = Number(process.env.DANAV_REVEAL_MAX_MS) || 4000;
+  const perSec = Number(process.env.DANAV_REVEAL_CHARS_PER_SEC) || 1100;
 
-  const progress = events.slice(start, end).flatMap((e) => [e.agent?.progress, e.agent?.patch?.progress]).filter(Boolean);
-  assert.deepEqual(progress, [], 'a one-frame body has no made-up +0, partial lines, or typing animation');
-  const written = fs.readFileSync(path.join(dir, 'big.js'), 'utf8');
-  assert.equal(countLines(written), 200);
+  assert.equal(revealPlan(0).durationMs, minMs, 'a tiny body gets the floor, not a flash');
+  assert.equal(revealPlan(perSec * 1000).durationMs, maxMs, 'a huge body is capped');
+  const typical = revealPlan((perSec * (minMs + maxMs)) / 2000);
+  assert.ok(typical.durationMs > minMs && typical.durationMs < maxMs, `-> ${typical.durationMs}ms`);
+  assert.ok(revealPlan(perSec * 4).durationMs >= typical.durationMs, 'bigger bodies take longer');
+  assert.ok(revealPlan(1).steps >= 2, 'even the floor produces a visible climb');
+  assert.ok(Number.isFinite(revealPlan(NaN).durationMs), 'a nonsense size is not a nonsense plan');
+});
+
+test('a one-frame write climbs from +0 and never reports more than is on disk', async () => {
+  // What the user sees: "Creating big.js +0" and then a count that climbs. Every
+  // number has to be a reading of the file that is really there.
+  const dir = tmp('danav-burst-');
+  const ws = new LocalWorkspace({ id: 'ws-burst', kind: 'local', name: 'burst', root: dir, autoRun: true });
+  await ws.init();
+  const file = path.join(dir, 'big.js');
+  const l = await getLlm();
+  const events = [];
+  const samples = [];
+  const send = (event) => {
+    events.push(event);
+    const progress = event.agent?.patch?.progress || event.agent?.progress;
+    if (!progress) return;
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch { /* a reported write must prove this wrong */ }
+    samples.push({ eventIndex: events.length - 1, progress, onDisk: countLines(text) });
+  };
+  await runAgent({
+    provider: { baseUrl: l.baseUrl },
+    model: 'fake-burst',
+    history: [{ role: 'user', content: 'go' }],
+    workspace: ws,
+    runSearchTool: async () => ({}),
+    send,
+    signal: new AbortController().signal,
+    runId: genId('run'),
+  });
+
+  const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
+  const end = events.findIndex((e, i) => i > start && e.agent?.type === 'action_end' && e.agent.result?.kind === 'write');
+  assert.ok(start >= 0 && end > start, `the row opens before it completes (${start}, ${end})`);
+  assert.ok(samples.length >= 4, `the body is revealed over several updates (${samples.length})`);
+  assert.ok(samples.every((s) => s.eventIndex < end), 'every update lands before the row completes');
+  assert.equal(samples[0].progress.added, 0, 'the row opens at +0, a true reading of an empty file');
+
+  const counts = samples.map((s) => s.progress.added);
+  assert.deepEqual([...counts].sort((a, b) => a - b), counts, 'the count never goes backwards');
+  for (const s of samples) {
+    assert.equal(s.progress.added, s.onDisk, `reported +${s.progress.added}, disk has ${s.onDisk}`);
+    assert.equal(typeof s.progress.removed, 'number', 'both counters are always numbers');
+    assert.ok(Array.isArray(s.progress.tail));
+  }
+  assert.equal(countLines(fs.readFileSync(file, 'utf8')), 200);
   assert.equal(events[end].agent.result.added, 200, 'the completed result reports the actual write');
+  assert.ok(events[end].agent.durationMs < 400, `durationMs is the tool's real time, got ${events[end].agent.durationMs}ms`);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('DANAV_REVEAL=0 writes a one-frame body once, and the row is still readable', async () => {
+  const saved = { reveal: process.env.DANAV_REVEAL, row: process.env.DANAV_ROW_MIN_MS };
+  process.env.DANAV_REVEAL = '0';
+  process.env.DANAV_ROW_MIN_MS = '300';
+  try {
+    const stamped = [];
+    const { events, dir } = await agentRun({ model: 'fake-burst', onEvent: (e) => stamped.push({ at: Date.now(), e }) });
+    const progress = events.flatMap((e) => [e.agent?.progress, e.agent?.patch?.progress]).filter(Boolean);
+    assert.deepEqual(progress, [], 'with the reveal off nothing is paced and nothing is invented');
+
+    // The row that names the file is still held long enough to be read.
+    const named = stamped.find(({ e }) => (e.agent?.args?.path || e.agent?.patch?.args?.path) === 'big.js');
+    const ended = stamped.find(({ e }) => e.agent?.type === 'action_end' && e.agent.result?.kind === 'write');
+    assert.ok(named && ended && ended.at - named.at >= 250, `"Creating big.js" must be readable, was ${ended.at - named.at}ms`);
+    assert.equal(countLines(fs.readFileSync(path.join(dir, 'big.js'), 'utf8')), 200);
+    assert.equal(events.find((e) => e.agent?.result?.kind === 'write').agent.result.added, 200);
+  } finally {
+    if (saved.reveal === undefined) delete process.env.DANAV_REVEAL; else process.env.DANAV_REVEAL = saved.reveal;
+    if (saved.row === undefined) delete process.env.DANAV_ROW_MIN_MS; else process.env.DANAV_ROW_MIN_MS = saved.row;
+  }
 });
 
 /** Everything the user saw in the chat, in order: the streamed answer. */

@@ -1285,6 +1285,72 @@ test('data path: runAgentTurn turns a real SSE run into ordered blocks (and Stop
   }
 });
 
+test('data path: a one-frame write reads as "Creating <file> +0" and climbs, end to end', async () => {
+  // The whole way through: the real SSE route, the real block state machine and the
+  // real wording. This is the layer the user actually looks at, and it is where a
+  // file that only ever said "Created" was visible as a bug.
+  const saved = {
+    DANAV_DATA_DIR: process.env.DANAV_DATA_DIR,
+    DANAV_WORKSPACES_DIR: process.env.DANAV_WORKSPACES_DIR,
+    DANAV_REVEAL_CHARS_PER_SEC: process.env.DANAV_REVEAL_CHARS_PER_SEC,
+    DANAV_REVEAL_MIN_MS: process.env.DANAV_REVEAL_MIN_MS,
+    DANAV_REVEAL_MAX_MS: process.env.DANAV_REVEAL_MAX_MS,
+  };
+  process.env.DANAV_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-fe-creating-'));
+  process.env.DANAV_WORKSPACES_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-fe-creating-ws-'));
+  process.env.DANAV_REVEAL_CHARS_PER_SEC = '20000';
+  process.env.DANAV_REVEAL_MIN_MS = '250';
+  process.env.DANAV_REVEAL_MAX_MS = '600';
+  _resetStoreCache();
+  const llm = await startFakeLlm();
+  const app = express();
+  app.use(express.json());
+  registerAgentRoutes(app, { runSearchTool: async () => ({ success: false }) });
+  const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (u, init) => realFetch(typeof u === 'string' && u.startsWith('/') ? base + u : u, init);
+
+  try {
+    const { runAgentTurn } = await load('src/agent/runAgentTurn.ts');
+    const { createWorkspace } = await load('src/services/agentApi.ts');
+    const { actionLabel, isWorking } = await load('src/agent/format.ts');
+    const ws = await createWorkspace({ name: 'creating', kind: 'local', autoRun: true });
+    const provider = { id: 'p', name: 'fake', baseUrl: llm.baseUrl, apiType: 'openai', models: [] };
+
+    const rendered = [];
+    await runAgentTurn({
+      provider, model: 'fake-burst', thinkingLevel: 'Auto', workspaceId: ws.id, activity: [],
+      messages: [{ role: 'user', content: 'go' }],
+      signal: new AbortController().signal,
+      onUpdate: (snap) => {
+        const block = snap.blocks.find((b) => b.type === 'action' && b.action.tool === 'write_file');
+        if (!block) return;
+        const label = actionLabel(block.action);
+        const line = `${label.verb} ${label.target ?? ''}${label.added === undefined ? '' : ` +${label.added}`}`.trim();
+        if (rendered.at(-1)?.line !== line) rendered.push({ line, working: isWorking(block.action) });
+      },
+      onFinish: () => {},
+    });
+
+    const creating = rendered.filter((r) => r.line.startsWith('Creating big.js'));
+    assert.ok(creating.length >= 4, `the row climbs while the file is written: ${JSON.stringify(rendered)}`);
+    assert.equal(creating[0].line, 'Creating big.js +0', 'it opens at +0, not at the finished total');
+    assert.ok(creating.every((r) => r.working), 'every Creating state shimmers as work in progress');
+
+    const counts = creating.map((r) => Number(r.line.split('+')[1]));
+    assert.deepEqual([...counts].sort((a, b) => a - b), counts, 'the count only ever climbs');
+    assert.equal(rendered.at(-1).line, 'Created big.js +200', 'and it settles on the finished file');
+    assert.equal(rendered.at(-1).working, false);
+  } finally {
+    globalThis.fetch = realFetch;
+    server.close();
+    await llm.close();
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    _resetStoreCache();
+  }
+});
+
 test('agent switch-stop waits for the active run to release its workspace lock', async () => {
   const app = express();
   app.use(express.json());

@@ -27,6 +27,80 @@ import { createRedactor, genId, truncateMiddle } from './util.js';
 
 const PROGRESS_THROTTLE_MS = 140;
 const OUTPUT_FLUSH_MS = 120;
+
+/**
+ * Rows that name a file the run is creating or changing.
+ *
+ * When the provider streams a call's arguments, such a row is on screen for as
+ * long as the model takes to write the body and needs nothing from us. When the
+ * provider sends the whole call in one frame — agnes, claude, deepseek and qwen
+ * through Vyce all do — a local write finishes in a few milliseconds and the row
+ * used to appear and vanish within ~40ms. `rowMinVisibleMs` holds it there long
+ * enough to be read: the name of the file, not a number or a line of content.
+ */
+const NAMED_FILE_TOOLS = new Set(['write_file', 'append_file', 'edit_file', 'multi_edit']);
+
+/**
+ * The numbers a file row shows the moment it opens: a true reading of an empty file.
+ * The row has to exist before the first line lands, so the chat reads
+ * "Creating index.html +0" and then climbs.
+ */
+const ZERO_PROGRESS = () => ({ added: 0, removed: 0, tail: [] });
+/** Below this the file is on screen before anyone could read it anyway. */
+const REVEAL_MIN_CHARS = 420;
+/** One reveal frame, ~30fps. Small, even steps are what make the count climb. */
+const REVEAL_TICK_MS = 33;
+/** How often the climbing count may be published during a reveal. */
+const REVEAL_PROGRESS_GAP_MS = 70;
+/** A beat so "Creating index.html +0" registers before the first line lands. */
+const REVEAL_LEAD_IN_MS = 160;
+
+/**
+ * How long the reveal of a `charCount`-character body should last: paced by content,
+ * floored so a small file is still visible, capped so a huge one never holds the run up.
+ */
+export function revealPlan(charCount) {
+  const chars = Math.max(0, Number(charCount) || 0);
+  const raw = Math.round((chars / limits.revealCharsPerSec()) * 1000);
+  const durationMs = Math.max(limits.revealMinMs(), Math.min(limits.revealMaxMs(), raw));
+  return { durationMs, steps: Math.max(2, Math.round(durationMs / REVEAL_TICK_MS)) };
+}
+
+/**
+ * Hand growing prefixes of `body` to `onStep` over `revealPlan`'s duration.
+ *
+ * Clock-driven, not step-counted: `setTimeout(33)` lands on the next ~15.6ms timer
+ * tick on Windows and really takes ~47ms, so counting iterations would stretch every
+ * reveal by half again. Reading the elapsed time keeps the promised duration
+ * everywhere — the steps just get bigger where the clock is coarser.
+ */
+async function revealBody({ body, signal, onStep }) {
+  const total = body.length;
+  const { durationMs } = revealPlan(total);
+  if (signal?.aborted) return;
+  await sleep(REVEAL_LEAD_IN_MS, signal);
+  const startedAt = Date.now();
+  for (;;) {
+    if (signal?.aborted) return;
+    const frac = durationMs <= 0 ? 1 : Math.min(1, (Date.now() - startedAt) / durationMs);
+    const done = frac >= 1;
+    await onStep(body.slice(0, Math.round(total * frac)), done);
+    if (done) return;
+    await sleep(REVEAL_TICK_MS, signal);
+  }
+}
+
+const sleep = (ms, signal) =>
+  new Promise((resolve) => {
+    if (ms <= 0 || signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 /** How many read-only calls of one round may run at the same time. */
 const MAX_PARALLEL = 6;
 
@@ -969,7 +1043,7 @@ export async function runAgent({
         return st.writerPromise;
       };
 
-      const queueLiveWrite = (st, pathText, body, args, { force = false } = {}) => {
+      const queueLiveWrite = (st, pathText, body, args, { force = false, minGapMs = PROGRESS_THROTTLE_MS } = {}) => {
         st.writeQueue = st.writeQueue.then(async () => {
           const writer = await writerFor(st, pathText);
           if (!writer || signal.aborted) return;
@@ -978,7 +1052,7 @@ export async function runAgent({
           const progress = writer.progress(); // numbers and tail come from the file now on disk
           const key = JSON.stringify([progress.added, progress.removed, progress.tail]);
           const now = Date.now();
-          if (key === st.lastProgressKey || (!force && now - st.lastProgressAt < PROGRESS_THROTTLE_MS)) return;
+          if (key === st.lastProgressKey || (!force && now - st.lastProgressAt < minGapMs)) return;
           st.lastProgressKey = key;
           st.lastProgressAt = now;
           send({
@@ -1025,6 +1099,7 @@ export async function runAgent({
 
         if (st.deltas === 1) {
           send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args } });
+          st.rowShownAt = now; // the row naming this file is on screen from here
           st.lastKey = JSON.stringify(args);
           return;
         }
@@ -1257,6 +1332,7 @@ export async function runAgent({
           try { shownArgs = tools.displayArgs(p.slot.name, JSON.parse(p.slot.args || '{}')); } catch { /* bad JSON is explained during execution */ }
           send({ agent: { type: 'action_start', id: p.st.uiId, tool: p.slot.name, args: shownArgs } });
           send({ agent: { type: 'action_update', id: p.st.uiId, patch: { status: 'queued', args: shownArgs } } });
+          p.st.rowShownAt = Date.now();
           p.isNew = false; // execute() will move this already-visible row from queued to running
           continue;
         }
@@ -1351,11 +1427,41 @@ export async function runAgent({
             }
             await writer.settle();
           }
+        } else if (
+          name === 'write_file' && !argError && limits.revealEnabled() &&
+          typeof args.path === 'string' && args.path &&
+          typeof args.content === 'string' && args.content.length >= REVEAL_MIN_CHARS
+        ) {
+          // The provider sent this whole call in one frame, so there were no deltas to
+          // follow. Write the real body in chunks instead: the row opens at
+          // "Creating <file> +0" and climbs as those lines actually land on disk.
+          const shown = tools.displayArgs(name, args);
+          if (isNew) {
+            send({ agent: { type: 'action_start', id, tool: name, args: shown } });
+            isNew = false; // the row exists now; do not open a second one below
+          }
+          st.rowShownAt = Date.now();
+          send({ agent: { type: 'action_update', id, patch: { status: 'running', args: shown, progress: ZERO_PROGRESS() } } });
+          await revealBody({
+            body: args.content,
+            signal,
+            onStep: async (prefix, done) => {
+              // queueLiveWrite publishes the count the writer read back off the file,
+              // never the length of the prefix we just handed it.
+              queueLiveWrite(st, args.path, prefix, args, { force: done, minGapMs: REVEAL_PROGRESS_GAP_MS });
+              await st.writeQueue;
+            },
+          });
+          writer = await (st.writerPromise || Promise.resolve(null));
+          if (writer) await writer.settle();
         }
         if (signal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
 
         const shownArgs = argError ? {} : tools.displayArgs(name, args);
-        if (isNew) send({ agent: { type: 'action_start', id, tool: name, args: shownArgs } });
+        if (isNew) {
+          send({ agent: { type: 'action_start', id, tool: name, args: shownArgs } });
+          st.rowShownAt = Date.now();
+        }
         send({ agent: { type: 'action_update', id, patch: { status: 'running', args: shownArgs } } });
 
         // coalesce terminal output so a chatty build doesn't flood the stream
@@ -1542,6 +1648,17 @@ export async function runAgent({
         // A write that landed needs no undo; one that did not must leave the file as it was.
         if (writer && res?.ok) state.committedWrites.add(writer);
 
+        // How long the tool itself really took, measured before the row is held.
+        const tookMs = Date.now() - t0;
+
+        // The file is already written; only the row that names it is held back, and
+        // only when it would otherwise be replaced before it could be read. Nothing
+        // about the result changes — it is reported in full the moment it is shown.
+        if (NAMED_FILE_TOOLS.has(name) && !signal.aborted) {
+          const shownFor = Date.now() - (st.rowShownAt ?? t0);
+          await sleep(limits.rowMinVisibleMs() - shownFor, signal);
+        }
+
         send({
           agent: {
             type: 'action_end',
@@ -1551,7 +1668,7 @@ export async function runAgent({
             result: res.ui,
             output: res.uiOutput,
             error: res.ok ? undefined : String(res.error || res.output || '').slice(0, 400),
-            durationMs: Date.now() - t0,
+            durationMs: tookMs,
           },
         });
         return { name, modelId, modelIds, rawArgs: slot.args, args, res };

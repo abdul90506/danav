@@ -121,6 +121,44 @@ export const limits = {
   maxReadLines: 2000,
   maxWriteChars: 2_000_000,
 
+  /**
+   * How long a file row stays on screen at minimum, in milliseconds.
+   *
+   * Only some endpoints stream a tool call's arguments token by token. Gemini
+   * does when asked; the OpenAI-compatible endpoints measured here (agnes,
+   * claude, deepseek, qwen via Vyce) send the whole write_file call in ONE
+   * frame, and a local file is then written in a few milliseconds. The row
+   * announcing it was opening and closing in ~40ms, so the user never saw
+   * "Creating index.html" at all — only the finished "Created".
+   *
+   * This does not invent progress, line counts or file contents: it only keeps
+   * the row that names the file on screen long enough to be read before it is
+   * replaced by the result. Set DANAV_ROW_MIN_MS=0 to turn it off.
+   */
+  rowMinVisibleMs: () => {
+    // Unlike the other limits, 0 is a meaningful value here: it turns the hold off.
+    const n = Number(process.env.DANAV_ROW_MIN_MS);
+    return Number.isFinite(n) && n >= 0 ? n : 420;
+  },
+
+  /**
+   * Pacing for a write_file body the provider handed over COMPLETE in one frame.
+   *
+   * Gemini streams a tool call's arguments token by token when asked, so its file
+   * row counts up on its own and none of this applies. The OpenAI-compatible
+   * endpoints measured here — agnes, claude, deepseek and qwen via Vyce — send the
+   * whole call in a single SSE frame. There is no token stream to follow, so the
+   * body is written to the real file in chunks instead, and the row counts up as
+   * those lines land.
+   *
+   * Every number published is read back off the file by the writer; nothing is
+   * estimated from the buffer. Only the CADENCE is chosen here. Set DANAV_REVEAL=0
+   * to switch it off and have such a file land in one go.
+   */
+  revealEnabled: () => !/^(0|false|off|no)$/i.test(String(process.env.DANAV_REVEAL ?? '').trim()),
+  revealCharsPerSec: () => num('DANAV_REVEAL_CHARS_PER_SEC', 1100),
+  revealMinMs: () => num('DANAV_REVEAL_MIN_MS', 900),
+  revealMaxMs: () => num('DANAV_REVEAL_MAX_MS', 4000),
 };
 
 // ---------------------------------------------------------------------------

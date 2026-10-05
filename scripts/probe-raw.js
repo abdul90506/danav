@@ -16,7 +16,11 @@ import { dataDir } from '../server/agent/config.js';
 const model = process.argv[2] || 'agnes-3.0-flash';
 const settings = JSON.parse(fs.readFileSync(path.join(dataDir(), 'settings.json'), 'utf8'));
 const provider = settings.providers.find((p) => p.models?.some((m) => m.id === model));
-if (!provider?.apiKey) {
+// Settings store a list of keys (several may be rotated); older files had a single
+// `apiKey`. Accept both, so this probe works against whatever is configured.
+const apiKey = [...(Array.isArray(provider?.apiKeys) ? provider.apiKeys : []), provider?.apiKey]
+  .find((k) => typeof k === 'string' && k.trim());
+if (!apiKey) {
   console.error(`No key for "${model}".`);
   process.exit(2);
 }
@@ -52,7 +56,7 @@ const at = () => String(Date.now() - t0).padStart(6);
 
 const res = await fetch(`${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Authorization: `Bearer ${provider.apiKey}` },
+  headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Authorization: `Bearer ${apiKey}` },
   body: JSON.stringify(body),
 });
 console.log(`${at()}ms  HTTP ${res.status}`);
