@@ -10,21 +10,48 @@
  * it created itself — and a mutating call whose target is not in the ledger is
  * refused *before it runs*. The refusal is handed back as the tool's result, so
  * the model reads precisely which evidence is missing and can go and get it.
+ * For a whole-file overwrite or append, it separately requires complete contents
+ * visible through read_file in this run; a path, outline, symbol or partial range
+ * is not enough. Partial reads are accumulated only when they cover one file version.
  *
  * The rule is deliberately general: the same check covers deleting a folder,
  * moving a file and a destructive shell command, and the ledger is fed by the
  * tools themselves rather than by any one code path, so a new tool inherits it
  * instead of having to remember to opt in.
  */
+import { createHash } from 'node:crypto';
 import { IGNORED_DIRS, toPosix } from './util.js';
 
 /** Nothing is inspected past this many entries — a huge tree is not worth the wait. */
 const MAX_WALK = 3000;
 
+/** Strong, bounded-content identity used to detect a file changing after it was read. */
+export function fileVersion(text) {
+  return createHash('sha256').update(String(text ?? ''), 'utf8').digest('hex');
+}
+
+/** Stable-enough metadata for avoiding a full reread after each live-write chunk. */
+export function workspaceStatFingerprint(stat) {
+  if (!stat?.type) return 'missing';
+  const stamp = [stat.mtimeMs, stat.ctimeMs, stat.ino, stat.dev]
+    .map((value) => Number.isFinite(value) ? String(value) : '')
+    .join(':');
+  if (!stamp.replace(/:/g, '')) return null;
+  return `${stat.type}:${stat.size ?? ''}:${stamp}`;
+}
+
 export function createLedger() {
   return {
     /** Files the agent has opened, or seen named in a listing. */
     seen: new Set(),
+    /** Files whose complete, visible contents were read (partial ranges are tracked separately). */
+    read: new Set(),
+    /** Visible line ranges gathered by read_file: abs -> { version, totalLines, ranges }. */
+    readRanges: new Map(),
+    /** Source versions associated with reads, so ranges from changed content never combine. */
+    readVersions: new Map(),
+    /** Last exact contents this run wrote/owns, so its own writes are not mistaken for stale reads. */
+    ownedVersions: new Map(),
     /** Directories whose contents were really read: abs -> the depth that was read. */
     listed: new Map(),
     /** Files this run created or rewrote: the agent knows these by construction. */
@@ -38,9 +65,72 @@ function ledgerOf(state) {
   return state.ledger || (state.ledger = createLedger());
 }
 
-/** The agent opened this file, or saw it named in a listing. */
-export function observeFile(state, abs) {
-  if (abs) ledgerOf(state)?.seen.add(abs);
+/** The agent saw this file; only complete visible contents authorize a full overwrite. */
+export function observeFile(state, abs, { complete = false, version = null } = {}) {
+  if (!abs) return false;
+  const led = ledgerOf(state);
+  if (!led) return false;
+  led.seen.add(abs);
+  const fingerprint = typeof version === 'string' && version ? version : null;
+  if (fingerprint) {
+    const previous = led.ownedVersions.get(abs) || led.readVersions.get(abs) || led.readRanges.get(abs)?.version;
+    if (previous && previous !== fingerprint) {
+      led.read.delete(abs);
+      led.readRanges.delete(abs);
+      led.readVersions.delete(abs);
+      led.owned.delete(abs);
+      led.ownedVersions.delete(abs);
+    }
+  }
+  if (complete) {
+    led.read.add(abs);
+    if (fingerprint) led.readVersions.set(abs, fingerprint);
+    led.readRanges.delete(abs);
+    return true;
+  }
+  return false;
+}
+
+/** Record a range the model actually received; ranges from different file versions never combine. */
+export function observeFileRange(state, abs, { startLine, endLine, totalLines, version = null } = {}) {
+  if (!abs) return false;
+  const led = ledgerOf(state);
+  if (!led) return false;
+  const fingerprint = typeof version === 'string' && version ? version : null;
+  observeFile(state, abs, { version: fingerprint });
+  const total = Number(totalLines);
+  const start = Number(startLine);
+  const end = Number(endLine);
+  if (total === 0 && start === 0 && end === 0) return observeFile(state, abs, { complete: true, version: fingerprint });
+  if (!Number.isInteger(total) || total < 1 || !Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end > total) return false;
+  if (start === 1 && end === total) return observeFile(state, abs, { complete: true, version: fingerprint });
+  // Without a stable source version, isolated ranges are still useful evidence for
+  // removal, but cannot safely be combined into proof of a complete file read.
+  if (!fingerprint) return false;
+
+  let record = led.readRanges.get(abs);
+  if (!record || record.version !== fingerprint || record.totalLines !== total) {
+    record = { version: fingerprint, totalLines: total, ranges: [] };
+  }
+  const ranges = [...record.ranges, [start, end]].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged = [];
+  for (const range of ranges) {
+    const last = merged.at(-1);
+    if (last && range[0] <= last[1] + 1) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+  }
+  record.ranges = merged;
+  led.readRanges.set(abs, record);
+  if (merged.length === 1 && merged[0][0] === 1 && merged[0][1] >= total) {
+    return observeFile(state, abs, { complete: true, version: fingerprint });
+  }
+  return false;
+}
+
+/** Whether the run has the full visible file contents needed to safely replace/append it. */
+export function hasInspectedContent(state, abs) {
+  const led = state?.ledger;
+  return Boolean(led && (led.read?.has(abs) || led.owned?.has(abs)));
 }
 
 /**
@@ -66,9 +156,29 @@ export function observeListing(ws, state, abs, entries, { truncated = false, dep
   }
 }
 
-/** The agent wrote this file itself this run, so it does not have to read it back. */
-export function observeOwned(state, abs) {
-  if (abs) ledgerOf(state)?.owned.add(abs);
+/** The agent wrote/moved this file itself; optionally remember its exact current contents. */
+export function observeOwned(state, abs, { content, version } = {}) {
+  if (!abs) return false;
+  const led = ledgerOf(state);
+  if (!led) return false;
+  led.owned.add(abs);
+  led.read.delete(abs);
+  led.readRanges.delete(abs);
+  led.readVersions.delete(abs);
+  const fingerprint = typeof version === 'string' && version
+    ? version
+    : typeof content === 'string' ? fileVersion(content) : null;
+  if (fingerprint) led.ownedVersions.set(abs, fingerprint);
+  else led.ownedVersions.delete(abs);
+  return true;
+}
+
+/** The exact version that currently authorizes replacing this existing file, if known. */
+export function expectedFileVersion(state, abs) {
+  const led = state?.ledger;
+  if (!led) return null;
+  if (led.owned?.has(abs)) return led.ownedVersions?.get(abs) || led.readVersions?.get(abs) || null;
+  return led.read?.has(abs) ? led.readVersions?.get(abs) || null : null;
 }
 
 /**
@@ -91,13 +201,19 @@ export async function observeShellMove(ws, state, from, to) {
       ? ws.pathApi.join(absTo, ws.pathApi.basename(absFrom))
       : absTo;
   // Whatever it landed on, the run put it there: it knows the file by construction
-  // and must not have to read it back before touching it again.
-  led.owned.add(landed);
+  // and must not have to read it back before touching it again. Carry its known
+  // version across the rename so a later external edit is still detectable.
+  const knownVersion = led.ownedVersions.get(absFrom) || led.readVersions.get(absFrom) || led.readRanges.get(absFrom)?.version || null;
+  observeOwned(state, landed, knownVersion ? { version: knownVersion } : {});
   if (led.seen.has(absFrom)) led.seen.add(landed);
   const depth = led.listed.get(absFrom);
   if (depth) led.listed.set(landed, Math.max(led.listed.get(landed) || 0, depth));
   led.seen.delete(absFrom);
   led.owned.delete(absFrom);
+  led.ownedVersions.delete(absFrom);
+  led.read.delete(absFrom);
+  led.readRanges.delete(absFrom);
+  led.readVersions.delete(absFrom);
   led.listed.delete(absFrom);
   return landed;
 }
@@ -223,11 +339,17 @@ function howToInspect(list) {
  */
 async function uninspected(ws, dirAbs, led, budget) {
   let entries;
+  let truncated = false;
   try {
-    ({ entries } = await ws.listTree(dirAbs, { depth: 1, maxEntries: 1000 }));
+    const listing = await ws.listTree(dirAbs, { depth: 1, maxEntries: 1000 });
+    if (!listing || !Array.isArray(listing.entries)) return { unknown: true, paths: [] };
+    entries = listing.entries;
+    truncated = Boolean(listing.truncated);
   } catch {
     return { unknown: true, paths: [] };
   }
+  // A partial listing cannot establish that the omitted files were inspected.
+  if (truncated) return { unknown: true, paths: [] };
   const found = [];
   for (const e of entries) {
     if (budget.n <= 0) return { unknown: true, paths: [] };
@@ -304,7 +426,7 @@ async function lookFirst(ws, state, folders, files) {
       if (Number.isFinite(st.size) && st.size > AUTO_FILE_BYTES) return null;
       const r = await ws.readText(abs);
       if (r.binary) return null;
-      observeFile(state, abs);
+      observeFile(state, abs, { version: fileVersion(r.text) });
       const lines = String(r.text || '').split('\n');
       const first = (lines.find((line) => line.trim()) || '').trim().slice(0, 70);
       seen.push(`read \`${ws.displayPath(abs)}\` — ${lines.length} line${lines.length === 1 ? '' : 's'}${first ? `, starts ${JSON.stringify(first)}` : ''}`);
@@ -316,6 +438,31 @@ async function lookFirst(ws, state, folders, files) {
   return `Looked first, because this run had not: ${seen.join(' · ')}.`;
 }
 
+/** Read a stable current version; retry if metadata shows a concurrent change during the read. */
+export async function currentFileVersion(ws, abs) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const before = await ws.stat(abs);
+      if (before?.type !== 'file') return null;
+      const read = await ws.readText(abs);
+      if (read.binary) return null;
+      const after = await ws.stat(abs);
+      const beforeStamp = workspaceStatFingerprint(before);
+      const afterStamp = workspaceStatFingerprint(after);
+      if (beforeStamp && afterStamp && beforeStamp !== afterStamp) continue;
+      return fileVersion(read.text);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+const staleWriteRefusal = (name, shown) => refusal(
+  `Refused: ${name} was not run. \`${shown}\` changed after the version you read, or its current version could not be verified. Read the whole current file with read_file, reconcile the intended change, then retry.`,
+  { kind: 'write', path: shown, blocked: true }
+);
+
 /**
  * May this call run?
  *
@@ -324,6 +471,43 @@ async function lookFirst(ws, state, folders, files) {
 export async function checkAction({ workspace: ws, state, name, args }) {
   const led = ledgerOf(state);
   if (!led || !ws || !args) return null;
+
+  if (name === 'write_file' || name === 'append_file') {
+    const pathText = typeof args.path === 'string' ? args.path : typeof args.file_path === 'string' ? args.file_path : '';
+    if (!pathText) return null; // argument validation owns a missing/invalid path
+    const abs = await resolveIn(ws, pathText);
+    if (!abs) return null;
+    const st = await ws.stat(abs).catch(() => null);
+    if (st?.type !== 'file') return null; // a new file has nothing to overwrite
+    const shown = ws.displayPath(abs);
+    if (!hasInspectedContent(state, abs)) {
+      return refusal(
+        `Refused: ${name} was not run. \`${shown}\` already exists, but its complete contents have not been read in this run. Use read_file to show the whole file (read every range if it is clipped); file_outline or a partial read is not enough. For a targeted change, use edit_file or multi_edit. Then retry.`,
+        { kind: 'write', path: shown, blocked: true }
+      );
+    }
+
+    // A streamed write is allowed to change the file before the final tool call.
+    // It carries its own expected partial version and checks it before each write;
+    // do not compare that draft against the original read hash here.
+    const activeWriter = [...(state.liveWriters || [])].reverse().find((writer) =>
+      writer?.abs === abs
+      && !state.committedWrites?.has(writer)
+      && typeof writer.isCurrent === 'function'
+      && !writer.isConflicted?.()
+    );
+    const expected = expectedFileVersion(state, abs);
+    if (activeWriter && (!expected || !activeWriter.expectedVersion || expected === activeWriter.expectedVersion)) {
+      try {
+        if (await activeWriter.isCurrent()) return null;
+      } catch {
+        /* fall through to a fresh workspace read */
+      }
+    }
+
+    if (expected && (await currentFileVersion(ws, abs)) !== expected) return staleWriteRefusal(name, shown);
+    return null;
+  }
 
   if (name === 'run_command') {
     /**
@@ -377,7 +561,12 @@ export async function checkAction({ workspace: ws, state, name, args }) {
           }
           if (disposable(ws, abs)) continue;
           const { unknown, paths } = await uninspected(ws, abs, led, { n: MAX_WALK });
-          if (!unknown) {
+          if (unknown) {
+            // Do not turn an incomplete walk into an empty "nothing to inspect" result.
+            // Keep the target itself pending so the automatic look retries it and, if
+            // still incomplete, the normal refusal explains what the agent must do.
+            addDir(abs);
+          } else {
             for (const p of paths) {
               if (p.endsWith('/')) dirs.push({ rel: p.slice(0, -1), shown: p });
               else files.push({ rel: p, shown: p });

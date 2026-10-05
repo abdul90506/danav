@@ -27,8 +27,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWrite, dataDir, ensureDataDir } from './config.js';
 import { languageOf } from './outline.js';
+import { IGNORED_DIRS } from './util.js';
 
-export const INDEX_VERSION = 3;
+export const INDEX_VERSION = 4;
 
 /** Files worth indexing: source, config and documentation, never build output. */
 const SOURCE_EXT = new Set([
@@ -235,10 +236,21 @@ export async function buildIndex(workspace, { maxFiles = MAX_FILES } = {}) {
   let entries = [];
   try {
     const listing = await workspace.listTree(workspace.root, { depth: MAX_DEPTH, maxEntries: Math.max(maxFiles * 2, 4000) });
-    entries = listing.entries || [];
+    if (!listing || !Array.isArray(listing.entries)) return null;
+    entries = listing.entries;
     index.truncated = Boolean(listing.truncated);
+    // listTree reports entry-count truncation, but deliberately does not call a
+    // depth cap "truncated". A directory at the final indexed depth can still
+    // hide source files, so the cached map must say it is partial.
+    const indexableDir = (entry) => {
+      const parts = String(entry.path || '').replace(/\\/g, '/').split('/');
+      return entry.type === 'dir' && parts.length >= MAX_DEPTH &&
+        !parts.some((part) => IGNORED_DIRS.has(part) || (part.startsWith('.') && part !== '.github'));
+    };
+    if (entries.some(indexableDir)) index.truncated = true;
   } catch {
-    return index;
+    // A failed walk is not an empty project. Let getIndex retry on the next use.
+    return null;
   }
 
   const candidates = entries
@@ -269,10 +281,14 @@ export async function buildIndex(workspace, { maxFiles = MAX_FILES } = {}) {
       path: workspace.root,
       maxResults: Math.max(4000, maxFiles * 6),
     });
-    matches = found.matches || [];
+    if (!found || !Array.isArray(found.matches)) throw new Error('Workspace search returned no match list.');
+    matches = found.matches;
     if (found.truncated) index.truncated = true;
   } catch {
-    /* a workspace whose search fails still gets a file map, just no symbols */
+    // Keep a useful path-only result for direct callers, but do not cache it: a
+    // transient search failure must not hide every definition for the whole TTL.
+    index.truncated = true;
+    index.builtAt = 0;
   }
 
   const byPath = new Map();
@@ -386,8 +402,16 @@ export function toJSON(index) {
 export function fromJSON(text, workspace) {
   try {
     const parsed = JSON.parse(text);
-    if (!parsed || parsed.version !== INDEX_VERSION) return null;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.version !== INDEX_VERSION) return null;
     if (parsed.workspaceId !== workspace.id || parsed.root !== workspace.root) return null;
+    if (!Number.isFinite(parsed.builtAt) || parsed.builtAt <= 0 || !Number.isFinite(parsed.scanned) || parsed.scanned < 0) return null;
+    if (typeof parsed.truncated !== 'boolean') return null;
+    if (!parsed.files || typeof parsed.files !== 'object' || Array.isArray(parsed.files)) return null;
+    if (!parsed.edges || typeof parsed.edges !== 'object' || Array.isArray(parsed.edges)) return null;
+    if (!parsed.reverse || typeof parsed.reverse !== 'object' || Array.isArray(parsed.reverse)) return null;
+    for (const [filePath, file] of Object.entries(parsed.files)) {
+      if (!file || typeof file !== 'object' || file.path !== filePath || !Array.isArray(file.symbols) || !Array.isArray(file.imports)) return null;
+    }
     return parsed;
   } catch {
     return null;
@@ -405,9 +429,14 @@ export function fromJSON(text, workspace) {
 export async function getIndex(workspace, { maxAgeMs = STALE_MS, force = false } = {}) {
   const key = indexKey(workspace);
   const cached = memory.get(key);
-  if (!force && cached && cached.root === workspace.root && Date.now() - cached.builtAt < maxAgeMs) return cached;
-  if (!force && cached?.pending) return cached.pending;
+  const sameRoot = cached?.root === workspace.root;
+  const fresh = (entry) => entry?.files && Number.isFinite(entry.builtAt) && Date.now() - entry.builtAt < maxAgeMs;
+  if (!force && sameRoot && fresh(cached)) return cached;
+  // A pending scan belongs to its root. Workspace IDs can be reopened at a new
+  // path; never hand that caller the old root's in-flight result.
+  if (!force && sameRoot && cached?.pending) return cached.pending;
 
+  const fallback = sameRoot && fresh(cached) ? cached : null;
   const pending = (async () => {
     let index = null;
     if (!force) {
@@ -420,16 +449,24 @@ export async function getIndex(workspace, { maxAgeMs = STALE_MS, force = false }
     }
     if (!index) {
       index = await buildIndex(workspace);
+      // A walk/search failure is an optional-index miss, not a valid empty map.
+      // Keep a fresh previous copy (if any) and let the next caller retry.
+      if (!index || !Number.isFinite(index.builtAt) || index.builtAt <= 0) return fallback;
       saveIndex(workspace, index);
     }
-    memory.set(key, index);
     return index;
-  })().catch(() => null);
+  })().catch(() => fallback);
 
-  memory.set(key, Object.assign(cached || {}, { root: workspace.root, pending }));
+  // Do not mutate a cached index into a placeholder: a failed promise used to
+  // remain there forever, making every later getIndex call return the same null.
+  const entry = { root: workspace.root, pending };
+  memory.set(key, entry);
   const resolved = await pending;
-  if (!resolved) return null;
-  memory.set(key, resolved);
+  if (memory.get(key) === entry) {
+    if (resolved) memory.set(key, resolved);
+    else if (fallback) memory.set(key, fallback);
+    else memory.delete(key);
+  }
   return resolved;
 }
 

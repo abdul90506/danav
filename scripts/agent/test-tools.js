@@ -7,6 +7,7 @@ import path from 'node:path';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
 import { assertPublicUrl, buildToolset, displayArgs, isPrivateAddress, peekPartialArgs, portsInCommand, READ_ONLY_TOOLS, resolveSafeUrl, RETIRED_TOOLS as retiredTools, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
 import { createRedactor } from '../../server/agent/util.js';
+import { checkAction, fileVersion, observeFile } from '../../server/agent/policy.js';
 import { repairJsonText } from '../../server/agent/partial.js';
 
 const { test } = globalThis.__agentTest;
@@ -65,6 +66,49 @@ test('every tool has a schema and an implementation', async () => {
   assert.equal(new Set(names).size, names.length, 'tool names must be unique');
   for (const n of names) assert.ok(tools.has(n), `missing implementation for ${n}`);
   for (const d of TOOL_DEFINITIONS) assert.equal(d.function.parameters.type, 'object');
+  const description = (name) => TOOL_DEFINITIONS.find((d) => d.function.name === name).function.description;
+  assert.match(description('write_file'), /complete contents with read_file/);
+  assert.match(description('append_file'), /complete contents with read_file/);
+  assert.match(description('file_outline'), /does not authorize write_file or append_file/);
+});
+
+test('whole-file writes require all visible read_file ranges; outlines and partial reads are insufficient', async () => {
+  const { run, dir, ws, ctx } = await setup();
+  const target = path.join(dir, 'existing.txt');
+  fs.writeFileSync(target, 'first\nsecond\nthird\n');
+
+  const outline = await run('file_outline', { path: 'existing.txt' });
+  assert.equal(outline.ok, true, outline.output);
+  const outlineWrite = await checkAction({ workspace: ws, state: ctx.state, name: 'write_file', args: { path: 'existing.txt', content: 'replacement\n' } });
+  assert.ok(outlineWrite, 'an outline is not the full content');
+  assert.match(outlineWrite.message, /complete contents.*read_file/);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'first\nsecond\nthird\n');
+
+  const first = await run('read_file', { path: 'existing.txt', start_line: 1, end_line: 1 });
+  assert.equal(first.ok, true, first.output);
+  const partialAppend = await checkAction({ workspace: ws, state: ctx.state, name: 'append_file', args: { path: 'existing.txt', content: 'more\n' } });
+  assert.ok(partialAppend, 'a partial read is insufficient for an append too');
+  assert.match(partialAppend.message, /complete contents.*read_file/);
+
+  const rest = await run('read_file', { path: 'existing.txt', start_line: 2, end_line: 3 });
+  assert.equal(rest.ok, true, rest.output);
+  assert.equal(await checkAction({ workspace: ws, state: ctx.state, name: 'write_file', args: { path: 'existing.txt', content: 'replacement\n' } }), null);
+});
+
+test('whole-file writes refuse a target that appears after the policy preflight', async () => {
+  const { run, dir, ws, ctx } = await setup();
+  for (const name of ['write_file', 'append_file']) {
+    const relative = `appeared-${name}.txt`;
+    const abs = path.join(dir, relative);
+    const args = { path: relative, content: name === 'write_file' ? 'replacement\n' : 'append\n' };
+    assert.equal(await checkAction({ workspace: ws, state: ctx.state, name, args }), null, 'a missing target is allowed at preflight');
+    fs.writeFileSync(abs, 'created by the user after preflight\n');
+    const result = await run(name, args);
+    assert.equal(result.ok, false);
+    assert.match(result.output, /complete contents have not been read/);
+    assert.equal(fs.readFileSync(abs, 'utf8'), 'created by the user after preflight\n');
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('memory tools save structured notes, search relevant history, and reject known secrets', async () => {
@@ -92,6 +136,14 @@ test('memory tools save structured notes, search relevant history, and reject kn
     assert.equal(rejected.ok, false);
     assert.match(rejected.output, /will not save/);
     assert.doesNotMatch(rejected.output, /test_memory_secret_token/);
+
+    const rejectedTag = await run('remember', {
+      note: 'Keep project settings in the local config file',
+      tags: [`NOVITA_API_KEY=${process.env.NOVITA_API_KEY}`],
+    });
+    assert.equal(rejectedTag.ok, false);
+    assert.match(rejectedTag.output, /tag containing/);
+    assert.doesNotMatch(rejectedTag.output, /test_memory_secret_token/);
   } finally {
     if (previousDir === undefined) delete process.env.DANAV_DATA_DIR;
     else process.env.DANAV_DATA_DIR = previousDir;
@@ -153,6 +205,97 @@ test('write_file over an existing file reports +added −removed with a diff pre
   assert.equal(r.ui.removed, 1);
   assert.ok(r.ui.hunks.length >= 1);
   assert.match(r.output, /Overwrote a\.txt/);
+});
+
+test('a streamed overwrite is not allowed to touch an existing file until its contents were read', async () => {
+  const { tools, ctx, dir, ws } = await setup();
+  const abs = await ws.safePath('keep.txt');
+  fs.writeFileSync(abs, 'original\n');
+  const refused = await tools.liveWrite('keep.txt', ctx.state);
+  assert.equal(refused, null, 'stream setup quietly declines the unsafe early write');
+  assert.equal(fs.readFileSync(abs, 'utf8'), 'original\n');
+
+  observeFile(ctx.state, abs, { complete: true, version: fileVersion('original\n') });
+  const writer = await tools.liveWrite('keep.txt', ctx.state);
+  assert.ok(writer, 'the same existing file may be streamed after a content read');
+  assert.equal(fs.readFileSync(abs, 'utf8'), 'original\n', 'opening the writer itself does not truncate the target');
+  await writer.push('replacement\n', { force: true });
+  await writer.settle();
+  assert.equal(fs.readFileSync(abs, 'utf8'), 'replacement\n');
+  assert.equal(writer.hasWritten(), true);
+  assert.deepEqual(writer.progress(), { added: 1, removed: 1, tail: ['replacement'] }, 'live counts describe the text actually on disk');
+  await writer.rollback();
+  assert.equal(fs.readFileSync(abs, 'utf8'), 'original\n', 'run interruption still restores the original');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a live overwrite refuses a stale start and preserves edits made during the stream', async () => {
+  const { tools, ctx, dir, ws } = await setup();
+  const abs = await ws.safePath('race.txt');
+  fs.writeFileSync(abs, 'original\n');
+  observeFile(ctx.state, abs, { complete: true, version: fileVersion('original\n') });
+
+  fs.writeFileSync(abs, 'edited before stream\n');
+  assert.equal(await tools.liveWrite('race.txt', ctx.state), null, 'a stale read cannot start a live overwrite');
+  assert.equal(fs.readFileSync(abs, 'utf8'), 'edited before stream\n');
+
+  fs.writeFileSync(abs, 'original\n');
+  const writer = await tools.liveWrite('race.txt', ctx.state);
+  assert.ok(writer, 'a refreshed matching version may stream');
+  ctx.state.liveWriters ||= [];
+  ctx.state.liveWriters.push(writer);
+  await writer.push('agent draft\n', { force: true });
+  assert.equal(fs.readFileSync(abs, 'utf8'), 'agent draft\n');
+  assert.equal(await checkAction({ workspace: ws, state: ctx.state, name: 'write_file', args: { path: 'race.txt' } }), null, 'the agent’s own partial write is the current known version');
+
+  fs.writeFileSync(abs, 'user edit during stream\n');
+  const blocked = await checkAction({ workspace: ws, state: ctx.state, name: 'write_file', args: { path: 'race.txt' } });
+  assert.ok(blocked && !blocked.allow, 'the stream does not authorize replacing a change made during it');
+  await writer.rollback();
+  assert.equal(fs.readFileSync(abs, 'utf8'), 'user edit during stream\n', 'rollback never overwrites a concurrent user edit');
+
+  const current = fs.readFileSync(abs, 'utf8');
+  observeFile(ctx.state, abs, { complete: true, version: fileVersion(current) });
+  assert.equal(await checkAction({ workspace: ws, state: ctx.state, name: 'write_file', args: { path: 'race.txt' } }), null, 'reading the concurrent version lets the agent proceed safely');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('write_file checks the observed version again immediately before replacement', async () => {
+  const { tools, ctx, dir, ws } = await setup();
+  const abs = await ws.safePath('final-check.txt');
+  fs.writeFileSync(abs, 'original\n');
+  observeFile(ctx.state, abs, { complete: true, version: fileVersion('original\n') });
+  const realReadText = ws.readText.bind(ws);
+  let reads = 0;
+  ws.readText = async (...args) => {
+    const result = await realReadText(...args);
+    if (++reads === 1) fs.writeFileSync(abs, 'changed after initial read\n');
+    return result;
+  };
+
+  const result = await tools.execute('write_file', { path: 'final-check.txt', content: 'replacement\n' }, ctx);
+  assert.equal(result.ok, false);
+  assert.match(result.output, /changed after it was read/);
+  assert.equal(fs.readFileSync(abs, 'utf8'), 'changed after initial read\n', 'the late change remains untouched');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a new live write records ownership before its final guarded tool call', async () => {
+  const { tools, ctx, ws, dir } = await setup();
+  const writer = await tools.liveWrite('new-stream.txt', ctx.state);
+  assert.ok(writer, 'a missing target may be streamed');
+  await writer.push('first line\n', { force: true });
+  assert.equal(fs.readFileSync(path.join(dir, 'new-stream.txt'), 'utf8'), 'first line\n');
+  assert.equal(writer.hasWritten(), true);
+  assert.deepEqual(writer.progress(), { added: 1, removed: 0, tail: ['first line'] }, 'new-file progress is a snapshot of the disk write');
+  assert.equal(await checkAction({
+    workspace: ws,
+    state: ctx.state,
+    name: 'write_file',
+    args: { path: 'new-stream.txt', _originalExisted: false },
+  }), null, 'only the live writer’s ownership, not a model argument, authorizes finalization');
+  await writer.rollback();
+  assert.equal(fs.existsSync(path.join(dir, 'new-stream.txt')), false, 'the uncommitted draft is rolled back');
 });
 
 test('write_file repairs a double-escaped body, but only when it is unmistakable', async () => {
@@ -279,12 +422,15 @@ test('delete / move, and writes inside .git are refused', async () => {
 });
 
 test('list_dir, grep_search and file_search', async () => {
-  const { run } = await setup();
+  const { run, dir } = await setup();
   await run('write_file', { path: 'src/a.js', content: 'const needle = 1;\n' });
   await run('write_file', { path: 'src/b.js', content: 'nothing\n' });
   const ls = await run('list_dir', { depth: 2 });
   assert.match(ls.output, /src\/\nsrc\/a\.js/);
   assert.equal(ls.ui.kind, 'list');
+  assert.equal(ls.ui.path, '.');
+  assert.equal(ls.ui.fullPath, dir, 'the row receives the actual workspace folder, even for a root listing');
+  assert.deepEqual([ls.ui.fileCount, ls.ui.directoryCount], [2, 1], 'list summaries count real files separately from folders');
   const g = await run('grep_search', { pattern: 'needle' });
   assert.match(g.output, /src\/a\.js:1: const needle = 1;/);
   assert.equal(g.ui.count, 1);
@@ -301,6 +447,7 @@ test('run_command: output, exit codes (a failing command is info, not a tool err
   assert.equal(ok.ok, true);
   assert.match(ok.output, /\$ echo hello\nhello\n\[exit code 0\]/);
   assert.equal(ok.ui.exitCode, 0);
+  assert.ok(typeof ok.ui.cwd === 'string' && ok.ui.cwd, 'the UI receives the real command working directory');
   const bad = await run('run_command', { command: 'echo oops; exit 2' });
   assert.equal(bad.ok, false);
   assert.equal(bad.failedSoft, true);
@@ -533,20 +680,40 @@ test('web tools go through the injected search runner; empty searches stay infor
     if (args.query === 'boom') return { success: false, error: 'blocked' };
     if (args.query === 'missing-diagnostic' || args.url === 'https://x.dev/no-diagnostic') return { success: false };
     if (args.query === 'empty') return { success: false, status: 'no_results', output: 'No results found. Try a shorter query.', results: [] };
-    if (name === 'web_search') return { success: true, output: '1. Result — https://x.dev', results: [{}, {}] };
-    if (name === 'fetch_url') return { success: true, output: '# Page\nbody', title: 'Page' };
+    if (name === 'web_search') return {
+      success: true,
+      output: '1. Result — https://docs.example/path\n2. Another result — https://news.example/story',
+      markdown: '1. [Result](https://docs.example/path)\n2. [Another result](https://news.example/story)',
+      results: [
+        { title: 'Docs', url: 'https://www.docs.example/path', source: 'Docs' },
+        { title: 'Another Docs result', url: 'https://docs.example/guide', source: 'Docs' },
+        { title: 'News', url: 'https://news.example/story', source: 'News' },
+        { title: 'Publisher story', url: 'https://news.google.com/rss/articles/item', sourceUrl: 'https://publisher.example/article', source: 'Publisher' },
+        { title: 'Not an HTTP result', url: 'javascript:alert(1)', source: 'Invented' },
+      ],
+    };
+    if (name === 'fetch_url') return { success: true, markdown: '# Page\nbody', title: 'Page' };
     return { success: true, images: [{ title: 'cat', url: 'https://i/c.png', thumbnail: 'https://i/t.png' }] };
   };
   const { run } = await setup({ search });
   const s = await run('web_search', { query: 'vite config' });
-  assert.equal(s.ui.count, 2);
+  assert.deepEqual(s.ui.sources, [
+    { domain: 'docs.example', name: 'Docs' },
+    { domain: 'news.example', name: 'News' },
+    { domain: 'publisher.example', name: 'Publisher' },
+  ], 'sources are distinct, actual HTTP(S) publisher hosts, capped at three');
+  assert.equal('count' in s.ui, false, 'the compact UI needs actual sources, not a result-count label');
+  assert.match(s.ui.markdown, /\[Result\]/, 'the search trail keeps readable results for its expanded details');
   const f = await run('fetch_url', { url: 'https://x.dev' });
   assert.match(f.output, /Untrusted web content/);
+  assert.match(f.output, /body/, 'Markdown-only readers still provide the page content to the model');
   assert.equal(f.ui.title, 'Page');
+  assert.equal(f.ui.markdown, '# Page\nbody', 'the fetched page Markdown is available to the frontend');
   assert.equal((await run('image_search', { query: 'cats' })).ui.count, 1);
   const empty = await run('web_search', { query: 'empty' });
   assert.equal(empty.ok, true, 'no hits are a completed search, not a transport error');
-  assert.equal(empty.ui.count, 0);
+  assert.deepEqual(empty.ui.sources, [], 'empty searches do not invent any publisher icons');
+  assert.equal('count' in empty.ui, false);
   assert.match(empty.output, /No results found/);
   const bad = await run('web_search', { query: 'boom' });
   assert.equal(bad.ok, false);
@@ -734,66 +901,10 @@ test('displayArgs never leaks file bodies or edit text to the UI', () => {
   assert.equal(displayArgs('run_command', { command: 'npm i', background: true }).background, true);
 });
 
-test('progress tracker: an overwrite waits for the file on disk, and the live numbers only ever grow', async () => {
-  const { tools, dir } = await setup();
-  fs.writeFileSync(path.join(dir, 'old.txt'), Array.from({ length: 40 }, (_, i) => `old ${i + 1}`).join('\n') + '\n');
-  const body = (n) => Array.from({ length: n }, (_, i) => `new ${i + 1}`).join('\\n');
-  const head = '{"path": "old.txt", "content": "';
-
-  // overwrite: no numbers until we know what is on disk (so "+N" never changes meaning mid-way)
-  const t = tools.progressTracker('write_file');
-  assert.equal(t.update(head + body(4)).progress, undefined);
-  assert.equal(t.update(head + body(5)).args.path, 'old.txt', 'the path is shown right away');
-  await new Promise((r) => setTimeout(r, 60));
-  const seq = [4, 8, 6, 20, 35, 50].map((n) => t.update(head + body(n)).progress);
-  assert.ok(seq.every((p) => p && p.added >= 0 && p.removed !== undefined));
-  for (let i = 1; i < seq.length; i++) {
-    assert.ok(seq[i].added >= seq[i - 1].added, `+ never decreases (${seq.map((p) => p.added)})`);
-    assert.ok(seq[i].removed >= seq[i - 1].removed, `− never decreases (${seq.map((p) => p.removed)})`);
-  }
-  assert.ok(seq.at(-1).removed <= 40);
-
-  // a brand-new file: numbers appear immediately (after the quick "does it exist?" check) and the "−" is a real 0
-  const n = tools.progressTracker('write_file');
-  n.update('{"path": "fresh.txt", "content": "a');
-  await new Promise((r) => setTimeout(r, 60));
-  const fresh = n.update('{"path": "fresh.txt", "content": "a\\nb\\nc').progress;
-  assert.deepEqual([fresh.added, fresh.removed], [3, 0]);
-
-  // other tools need no disk lookup at all
-  assert.equal(tools.progressTracker('edit_file').update('{"path": "a.js", "old_string": "x", "new_string": "y\\nz').progress.added, 2);
-});
-
-test('progress tracker: a call that puts "content" BEFORE "path" still gets live numbers', async () => {
-  // Real models vary the field order. Without the path the tracker cannot know what is on disk,
-  // and an overwrite used to replay with no "+N −M" at all.
-  const { tools, dir } = await setup();
-  fs.writeFileSync(path.join(dir, 'notes.css'), Array.from({ length: 45 }, (_, i) => `.old-${i + 1} { color: red; }`).join('\n') + '\n');
-  // real newlines: JSON.stringify escapes them, exactly as a provider's stream would
-  const body = Array.from({ length: 67 }, (_, i) => `.rule-${i + 1} { display: flex; }`).join('\n') + '\n';
-  const argsText = JSON.stringify({ content: body, path: 'notes.css' });
-  assert.ok(argsText.indexOf('"content"') < argsText.indexOf('"path"'), 'the fixture really does put content first');
-
-  // primed with the path the caller already knows (a call that arrived complete)
-  const t = tools.progressTracker('write_file', { path: 'notes.css' });
-  await new Promise((r) => setTimeout(r, 60));
-  const seen = [0.3, 0.6, 1].map((f) => t.update(argsText.slice(0, Math.round(argsText.length * f))).progress);
-  assert.ok(seen.every((p) => p), `every prefix reports progress: ${JSON.stringify(seen)}`);
-  assert.equal(seen.at(-1).added, 67, 'the final prefix reports the whole file');
-  assert.ok(seen.at(-1).removed > 0, 'an overwrite shows what it replaces');
-
-  // and without the hint it still works once the path itself arrives
-  const u = tools.progressTracker('write_file');
-  u.update(argsText);
-  await new Promise((r) => setTimeout(r, 60));
-  assert.ok(u.update(argsText).progress, 'the path in the text primes it too');
-});
-
-test('peekPartialArgs is re-exported from tools with the progress shape the loop relies on', () => {
+test('peekPartialArgs exposes the destination and body prefix from actual tool-argument deltas', () => {
   const p = peekPartialArgs('write_file', '{"path": "src/index.html", "content": "<!DOCTYPE html>\\n<html>\\n<head>\\n');
   assert.equal(p.args.path, 'src/index.html');
-  assert.equal(p.progress.added, 3);
-  assert.deepEqual(p.progress.tail, ['<!DOCTYPE html>', '<html>', '<head>']);
+  assert.equal(p.body, '<!DOCTYPE html>\n<html>\n<head>\n');
 });
 
 
@@ -876,6 +987,103 @@ test('multi_edit across SEVERAL FILES in one call, atomically', async () => {
   assert.match((await run('multi_edit', { edits: [{ path: 'ghost.js', old_string: 'a', new_string: 'b' }] })).output, /does not exist/);
 });
 
+test('multi_edit revalidates every file snapshot before writing the batch', async () => {
+  const { run, dir, ws } = await setup();
+  const a = path.join(dir, 'a.txt');
+  const b = path.join(dir, 'b.txt');
+  fs.writeFileSync(a, 'alpha\n');
+  fs.writeFileSync(b, 'bravo\n');
+  const realReadText = ws.readText.bind(ws);
+  const realWriteText = ws.writeText.bind(ws);
+  let changedDuringPlanning = false;
+  let writes = 0;
+  ws.readText = async (...args) => {
+    const result = await realReadText(...args);
+    if (!changedDuringPlanning && args[0] === a) {
+      changedDuringPlanning = true;
+      fs.writeFileSync(a, 'alpha changed externally\n');
+    }
+    return result;
+  };
+  ws.writeText = async (...args) => {
+    writes++;
+    return realWriteText(...args);
+  };
+
+  const result = await run('multi_edit', {
+    edits: [
+      { path: 'a.txt', old_string: 'alpha', new_string: 'ALPHA' },
+      { path: 'b.txt', old_string: 'bravo', new_string: 'BRAVO' },
+    ],
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.output, /changed while multi_edit was preparing edits/);
+  assert.equal(writes, 0, 'the batch is refused before any write lands');
+  assert.equal(fs.readFileSync(a, 'utf8'), 'alpha changed externally\n');
+  assert.equal(fs.readFileSync(b, 'utf8'), 'bravo\n');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('multi_edit rolls earlier files back if a later workspace write fails', async () => {
+  const { run, dir, ws } = await setup();
+  const a = path.join(dir, 'a.txt');
+  const b = path.join(dir, 'b.txt');
+  fs.writeFileSync(a, 'alpha\n');
+  fs.writeFileSync(b, 'bravo\n');
+  const realWriteText = ws.writeText.bind(ws);
+  let failOnce = true;
+  ws.writeText = async (abs, text) => {
+    if (abs === b && failOnce) {
+      failOnce = false;
+      fs.writeFileSync(abs, 'BRA'); // a backend failing after writing a prefix of the replacement
+      throw new Error('simulated disk failure');
+    }
+    return realWriteText(abs, text);
+  };
+
+  const failed = await run('multi_edit', {
+    edits: [
+      { path: 'a.txt', old_string: 'alpha', new_string: 'ALPHA' },
+      { path: 'b.txt', old_string: 'bravo', new_string: 'BRAVO' },
+    ],
+  });
+  assert.equal(failed.ok, false);
+  assert.match(failed.output, /Every file touched by this call was restored/);
+  assert.equal(fs.readFileSync(a, 'utf8'), 'alpha\n', 'the earlier successful write was rolled back');
+  assert.equal(fs.readFileSync(b, 'utf8'), 'bravo\n', 'the file whose write threw was also restored');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('multi_edit rollback preserves a concurrent edit to an earlier committed file', async () => {
+  const { run, dir, ws } = await setup();
+  const a = path.join(dir, 'a.txt');
+  const b = path.join(dir, 'b.txt');
+  fs.writeFileSync(a, 'alpha\n');
+  fs.writeFileSync(b, 'bravo\n');
+  const realWriteText = ws.writeText.bind(ws);
+  ws.writeText = async (abs, text) => {
+    if (abs === a && text === 'ALPHA\n') {
+      await realWriteText(abs, text);
+      fs.writeFileSync(a, 'user edit during batch\n');
+      return;
+    }
+    if (abs === b && text === 'BRAVO\n') throw new Error('simulated disk failure');
+    return realWriteText(abs, text);
+  };
+
+  const result = await run('multi_edit', {
+    edits: [
+      { path: 'a.txt', old_string: 'alpha', new_string: 'ALPHA' },
+      { path: 'b.txt', old_string: 'bravo', new_string: 'BRAVO' },
+    ],
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.output, /changed concurrently; left untouched/);
+  assert.equal(fs.readFileSync(a, 'utf8'), 'user edit during batch\n', 'rollback must not overwrite a concurrent edit');
+  assert.equal(fs.readFileSync(b, 'utf8'), 'bravo\n');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('edit_file: separate calls on the same file earn a "use multi_edit" tip; multi_edit resets it; line-number prefixes are stripped', async () => {
   const { run } = await setup();
   await run('write_file', { path: 'a.js', content: 'let a = 1;\nlet b = 2;\nlet c = 3;\n' });
@@ -941,7 +1149,7 @@ test('file_outline: structure with line numbers, then targeted reads', async () 
 // ---------------------------------------------------------------------------
 
 test('append_file: builds a big file in parts, never glues onto a half-written line', async () => {
-  const { run, dir } = await setup();
+  const { run, dir, ws, ctx } = await setup();
   const a = await run('append_file', { path: 'big.txt', content: 'one\ntwo\n' });
   assert.equal(a.ok, true, a.output);
   assert.equal(a.ui.created, true);
@@ -951,6 +1159,8 @@ test('append_file: builds a big file in parts, never glues onto a half-written l
   assert.match(b.output, /Appended 2 lines to big\.txt — it now has 4 lines/);
   // a file that does not end with a newline: the next part starts on its own line
   fs.appendFileSync(path.join(dir, 'big.txt'), 'five-half');
+  const partial = fs.readFileSync(path.join(dir, 'big.txt'), 'utf8');
+  observeFile(ctx.state, await ws.safePath('big.txt'), { complete: true, version: fileVersion(partial) });
   await run('append_file', { path: 'big.txt', content: 'six\n' });
   assert.equal(fs.readFileSync(path.join(dir, 'big.txt'), 'utf8'), 'one\ntwo\nthree\nfour\nfive-half\nsix\n');
   assert.equal((await run('append_file', { path: 'big.txt', content: '' })).ok, false);

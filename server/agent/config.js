@@ -121,16 +121,6 @@ export const limits = {
   maxReadLines: 2000,
   maxWriteChars: 2_000_000,
 
-  /**
-   * How fast a tool call whose body arrived whole is revealed in the chat (see
-   * the reveal plan in loop.js). Characters per second, floored and capped by a
-   * duration range. The defaults are tuned for a person watching the file being
-   * written; the test suite raises them so behavioural tests do not spend
-   * seconds of wall clock on an animation.
-   */
-  revealCharsPerSec: () => num('DANAV_REVEAL_CHARS_PER_SEC', 1100),
-  revealMinMs: () => num('DANAV_REVEAL_MIN_MS', 800),
-  revealMaxMs: () => num('DANAV_REVEAL_MAX_MS', 2800),
 };
 
 // ---------------------------------------------------------------------------

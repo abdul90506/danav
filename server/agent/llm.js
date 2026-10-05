@@ -14,7 +14,7 @@
  */
 import { createStreamSplitter } from '../streamSplitter.js';
 import { isCloudMetadataUrl } from '../publicFetch.js';
-import { modelForProvider, normalizeThinkingLevel, thinkingParams } from './thinking.js';
+import { isGoogleGenerativeLanguageUrl, modelForProvider, normalizeThinkingLevel, thinkingParams } from './thinking.js';
 
 export class LlmError extends Error {
   constructor(message, { status, code } = {}) {
@@ -117,6 +117,11 @@ export async function streamCompletion({
   const normalizedLevel = normalizeThinkingLevel(thinkingLevel);
   const configuredThinking = thinkingParams({ model: requestModel, baseUrl, level: normalizedLevel });
   const hasThinkingConfig = Object.keys(configuredThinking).length > 0;
+  // Gemini's OpenAI-compatible API streams text by default, but tool-call arguments
+  // stay whole unless this Google-specific opt-in is sent. Without it, the UI only
+  // learns a file's body after generation has finished.
+  let streamFunctionCallArguments =
+    isGoogleGenerativeLanguageUrl(baseUrl) && /gemini[-_]\d/i.test(requestModel) && Array.isArray(tools) && tools.length > 0;
   const tokenLimit = Number.isFinite(maxOutputTokens)
     ? Math.max(256, Math.min(maxTokens(), Math.floor(maxOutputTokens)))
     : maxTokens();
@@ -153,7 +158,7 @@ export async function streamCompletion({
     return next;
   };
 
-  const build = (withThinking) => {
+  const build = (withThinking, withStreamFunctionCallArguments) => {
     const body = { model: requestModel, messages, stream: true, max_tokens: tokenLimit };
     // A wrap-up round passes no tools at all, so the model has to answer in words.
     if (Array.isArray(tools) && tools.length > 0) {
@@ -161,6 +166,15 @@ export async function streamCompletion({
       body.tool_choice = 'auto';
     }
     if (withThinking) Object.assign(body, configuredThinking);
+    if (withStreamFunctionCallArguments) {
+      body.extra_body = {
+        ...(body.extra_body || {}),
+        google: {
+          ...(body.extra_body?.google || {}),
+          stream_function_call_arguments: true,
+        },
+      };
+    }
     return body;
   };
 
@@ -178,7 +192,7 @@ export async function streamCompletion({
         res = await fetch(endpoint, {
           method: 'POST',
           headers: headersForCredential(credential),
-          body: JSON.stringify(build(withThinking)),
+          body: JSON.stringify(build(withThinking, streamFunctionCallArguments)),
           signal,
         });
       } catch (err) {
@@ -193,6 +207,17 @@ export async function streamCompletion({
       if (res.ok) return res;
 
       const text = await res.text().catch(() => '');
+      if (
+        res.status === 400 &&
+        streamFunctionCallArguments &&
+        /stream[_\s-]*function[_\s-]*call[_\s-]*arguments/i.test(text)
+      ) {
+        // Older Gemini models may not implement this opt-in. Drop only this new
+        // streaming flag, preserve the configured thinking/model/provider settings,
+        // and retry the same tool round once in the endpoint's default mode.
+        streamFunctionCallArguments = false;
+        continue;
+      }
       if (res.status === 400 && withThinking) {
         if (normalizedLevel !== 'Auto') {
           if (Array.isArray(tools) && tools.length > 0 && /tool|function/i.test(text)) {

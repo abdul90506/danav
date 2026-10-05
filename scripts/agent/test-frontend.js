@@ -13,7 +13,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { build } from 'esbuild';
 import { startFakeLlm } from '../fake-llm.js';
-import { registerAgentRoutes } from '../../server/agent/routes.js';
+import { registerAgentRoutes, _activeRuns } from '../../server/agent/routes.js';
 import { _resetStoreCache } from '../../server/agent/store.js';
 
 const { test } = globalThis.__agentTest;
@@ -294,48 +294,49 @@ test('every preview load asks for a URL the browser has never cached', async () 
   assert.equal(a.replace(/\?.*$/, ''), 'https://x.sandbox.novita.ai');
 });
 
-test('while a run works, none of its own words reach the transcript — and the line it is writing sits under the rows', async () => {
+test('work status streams real progress text verbatim and never word-cycles or invents note rows', async () => {
   const ui = await loadComponent('src/components/ChatMessage.tsx');
-  const NARRATION =
+  const progress =
     'Ab sab files banata hoon. Pehle index.html ko trim kar raha hoon (sirf hero + footer), phir 5 subpages create kar raha hoon.';
   const blocks = [
     { id: 't0', type: 'thinking', content: 'Let me look.', duration: 1500 },
     { id: 'a1', type: 'action', action: { id: 'a1', tool: 'list_dir', status: 'done', args: {}, result: { kind: 'list', entries: [], path: '.' } } },
-    { id: 'x1', type: 'text', content: NARRATION },
+    { id: 'a2', type: 'action', action: { id: 'a2', tool: 'run_command', status: 'running', args: { command: 'npm test' } } },
+    { id: 'a3', type: 'action', action: { id: 'a3', tool: 'edit_file', status: 'done', args: { path: 'src/App.tsx' }, result: { kind: 'edit', path: 'src/App.tsx', added: 2, removed: 1 } } },
+    { id: 'a4', type: 'action', action: { id: 'a4', tool: 'edit_file', status: 'done', args: { path: 'src/theme.css' }, result: { kind: 'edit', path: 'src/theme.css', added: 3, removed: 1 } } },
+    { id: 'x1', type: 'text', content: progress },
   ];
   const render = (message) => renderToStaticMarkup(React.createElement(ui.ChatMessage, { message }));
 
   const live = render({ id: 'm1', role: 'assistant', content: '', createdAt: 1, agent: true, isGenerating: true, blocks });
   const text = live.replace(/<[^>]*>/g, '\u0000').split('\u0000').join(' ').replace(/\s+/g, ' ');
+  assert.ok(text.includes(progress), 'show the actual streamed line, not a fabricated word pair');
+  assert.ok(live.includes('data-testid="live-progress"'), 'the real progress line is inside the work row');
+  assert.ok(live.includes('agent-shimmer'), 'only the active work label shimmers');
+  assert.doesNotMatch(live, /animate-spin/, 'the Worked parent has no circular spinner');
+  assert.ok(live.includes('npm test'), 'the command itself stays visible on its live row');
+  assert.ok(!live.includes('lucide-terminal'), 'command rows stay text-led rather than badge-like');
+  assert.ok(!live.includes('narration-step') && !live.includes('narration-line'), 'no cycling or fake text animation');
 
-  /*
-    The bug this locks down: a line written after the last action looked exactly
-    like the closing answer — so it appeared in the transcript — and then vanished
-    when the run carried on with the next tool call. Nothing the run says while it
-    works is shown as prose any more.
-  */
-  assert.ok(!text.includes('subpages'), 'no part of the line beyond the pair on screen');
-  assert.ok(!text.includes('trim kar raha'), 'no mid-run narration in the transcript');
-
-  // The line lives under the rows, two words at a time, not under the label.
-  const line = live.match(/data-testid="narration-line"[\s\S]*?<\/div>/);
-  assert.ok(line, 'the line is on screen while the run works');
-  assert.match(line[0], /narration-step[^>]*>Ab sab</, 'the first pair of words');
-  assert.ok(live.indexOf('data-testid="narration-line"') > live.indexOf('Thought for'), 'below the reasoning');
-
-  // A finished turn: the answer shows, the narration stays in the trail — and a
-  // trailing notice never swallows the answer.
   const finished = render({
     id: 'm3', role: 'assistant', content: '', createdAt: 1, agent: true,
     agentRun: { stopReason: 'completed', durationMs: 9000, toolCalls: 2, changed: [{ path: 'index.html', added: 77, removed: 65 }] },
     blocks: [...blocks, { id: 'x2', type: 'text', content: 'All five pages are done and the build passes.' }],
   });
   assert.match(finished, /All five pages are done and the build passes\./);
-  assert.ok(!finished.includes('subpages create kar raha hoon'), 'narration stayed out of the answer');
-  assert.match(finished, /line written|lines written/, 'and is still there in the trail');
+  assert.ok(finished.includes('Worked for 9s'), 'the parent uses the compact Worked for duration');
+  assert.doesNotMatch(finished, /agent-shimmer|animate-spin/, 'finished work is static, not animated');
+  assert.ok(!finished.includes('Run activity'), 'there is no extra divider heading under the parent');
+  assert.ok(!finished.includes('subpages create kar raha hoon'), 'interim narration does not become a fake note row');
+  assert.ok(!finished.includes('line written') && !finished.includes('lines written'));
+  const finishedText = finished.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  assert.ok(finishedText.includes('Edited src/App.tsx'), 'file edits remain inline in the Worked trail');
+  assert.ok(finishedText.includes('Edited src/theme.css'), 'each changed path stays visible');
+  assert.ok(finishedText.includes('+2') && finishedText.includes('-1'), 'real additions and removals stay attached to each edit');
+  assert.ok(!finished.includes('2 files changed'));
 });
 
-test('the index tools read as plain rows in the trail', async () => {
+test('the index tools retain concise, factual action labels', async () => {
   const fmt = await load('src/agent/format.ts');
   const base = { id: 'c1', tool: 'find_symbol', status: 'done', args: { name: 'createPanelStore' } };
 
@@ -348,14 +349,40 @@ test('the index tools read as plain rows in the trail', async () => {
   const mapped = fmt.actionLabel({ id: 'c3', tool: 'code_map', status: 'done', args: {}, result: { kind: 'map', count: 150, symbols: 1400 } });
   assert.deepEqual([mapped.verb, mapped.target, mapped.meta], ['Mapped', 'the project', '150 files · 1400 definitions']);
 
-  // ...and they group with the other reading tools, not as unknowns.
-  assert.equal(fmt.trailKind('find_symbol'), 'analyze');
-  assert.equal(fmt.trailKind('relevant_files'), 'explore');
-  assert.equal(fmt.trailKind('code_map'), 'explore');
-  assert.equal(fmt.trailGroupLabel('explore', 3), '3 places explored');
 });
 
-test('the history and check tools read as plain rows too', async () => {
+test('Worked activity groups summarize real exploration and commands in chronological batches', async () => {
+  const fmt = await load('src/agent/format.ts');
+  const trail = await loadComponent('src/components/AgentTrailGroup.tsx');
+  const actions = [
+    { id: 'r1', tool: 'read_file', status: 'done', args: { path: 'src/App.tsx' }, result: { kind: 'read', path: 'src/App.tsx', ranges: [[20, 28]] } },
+    { id: 's1', tool: 'file_search', status: 'done', args: { pattern: '*.tsx' }, result: { kind: 'find', count: 8 } },
+    { id: 'c1', tool: 'run_command', status: 'done', args: { command: 'npm test' }, result: { kind: 'command', command: 'npm test', cwd: 'danav', exitCode: 0 } },
+    { id: 'c2', tool: 'run_checks', status: 'done', args: {}, result: { kind: 'command', command: 'npm run typecheck', cwd: 'danav', exitCode: 0, checks: 1, passed: true } },
+    { id: 'c3', tool: 'run_command', status: 'done', args: { command: 'npm run build' }, result: { kind: 'command', command: 'npm run build', cwd: 'danav', exitCode: 0 } },
+    { id: 'e1', tool: 'edit_file', status: 'done', args: { path: 'prompt.js' }, result: { kind: 'edit', path: 'prompt.js', added: 1, removed: 1 } },
+  ];
+
+  assert.equal(fmt.summarizeWorkActions(actions.slice(0, 5)), 'Explored 8 files, ran 3 commands');
+  assert.equal(fmt.summarizeWorkActions([
+    { id: 's2', tool: 'file_search', status: 'done', args: {}, result: { kind: 'find', count: 8, truncated: true } },
+  ]), 'Explored 8+ files', 'a truncated result is shown as a lower bound, not an exact count');
+  assert.equal(fmt.summarizeWorkActions([
+    { id: 'empty', tool: 'list_dir', status: 'done', args: { path: '.' }, result: { kind: 'list', path: '.', fullPath: '/workspace/empty', count: 0, fileCount: 0, directoryCount: 0 } },
+  ]), 'Explored an empty folder', 'an empty listing is not mislabeled as code or a fabricated item count');
+  assert.equal(fmt.summarizeWorkActions([
+    { id: 'r2', tool: 'read_file', status: 'done', args: { path: 'src/App.tsx' }, result: { kind: 'read', path: 'src/App.tsx' } },
+    { id: 'r3', tool: 'read_file', status: 'done', args: { path: 'src/App.tsx' }, result: { kind: 'read', path: 'src/App.tsx' } },
+  ]), 'Explored 1 file', 're-reading the same path does not claim two different files');
+  const html = renderToStaticMarkup(React.createElement(trail.AgentTrail, { trailId: 'screenshot', actions }));
+  const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  assert.ok(text.includes('Explored 8 files, ran 3 commands'), 'adjacent reads and commands share one expandable summary');
+  assert.ok(text.includes('Edited prompt.js'), 'edits stay as direct file rows, not a generic Changes group');
+  assert.ok(text.includes('+1') && text.includes('-1'), 'the inline edit keeps its real delta');
+  assert.doesNotMatch(html, /Run activity|lucide-search|lucide-terminal/, 'the hierarchy stays text-led and compact');
+});
+
+test('history and check tools retain their result wording', async () => {
   const fmt = await load('src/agent/format.ts');
 
   const status = fmt.actionLabel({ id: 'r1', tool: 'repo_status', status: 'done', args: {}, result: { kind: 'history', view: 'status', repo: true, dirty: 2, branch: 'main' } });
@@ -383,10 +410,6 @@ test('the history and check tools read as plain rows too', async () => {
   const ok = fmt.actionLabel({ id: 'c2', tool: 'run_checks', status: 'done', args: { only: 'tsc' }, result: { kind: 'command', command: 'npx tsc --noEmit', passed: true, exitCode: 0, checks: 1 } });
   assert.deepEqual([ok.verb, ok.target, ok.meta], ['Checks passed', 'npx tsc --noEmit', '1 check']);
 
-  assert.equal(fmt.trailKind('repo_status'), 'analyze');
-  assert.equal(fmt.trailKind('repo_history'), 'analyze');
-  assert.equal(fmt.trailKind('load_skill'), 'analyze');
-  assert.equal(fmt.trailKind('run_checks'), 'run');
 });
 
 test('a live row carries no count until the count is a fact', async () => {
@@ -882,15 +905,11 @@ test('file icons: a light-theme variant is offered where the theme has one, and 
   assert.ok(fs.existsSync(path.join(dir, 'LICENSE')), 'the icon theme license ships with the icons');
 });
 
-test('wording: "Creating index.html" while streaming, "Created … +77" / "Rewrote … +77 −98" after', () => {
-  /*
-    While a file is still being written there is no count on the row: the live
-    buffer holds an estimate that keeps growing, and a number that changes under
-    the reader is worse than no number. The count appears once, from the finished
-    write.
-  */
+test('wording: Creating shows disk-confirmed progress while streaming and exact totals after', () => {
+  const waiting = fmt.actionLabel(act({ status: 'pending', args: { path: 'index.html' } }));
+  assert.deepEqual([waiting.verb, waiting.target, waiting.added, waiting.removed], ['Creating', 'index.html', undefined, undefined], 'no count is invented before the first disk write');
   const live = fmt.actionLabel(act({ status: 'pending', args: { path: 'index.html' }, progress: { added: 37, removed: 12 } }));
-  assert.deepEqual([live.verb, live.target, live.added, live.removed, live.expandable], ['Creating', 'index.html', undefined, undefined, false]);
+  assert.deepEqual([live.verb, live.target, live.added, live.removed, live.expandable], ['Creating', 'index.html', 37, 12, false], 'real disk-backed counts appear during the write');
   const created = fmt.actionLabel(act({ result: { kind: 'write', path: 'index.html', created: true, added: 77, removed: 0, hunks: [{ newStart: 1, lines: [] }] } }));
   assert.deepEqual([created.verb, created.added, created.removed, created.expandable], ['Created', 77, undefined, true]);
   const rewrote = fmt.actionLabel(act({ result: { kind: 'write', path: 'index.html', created: false, added: 77, removed: 98 } }));
@@ -904,6 +923,8 @@ test('wording: Analyzed with line ranges, Edited with ranges and counts', () => 
   assert.deepEqual([reading.verb, reading.lines], ['Analyzing', 'L10–L20']);
   const one = fmt.actionLabel(act({ tool: 'read_file', result: { kind: 'read', path: 'a.js', startLine: 5, endLine: 5, totalLines: 5 } }));
   assert.equal(one.lines, 'L5');
+  const repeated = fmt.actionLabel(act({ tool: 'read_file', result: { kind: 'read', path: 'a.js', startLine: 12, endLine: 20, totalLines: 100, repeated: true } }));
+  assert.deepEqual([repeated.verb, repeated.lines], ['Already read', 'L12–L20'], 'a covered unchanged range is not presented as newly analyzed');
   const edit = fmt.actionLabel(act({ tool: 'multi_edit', result: { kind: 'edit', path: 'style.css', ranges: [[12, 18], [40, 44], [80, 80], [90, 91]], added: 9, removed: 4, edits: 4 } }));
   assert.deepEqual([edit.verb, edit.lines, edit.added, edit.removed, edit.meta], ['Edited', 'L12–L18, L40–L44, L80 +1 more', 9, 4, '4 edits']);
   const editing = fmt.actionLabel(act({ tool: 'edit_file', status: 'pending', args: { path: 'a.js' }, progress: { added: 6, removed: 2 } }));
@@ -984,7 +1005,7 @@ test('wording: several chunks, a multi-file edit, an outline', () => {
   const chunks = fmt.actionLabel(act({ tool: 'read_file', result: { kind: 'read', path: 'big.js', startLine: 1, endLine: 300, totalLines: 300, ranges: [[1, 50], [200, 260]] } }));
   assert.deepEqual([chunks.verb, chunks.lines], ['Analyzed', 'L1–L50, L200–L260']);
   const many = fmt.actionLabel(act({ tool: 'multi_edit', result: { kind: 'edit', path: 'a.js', added: 5, removed: 2, edits: 4, ranges: [[1, 1]], changes: [{ path: 'a.js', added: 3, removed: 1, edits: 2 }, { path: 'b.css', added: 2, removed: 1, edits: 2 }] } }));
-  assert.deepEqual([many.verb, many.target, many.lines, many.added, many.removed, many.meta], ['Edited', 'a.js', undefined, 5, 2, '2 files · 4 edits']);
+  assert.deepEqual([many.verb, many.target, many.fileTargets, many.lines, many.added, many.removed, many.meta], ['Edited', undefined, ['a.js', 'b.css'], undefined, 5, 2, '4 edits']);
   const live = fmt.actionLabel(act({ tool: 'multi_edit', status: 'running', args: { edits: 6 }, progress: { added: 3, removed: 2 } }));
   assert.deepEqual([live.verb, live.meta, live.added, live.removed], ['Editing', '6 edits', undefined, undefined]);
   const one = fmt.actionLabel(act({ tool: 'multi_edit', result: { kind: 'edit', path: 'a.js', added: 1, removed: 1, edits: 3, ranges: [[4, 4], [9, 9], [20, 22]], hunks: [{ newStart: 4, lines: [] }] } }));
@@ -1003,13 +1024,119 @@ test('wording: search, list, web, plan and the rest', () => {
   assert.equal(fmt.actionLabel(act({ tool: 'list_dir', result: { kind: 'list', path: 'src', count: 1 } })).meta, '1 item');
   assert.deepEqual(fmt.actionLabel(act({ tool: 'file_search', result: { kind: 'find', pattern: '*.tsx', count: 5 } })).meta, '5 files');
   const web = fmt.actionLabel(act({ tool: 'web_search', result: { kind: 'web_search', query: 'vite proxy', count: 8 } }));
-  assert.deepEqual([web.verb, web.meta], ['Searched the web for', '8 results']);
-  assert.equal(fmt.actionLabel(act({ tool: 'fetch_url', result: { kind: 'fetch', url: 'https://www.example.com/docs/a', title: 'Docs' } })).target, 'example.com');
+  assert.deepEqual([web.verb, web.meta], ['Searched the web for', undefined], 'web rows replace the count with real source favicons');
+  const fetched = fmt.actionLabel(act({ tool: 'fetch_url', result: { kind: 'fetch', url: 'https://www.example.com/docs/a', title: 'Docs', markdown: '# Docs' } }));
+  assert.equal(fetched.target, 'example.com');
+  assert.equal(fetched.expandable, true, 'a fetched Markdown page can be opened from the agent trail');
+  const searchable = fmt.actionLabel(act({ tool: 'web_search', result: { kind: 'web_search', query: 'vite proxy', markdown: '[Docs](https://docs.example)' } }));
+  assert.equal(searchable.expandable, true, 'search results can be inspected in the agent trail');
   const plan = fmt.actionLabel(act({ tool: 'update_plan', result: { kind: 'plan', done: 2, total: 5, todos: [{ content: 'x', status: 'completed' }] } }));
   assert.deepEqual([plan.verb, plan.meta, plan.expandable], ['Updated plan', '2/5 done', true]);
   const preview = fmt.actionLabel(act({ tool: 'get_preview_url', result: { kind: 'preview', port: 3000, url: 'https://x' } }));
   assert.deepEqual([preview.verb, preview.target], ['Preview ready on port', '3000']);
   assert.equal(fmt.actionLabel(act({ tool: 'mystery_tool' })).verb, 'Ran');
+});
+
+test('directory activity labels show the complete folder path and a folder icon', async () => {
+  const action = {
+    id: 'dir1', tool: 'list_dir', status: 'done', args: { path: '.' },
+    result: { kind: 'list', path: '.', fullPath: '/workspace/site/src', count: 3 },
+  };
+  const label = fmt.actionLabel(action);
+  assert.equal(label.target, '/workspace/site/src');
+  assert.equal(label.targetKind, 'dir');
+
+  const ui = await loadComponent('src/components/AgentActionRow.tsx');
+  const html = renderToStaticMarkup(React.createElement(ui.AgentActionRow, { action }));
+  assert.ok(html.includes('/workspace/site/src'), 'the full folder path is rendered');
+  assert.match(html, /data-icon="folder/, 'the target carries a folder icon variant');
+  assert.doesNotMatch(html, /Listed \./);
+  assert.doesNotMatch(html, /rounded-md border/, 'a folder path is a plain activity row, not a pill');
+
+  const legacyRoot = fmt.actionLabel({
+    id: 'dir2', tool: 'list_dir', status: 'done', args: { path: '.' },
+    result: { kind: 'list', path: '.', count: 0 },
+  });
+  assert.equal(legacyRoot.target, '.', 'without a saved absolute path, keep the actual path instead of inventing a root label');
+});
+
+test('web search uses real overlapping site favicons instead of a bare result count', async () => {
+  const sources = [
+    { domain: 'example.com', name: 'Example' },
+    { domain: 'docs.example', name: 'Docs' },
+    { domain: 'news.example', name: 'News' },
+  ];
+  const agentUi = await loadComponent('src/components/AgentActionRow.tsx');
+  const agentHtml = renderToStaticMarkup(React.createElement(agentUi.AgentActionRow, {
+    action: {
+      id: 'web-agent', tool: 'web_search', status: 'done', args: { query: 'vite proxy' },
+      result: { kind: 'web_search', query: 'vite proxy', sources, count: 8 },
+    },
+  }));
+  assert.match(agentHtml, /data-testid="search-source-stack"/);
+  assert.equal(agentHtml.split('google.com/s2/favicons').length - 1, 3, 'one circular favicon per real host, capped at three');
+  assert.doesNotMatch(agentHtml, /8 results/, 'the agent row does not show a result-count label');
+
+  const fetchedHtml = renderToStaticMarkup(React.createElement(agentUi.AgentActionRow, {
+    action: {
+      id: 'fetch-agent', tool: 'fetch_url', status: 'done', args: { url: 'https://example.com/story' },
+      result: { kind: 'fetch', url: 'https://example.com/story', title: 'Story', markdown: '# Readable page content' },
+    },
+  }));
+  assert.match(fetchedHtml, /aria-expanded="false"/, 'fetched content has a clear expandable row affordance');
+  assert.match(fetchedHtml, /href="https:\/\/example.com\/story"/);
+  assert.match(fetchedHtml, /aria-label="Open example.com in a new tab"/);
+
+  const chatUi = await loadComponent('src/components/ToolExecutionCard.tsx');
+  const chatHtml = renderToStaticMarkup(React.createElement(chatUi.ToolExecutionCard, {
+    tool: { id: 'web-chat', name: 'web_search', status: 'done', ok: true, query: 'vite proxy', summary: '8 results', sources, detail: 'real search output' },
+  }));
+  assert.match(chatHtml, /data-testid="search-source-stack"/);
+  assert.doesNotMatch(chatHtml, /8 results/, 'the regular chat row hides stale result-count summaries too');
+
+  const noSources = renderToStaticMarkup(React.createElement(chatUi.ToolExecutionCard, {
+    tool: { id: 'web-empty', name: 'web_search', status: 'done', ok: true, query: 'unfound source', summary: '8 results' },
+  }));
+  assert.doesNotMatch(noSources, /search-source-stack|8 results/, 'missing source data stays empty rather than being fabricated');
+});
+
+test('Worked rows show reference-style analysis ranges and a breadcrumb command panel', async () => {
+  const ui = await loadComponent('src/components/AgentActionRow.tsx');
+  const analyzed = renderToStaticMarkup(React.createElement(ui.AgentActionRow, {
+    action: {
+      id: 'read1', tool: 'read_file', status: 'done', args: { path: 'src/App.tsx' },
+      result: { kind: 'read', path: 'src/App.tsx', ranges: [[20, 28]] },
+    },
+  }));
+  assert.ok(analyzed.includes('Analyzed'));
+  assert.ok(analyzed.includes('#L20-28'), 'source ranges use the compact #L20-28 form');
+
+  const multiEdit = renderToStaticMarkup(React.createElement(ui.AgentActionRow, {
+    action: {
+      id: 'edit1', tool: 'multi_edit', status: 'done', args: { path: 'a.js' },
+      result: {
+        kind: 'edit', path: 'a.js', added: 5, removed: 3, edits: 2,
+        changes: [{ path: 'a.js', added: 3, removed: 1 }, { path: 'b.css', added: 2, removed: 2 }],
+      },
+    },
+  }));
+  const editText = multiEdit.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  assert.match(editText, /a\.js .*\+3.*-1/);
+  assert.match(editText, /b\.css .*\+2.*-2/);
+  assert.ok(!editText.includes('+5'), 'multi-file rows report each file delta instead of hiding it in an aggregate');
+
+  const command = renderToStaticMarkup(React.createElement(ui.CommandDetails, {
+    action: {
+      id: 'cmd1', tool: 'run_command', status: 'done',
+      args: { command: 'npm run typecheck' },
+      result: { kind: 'command', command: 'npm run typecheck', cwd: 'danav1 - Copy', exitCode: 0 },
+      output: 'TypeScript checks passed\n',
+    },
+  }));
+  assert.match(command, /data-testid="command-details"/);
+  assert.ok(command.includes('danav1 - Copy') && command.includes('npm run typecheck'), 'the breadcrumb carries the real cwd and command');
+  assert.ok(command.includes('TypeScript checks passed'), 'the terminal panel preserves the actual output');
+  assert.match(command, /rounded-lg border/);
 });
 
 test('formatRanges / formatDuration / workedSummary / stopNotice', () => {
@@ -1023,9 +1150,11 @@ test('formatRanges / formatDuration / workedSummary / stopNotice', () => {
   assert.equal(fmt.formatDuration(125_000), '2m 5s');
   assert.equal(
     fmt.workedSummary({ durationMs: 32_000, toolCalls: 8, changed: [{ path: 'a', added: 5, removed: 1 }, { path: 'b', added: 2, removed: 0 }] }),
-    'Worked for 32s · 8 actions · 2 files +7 −1'
+    'Worked for 32s', 'the header uses the compact reference wording; file details stay in the activity trail'
   );
-  assert.equal(fmt.workedSummary({ durationMs: 300, toolCalls: 1 }), '1 action', 'no stopwatch under half a second');
+  assert.equal(fmt.workedSummary({ durationMs: 7 * 60_000 + 48_000, toolCalls: 8 }), 'Worked for 7m', 'the finished parent shows whole minutes like the references');
+  assert.equal(fmt.workedSummary({ durationMs: 300, toolCalls: 1 }), 'Work complete', 'no stopwatch under a second');
+  assert.equal(fmt.workedSummary({ durationMs: 9_000, toolCalls: 1, stopReason: 'step_limit' }), 'Paused after 9s');
   assert.equal(fmt.workedSummary({}), undefined);
   assert.equal(fmt.workedSummary({ durationMs: 6_000, toolCalls: 0, changed: [] }), undefined, 'a turn that only talked reports nothing');
   // The notice points at the button, not at typing the word.
@@ -1156,6 +1285,61 @@ test('data path: runAgentTurn turns a real SSE run into ordered blocks (and Stop
   }
 });
 
+test('agent switch-stop waits for the active run to release its workspace lock', async () => {
+  const app = express();
+  app.use(express.json());
+  registerAgentRoutes(app, { runSearchTool: async () => ({ success: false }) });
+  const server = await new Promise((resolve) => {
+    const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
+  });
+  const workspaceId = 'switch-stop-test';
+  let markFinished;
+  let markAborted;
+  const aborted = new Promise((resolve) => { markAborted = resolve; });
+  const finished = new Promise((resolve) => { markFinished = resolve; });
+  let abortCalls = 0;
+  _activeRuns.set(workspaceId, {
+    controller: { abort: () => { abortCalls++; markAborted(); } },
+    finished,
+  });
+
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/api/agent/workspaces/${workspaceId}/stop`;
+    let responded = false;
+    const responsePromise = fetch(url, { method: 'POST', headers: { 'x-danav-agent': '1' } })
+      .then((response) => { responded = true; return response; });
+    let abortTimeout;
+    await Promise.race([
+      aborted,
+      new Promise((_, reject) => { abortTimeout = setTimeout(() => reject(new Error('stop endpoint did not abort the active run')), 2000); }),
+    ]).finally(() => clearTimeout(abortTimeout));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(abortCalls, 1, 'the old request is asked to abort');
+    assert.equal(responded, false, 'the switch is not acknowledged before the lock is released');
+
+    _activeRuns.delete(workspaceId);
+    markFinished();
+    const response = await responsePromise;
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { success: true, active: false });
+  } finally {
+    _activeRuns.delete(workspaceId);
+    markFinished();
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('provider changes are applied only after busy status and the old agent lock releases', () => {
+  const appSource = fs.readFileSync(path.join(root, 'src/App.tsx'), 'utf8');
+  assert.match(appSource, /onStatus: \(status\) =>/i, 'regular chat forwards provider status into the app');
+  assert.match(appSource, /queueLatestSelectionAfterBusyStatus/, 'both stream paths wait for a real provider-busy event');
+  assert.match(appSource, /currentRunSelectionRef\.current = \{/i, 'the in-flight request keeps its captured model');
+  assert.match(appSource, /await stopAgentRun\(agentWorkspace\.id\)/, 'agent retries wait for the server to release the workspace');
+  assert.match(appSource, /messages, assistantMessageId, selection/, 'the agent continues the same task id and snapshot');
+  assert.match(appSource, /existingMessages, undefined, initialSelection/, 'regular chat retries the same prompt without partial output');
+});
+
 test('data path: an attached image reaches the provider as an image part', async () => {
   const saved = {
     DANAV_DATA_DIR: process.env.DANAV_DATA_DIR,
@@ -1236,6 +1420,16 @@ test('Settings offers a Chat Data tab (the backup it explains is only reachable 
   assert.match(html, /Appearance/, 'and the other tabs are still there');
 });
 
+test('regular chat displays real provider status instead of a misleading typing dot', async () => {
+  const ui = await loadComponent('src/components/ChatMessage.tsx');
+  const status = 'Provider is busy — retry 1 of 3 in 2s…';
+  const html = renderToStaticMarkup(React.createElement(ui.ChatMessage, {
+    message: { id: 'busy', role: 'assistant', content: '', createdAt: 1, isGenerating: true, agentStatus: status },
+  }));
+  assert.ok(html.includes(status));
+  assert.doesNotMatch(html, /animate-pulse/, 'a real retry status replaces the generic typing dot');
+});
+
 test('the composer owns the draft, keeps the caret, and the chat is memoised', async () => {
   const ui = await loadComponent('src/components/ChatInput.tsx');
   const area = await loadComponent('src/components/ChatArea.tsx');
@@ -1276,8 +1470,19 @@ test('the composer owns the draft, keeps the caret, and the chat is memoised', a
   // Collapsing the box to measure on every keystroke is what made a long prompt
   // scroll back to the top while typing (and forced a reflow per key).
   const collapses = input.match(/el\.style\.height = 'auto';/g) || [];
-  assert.equal(collapses.length, 1, 'the box is collapsed exactly once, and only to measure');
-  assert.match(input, /if \(shrunk\) el\.style\.height = 'auto';/, 'that collapse is guarded by "the text got shorter"');
+  assert.equal(collapses.length, 2, 'the box is collapsed only for shorter text or a genuine width change');
+  assert.match(input, /if \(shrunk\) el\.style\.height = 'auto';/, 'typing only collapses after the text gets shorter');
+  assert.match(input, /new ResizeObserver/, 'a narrower dock remeasures wrapped text without rebuilding the composer');
+  assert.match(html, /data-testid="chat-composer"/, 'the composer keeps one stable container while its text grows');
+  assert.match(html, /Reasoning depth: Auto/, 'the selected Think level stays visible and accessible on a narrow composer');
+  assert.ok(html.includes('(Auto)'), 'the compact Think selector no longer hides its selected level on mobile');
+  assert.doesNotMatch(input, /hidden sm:inline/, 'the Think selection is not removed at small widths');
+  assert.doesNotMatch(input, /isInputExpanded/, 'typing no longer switches between capsule and card layouts');
+  const chatAreaSource = fs.readFileSync(path.join(root, 'src/components/ChatArea.tsx'), 'utf8');
+  const styles = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
+  assert.ok(chatAreaSource.includes('chat-scroll-latest'), 'the return arrow uses its responsive composer-aware position');
+  assert.ok(styles.includes('var(--danav-composer-extra, 0px)'), 'the arrow follows the measured growing composer');
+  assert.ok(styles.includes('max(0.75rem, env(safe-area-inset-bottom))'), 'the arrow respects mobile safe-area spacing');
   // Sending must not cost the user the focus: the box is cleared from the app's
   // reset token and the caret is put back by hand.
   assert.match(input, /el\.focus\(\{ preventScroll: true \}\)/, 'the caret comes back on its own');

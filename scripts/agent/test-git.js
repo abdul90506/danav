@@ -279,6 +279,7 @@ test('run_checks says when everything passes, and only= narrows it', async () =>
     assert.match(all.output, /All 2 checks passed/);
     assert.equal(all.runs.length, 2);
     assert.equal(all.ui.passed, true);
+    assert.equal(all.ui.cwd, 'ok', 'the command detail breadcrumb uses the workspace name at its root');
 
     const only = await run('run_checks', { only: 'lint' });
     assert.equal(only.runs.length, 1);

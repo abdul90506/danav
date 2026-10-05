@@ -35,6 +35,29 @@ const DEFAULT_HEADERS = {
   'Accept-Language': 'en-US,en;q=0.9',
 };
 
+/** Keep the same deadline active while the caller consumes a potentially stalled body. */
+function keepTimeoutUntilBodyRead(response, timer) {
+  let bodyRead = false;
+  let wrapped = false;
+  const clearDeadline = () => clearTimeout(timer);
+  for (const method of ['text', 'json', 'arrayBuffer', 'blob', 'formData']) {
+    const original = response[method]?.bind(response);
+    if (!original) continue;
+    wrapped = true;
+    response[method] = async (...args) => {
+      if (bodyRead) return original(...args);
+      bodyRead = true;
+      try {
+        return await original(...args);
+      } finally {
+        clearDeadline();
+      }
+    };
+  }
+  if (!wrapped) clearDeadline();
+  return response;
+}
+
 /**
  * GET a public web page, following redirects hop by hop, refusing any hop that
  * points at a local or private address.
@@ -67,6 +90,7 @@ export async function fetchPublicUrl(
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer.unref?.();
     let response;
     try {
       response = await probe(current, {
@@ -76,16 +100,16 @@ export async function fetchPublicUrl(
         signal: controller.signal,
       });
     } catch (err) {
+      clearTimeout(timer);
       // A network failure is the caller's business (it has retry/fallback paths),
       // but it must not be mistaken for a refusal.
       throw Object.assign(new Error(err?.message || 'fetch failed'), { networkError: true });
-    } finally {
-      clearTimeout(timer);
     }
 
     const location = response.status >= 300 && response.status < 400 ? response.headers.get('location') : null;
-    if (!location) return { response, url: current, redirects };
+    if (!location) return { response: keepTimeoutUntilBodyRead(response, timer), url: current, redirects };
 
+    clearTimeout(timer);
     try {
       response.body?.cancel();
     } catch {

@@ -81,14 +81,26 @@ export interface ToolImage {
  * came back. `status` is 'running' while the server is still working and 'done'
  * once it has a result (or has honestly failed).
  */
+export interface SearchSource {
+  /** The host of a real search result, used to request its favicon. */
+  domain: string;
+  /** Optional publisher label returned alongside that result. */
+  name?: string;
+}
+
 export interface ToolExecution {
   id: string;
   name: ToolName;
   status: 'running' | 'done';
   /** The query (searches) or URL (fetch) the model chose. */
   query?: string;
-  /** Short outcome label, e.g. "8 results" or "Page read". */
+  /** Resolved page URL and title, when a fetched page was readable. */
+  url?: string;
+  title?: string;
+  /** Short outcome label for tools that have one (e.g. "Page read"). */
   summary?: string;
+  /** A few real publisher hosts, shown as a compact favicon stack for web search. */
+  sources?: SearchSource[];
   /** Trimmed tool output, shown when the row is expanded. */
   detail?: string;
   ok?: boolean;
@@ -130,6 +142,8 @@ export interface AgentActionResult {
   kind: string;
   ok?: boolean;
   path?: string;
+  /** Absolute workspace path, used only to label folder listings clearly in the activity trail. */
+  fullPath?: string;
   name?: string;
   from?: string;
   to?: string;
@@ -140,6 +154,8 @@ export interface AgentActionResult {
   startLine?: number;
   endLine?: number;
   truncated?: boolean;
+  /** A covered, unchanged range was intentionally omitted from this repeated read. */
+  repeated?: boolean;
   ranges?: Array<[number, number]>;
   edits?: number;
   replacements?: number;
@@ -198,9 +214,15 @@ export interface AgentActionResult {
   pattern?: string;
   count?: number;
   files?: number;
+  directoryCount?: number;
+  cwd?: string;
   query?: string;
+  /** Real publisher hosts returned by web_search, never inferred from the query. */
+  sources?: SearchSource[];
   url?: string;
   title?: string;
+  /** Bounded Markdown excerpt displayed for web searches and fetched pages. */
+  markdown?: string;
   port?: number;
   status?: number;
   isDir?: boolean;
@@ -222,8 +244,8 @@ export interface AgentAction {
   /** Small, safe arguments for display (path, command, query…). */
   args?: Record<string, any>;
   /**
-   * Live numbers while the model is still writing this call: "+N −M" as lines are written, and the
-   * last few lines being typed. Gone once the action finishes (the result carries the exact numbers).
+   * A disk-confirmed snapshot while the tool-argument stream is being written: "+N −M" and the
+   * last few lines actually on disk. Gone once the action finishes (the result carries exact totals).
    */
   progress?: { added: number; removed?: number; tail?: string[] };
   result?: AgentActionResult;

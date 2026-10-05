@@ -58,7 +58,7 @@ function normalizeImportance(value) {
 function normalizeTags(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value
-    .filter((tag) => typeof tag === 'string')
+    .filter((tag) => typeof tag === 'string' && !looksLikeSecret(tag))
     .map((tag) => tag.trim().toLowerCase().replace(/\s+/g, '-').slice(0, 32))
     .filter(Boolean))].slice(0, 8);
 }
@@ -78,12 +78,23 @@ function normalizeNote(n) {
 }
 
 export function readNotes(workspaceId) {
+  let parsed;
   try {
-    const parsed = JSON.parse(fs.readFileSync(fileFor(workspaceId), 'utf8'));
-    return Array.isArray(parsed.notes) ? parsed.notes.map(normalizeNote).filter(Boolean) : [];
+    parsed = JSON.parse(fs.readFileSync(fileFor(workspaceId), 'utf8'));
   } catch {
     return [];
   }
+  if (!parsed || !Array.isArray(parsed.notes)) return [];
+  const notes = parsed.notes.map(normalizeNote).filter(Boolean);
+  const hadSecretTag = parsed.notes.some((note) => Array.isArray(note?.tags)
+    && note.tags.some((tag) => typeof tag === 'string' && looksLikeSecret(tag)));
+  // Older versions accepted arbitrary tags. Hide them immediately and scrub the
+  // persisted copy on a best-effort basis, without making memory reads fail if
+  // the data directory is temporarily unwritable.
+  if (hadSecretTag) {
+    try { writeNotes(workspaceId, notes); } catch { /* sanitized notes are still safe to return */ }
+  }
+  return notes;
 }
 
 function writeNotes(workspaceId, notes) {
@@ -162,6 +173,9 @@ export function addNote(workspaceId, text, metadata = {}) {
   const clean = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_NOTE_CHARS);
   if (clean.length < 4) throw new Error('A note needs at least a few words.');
   if (looksLikeSecret(clean)) throw new Error('Memory will not save a likely API key, token, password, or private key. Save a redacted summary instead.');
+  if (Array.isArray(metadata.tags) && metadata.tags.some((tag) => typeof tag === 'string' && looksLikeSecret(tag))) {
+    throw new Error('Memory will not save a tag containing a likely API key, token, password, or private key. Save a redacted tag instead.');
+  }
 
   const notes = readNotes(workspaceId);
   const key = norm(clean);

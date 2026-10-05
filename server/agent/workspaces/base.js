@@ -51,7 +51,7 @@ export class BaseWorkspace {
   /* eslint-disable no-unused-vars */
   async init() { throw new Error('not implemented'); }
   resolve(p) { throw new Error('not implemented'); }
-  /** -> { type: 'file' | 'dir' | null, size } */
+  /** -> { type: 'file' | 'dir' | null, size, optional modification identity fields } */
   async stat(abs) { throw new Error('not implemented'); }
   /** -> { text, size, binary } ; throws WorkspaceError when missing or too big */
   async readText(abs, opts) { throw new Error('not implemented'); }

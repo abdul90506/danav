@@ -244,6 +244,16 @@ export function registerAgentRoutes(app, {
     res.json({ success: found, error: found ? undefined : 'That request is no longer waiting (it was answered, or the run ended).' });
   }));
 
+  // A provider/model switch during the busy backoff has to stop the old upstream
+  // loop and wait for its workspace lock to release before the task is resumed.
+  router.post('/workspaces/:id/stop', wrap(async (req, res) => {
+    const run = activeRuns.get(req.params.id);
+    if (!run) return res.json({ success: true, active: false });
+    run.controller.abort();
+    await run.finished;
+    return res.json({ success: true, active: false });
+  }));
+
   // -------------------------------------------------------------------- chat
   router.post('/chat', async (req, res) => {
     const { provider: suppliedProvider, model, thinkingLevel, messages, workspaceId, taskId, activity, resume } = req.body || {};
@@ -272,7 +282,9 @@ export function registerAgentRoutes(app, {
 
     const runId = genId('run');
     const controller = new AbortController();
-    activeRuns.set(workspaceId, { runId, controller });
+    let markRunFinished;
+    const finished = new Promise((resolve) => { markRunFinished = resolve; });
+    activeRuns.set(workspaceId, { runId, controller, finished });
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -282,12 +294,19 @@ export function registerAgentRoutes(app, {
     });
     res.flushHeaders?.();
 
+    const streamOpen = () => !res.writableEnded && !res.destroyed && res.writable;
     const send = (obj) => {
-      if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+      if (!streamOpen()) return;
+      res.write(`data: ${JSON.stringify(obj)}\n\n`);
+      // Compression/proxy middleware may otherwise coalesce successive SSE writes.
+      // Push every real event immediately; this changes delivery timing, not content.
+      res.flush?.();
     };
     // Long tool calls (an npm install) can be silent for minutes; proxies drop idle streams.
     const heartbeat = setInterval(() => {
-      if (!res.writableEnded) res.write(': ping\n\n');
+      if (!streamOpen()) return;
+      res.write(': ping\n\n');
+      res.flush?.();
     }, HEARTBEAT_MS);
     res.on('close', () => {
       if (!res.writableEnded) controller.abort();
@@ -320,12 +339,13 @@ export function registerAgentRoutes(app, {
     } finally {
       clearInterval(heartbeat);
       activeRuns.delete(workspaceId);
+      markRunFinished?.();
       // The run is over. Start the short "finished" clock: if nothing else happens
       // in the workspace, the idle sweeper pauses the sandbox and the meter stops.
       noteRunFinished(workspaceId);
       ws.notify = () => {};
       send({ done: true });
-      if (!res.writableEnded) {
+      if (streamOpen()) {
         res.write('data: [DONE]\n\n');
         res.end();
       }

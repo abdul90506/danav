@@ -31,75 +31,7 @@ const OUTPUT_FLUSH_MS = 120;
 const MAX_PARALLEL = 6;
 
 // ---------------------------------------------------------------------------
-// Replaying a file that arrived all at once
-// ---------------------------------------------------------------------------
-// Some providers hand over a whole tool call in ONE chunk (measured on Vyce/agnes:
-// 1829 characters of write_file arguments in a single frame after 33s of reasoning).
-// Nothing was wrong with the model — but the chat then shows a 300-line file popping
-// into existence, and the "+N" counter has nothing to count. So when a call like that
-// is detected, its body is replayed over a moment: the same partial-argument reader
-// that follows a real token stream is fed growing prefixes of the finished JSON, and
-// the row counts up and scrolls its last lines exactly as if it were being typed.
-// The tool itself still runs at full speed — only the display is paced.
-
-/** Calls worth replaying: the ones whose body is worth watching. */
-const REVEAL_TOOLS = new Set(['write_file', 'append_file', 'edit_file', 'multi_edit']);
-/**
- * The numbers a file-writing row shows the moment it starts: zero lines so far.
- * The row has to exist before the first line lands, so the chat reads
- * "Creating index.html +0" and then climbs — the 0 is a real reading of a file
- * that is really empty, not a number invented to fill the gap.
- */
-const ZERO_PROGRESS = () => ({ added: 0, removed: 0, tail: [] });
-/** Below this the file is on screen before anyone could read it anyway. */
-const REVEAL_MIN_CHARS = 420;
-/** One reveal frame, ~30fps. Small, even steps are what make it read as typing. */
-const REVEAL_TICK_MS = 33;
-/**
- * A beat before the first line lands, so "Creating index.html +0" is on screen
- * long enough to be read. Without it the row opens and is already half-written
- * by the time the eye gets to it, which is what made the whole thing look like
- * a jump rather than a file being written.
- */
-const REVEAL_LEAD_IN_MS = 180;
-/**
- * How long after a call's first frame a fully-formed body still counts as "arrived all at once".
- * A streamed file takes seconds to arrive; a dumped one is complete in the same millisecond.
- */
-const ONE_SHOT_WINDOW_MS = 150;
-
-/**
- * The reveal plan for a body of `charCount` characters: how long it runs, and how
- * many frames that is meant to be (`steps` is the target cadence, not a loop count —
- * the reveal itself is clock-driven, see replayBody).
- *
- * Every provider measured on this app (agnes, gemini, claude, deepseek via the
- * OpenAI-compatible endpoints) hands over the WHOLE write_file call in a single
- * SSE frame — verified with `node scripts/probe-raw.js <model>`. There is no
- * token stream to follow, so the reveal is the only thing that can show a file
- * being written. It used to be a fixed 6–45 steps at 30ms, which made a 40-line
- * file flash past in 240ms: the count went 0 → 40 in a blur and read as a jump.
- *
- * This paces by content instead, at a speed a person can follow, floored so a
- * small file is still visible and capped so a huge one does not hold the run up.
- */
-export function revealPlan(charCount) {
-  const chars = Math.max(0, Number(charCount) || 0);
-  const raw = Math.round((chars / limits.revealCharsPerSec()) * 1000);
-  const durationMs = Math.max(limits.revealMinMs(), Math.min(limits.revealMaxMs(), raw));
-  return { durationMs, steps: Math.max(2, Math.round(durationMs / REVEAL_TICK_MS)) };
-}
-
-/** Did the model finish this call in the frame we just saw? */
-const isCompleteJson = (text) => {
-  try {
-    JSON.parse(text);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
+// Adjacent edit batching
 const editTargetKey = (value) => String(value || '')
   .replace(/\\/g, '/')
   .replace(/\/+/g, '/')
@@ -167,7 +99,7 @@ function coalesceAdjacentFileEdits(prepared, tools) {
     result.push({
       ...firstItem,
       slot: { ...firstItem.slot, name: 'multi_edit', args: syntheticArgs },
-      st: { ...firstItem.st, tracker: tools.progressTracker('multi_edit'), replay: null },
+      st: { ...firstItem.st },
       modelIds: group.map(({ item }) => item.modelId),
       batchedEditCount: group.length,
       isNew: true,
@@ -175,78 +107,6 @@ function coalesceAdjacentFileEdits(prepared, tools) {
     i = j;
   }
   return result;
-}
-
-/** Offset just past the opening quote/bracket of the body, so the path shows at once. */
-const bodyStartIndex = (text) => {
-  const m = /"(?:content|new_string|old_string|edits)"\s*:\s*["[]/.exec(text);
-  return m ? m.index + m[0].length : 0;
-};
-
-/**
- * A fresh progress tracker for a replay. It is handed the path up front: the model may put
- * "content" before "path", and without the path the tracker cannot know what is on disk — an
- * overwrite would then replay with no numbers at all.
- */
-function replayTracker(tools, name, argsText) {
-  let path;
-  try {
-    path = JSON.parse(argsText)?.path;
-  } catch {
-    /* not complete after all — the tracker will pick the path up if it arrives */
-  }
-  return tools.progressTracker(name, typeof path === 'string' && path ? { path } : {});
-}
-
-/**
- * Walk the finished arguments from "body just opened" to "whole call", publishing the
- * progress of each prefix. @returns the number of updates sent.
- *
- * The lines go on disk FIRST, and the number published is the one the file really has:
- * the count in the chat is a reading of the file, never a promise about it. That is
- * also what paces the reveal on a slow workspace — a sandbox write is a network round
- * trip, so its file moves every ~400ms and the count follows it rather than racing
- * ahead of it. On a local workspace the file keeps up to within a line or two.
- *
- * The reveal is driven by the CLOCK, not by counting iterations: `setTimeout(33)` on
- * Windows lands on the next ~15.6ms timer tick and really takes ~47ms, so a
- * fixed step count would quietly stretch every reveal by half again. Reading the
- * elapsed time instead keeps the promised duration on every platform — the steps just
- * get slightly bigger where the clock is coarser.
- */
-async function replayBody({ text, tracker, send, id, signal, writer }) {
-  const from = bodyStartIndex(text);
-  const bodyLength = text.length - from;
-  const { durationMs } = revealPlan(bodyLength);
-  let sent = 0;
-  let lastKey = '';
-  if (signal?.aborted) return sent;
-  // Let "Creating index.html +0" register before the first line lands.
-  await new Promise((r) => setTimeout(r, REVEAL_LEAD_IN_MS));
-  const startedAt = Date.now();
-  for (;;) {
-    if (signal?.aborted) return sent;
-    const elapsed = Date.now() - startedAt;
-    const frac = durationMs <= 0 ? 1 : Math.min(1, elapsed / durationMs);
-    const cut = from + Math.round(bodyLength * frac);
-    const { progress, body } = tracker.update(text.slice(0, cut));
-    const real = writer ? await writer.push(body, { force: frac >= 1 }) : null; // the last line always lands
-    if (progress) {
-      if (real !== null && progress.added > real) progress.added = real;
-      // The file's throttle makes several frames repeat themselves; sending the same
-      // numbers twice only costs the browser a re-render.
-      const key = `${progress.added}/${progress.removed}/${progress.tail.join('\u0000')}`;
-      if (key !== lastKey) {
-        lastKey = key;
-        send({ agent: { type: 'action_update', id, patch: { progress } } });
-        sent++;
-      }
-    }
-    if (frac >= 1) break;
-    await new Promise((r) => setTimeout(r, REVEAL_TICK_MS));
-  }
-  if (writer) writer.push(text ? JSON.parse(text).content ?? '' : '', { force: true });
-  return sent;
 }
 
 // ---------------------------------------------------------------------------
@@ -374,16 +234,33 @@ const digestLine = (s, n = 200) => {
 };
 
 /** Preserve terminal outcomes and diagnostics, not an arbitrary prefix of output. */
-function digestToolResult(name, output) {
+function digestToolResult(name, output, args = {}) {
   if (looksLikeSecret(output)) return '[tool output omitted because it contained a likely secret]';
   const text = String(output ?? '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '');
   const rows = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (!rows.length) return '';
   const failures = rows.filter((line) => /\b(error|failed|failure|exception|timed out|denied|not found|cannot|could not)\b/i.test(line)).slice(-2);
   if (name === 'read_file' && !failures.length) {
-    const header = rows.slice(0, 2).join(' ');
-    const count = /\b(\d+)\s+lines?\b/i.exec(header)?.[1];
-    return `file read${count ? ` (${count} lines)` : ''}; source body omitted from compact history`;
+    const header = rows[0] || '';
+    const rangeSource = /(?:chunks?:|lines?\s+)([^;]+)/i.exec(header)?.[1] || '';
+    let ranges = [...rangeSource.matchAll(/\b(\d+)\s*[-–]\s*(\d+)\b/g)]
+      .map((match) => [Number(match[1]), Number(match[2])]);
+    if (!ranges.length && Array.isArray(args.ranges)) {
+      ranges = args.ranges.filter((range) => Array.isArray(range) && Number.isInteger(range[0]) && Number.isInteger(range[1]));
+    }
+    if (!ranges.length && Number.isInteger(args.start_line)) {
+      ranges = [[args.start_line, Number.isInteger(args.end_line) ? args.end_line : args.start_line]];
+    }
+    const rangeText = ranges.slice(0, 5).map(([start, end]) => start === end ? `L${start}` : `L${start}-L${end}`).join(', ');
+    const more = ranges.length > 5 ? `, +${ranges.length - 5} more` : '';
+    const symbol = typeof args.symbol === 'string' && !looksLikeSecret(args.symbol) ? `definition ${digestLine(args.symbol, 60)} ` : '';
+    const total = /\bof\s+(\d+)\b/i.exec(header)?.[1];
+    const location = rangeText ? `at ${rangeText}${more}` : 'file contents';
+    return `read ${symbol}${location}${total ? ` of ${total} lines` : ''}; body omitted from compact history`;
+  }
+  if (['write_file', 'append_file', 'edit_file', 'multi_edit', 'replace_in_files'].includes(name) && !failures.length) {
+    const outcomes = rows.filter((line) => /^(?:created|overwrote|appended|edited|replaced|changed)\b/i.test(line)).slice(0, 5);
+    return digestLine(outcomes.join(' | ') || rows.slice(0, 2).join(' … '), 260);
   }
   if (name === 'load_skill') return `${digestLine(rows[0], 140)}; playbook body trimmed (load again only if needed)`;
   if (name === 'run_command' || name === 'run_checks') {
@@ -438,7 +315,7 @@ function roundDigest(dropped, original = null) {
       const target = args.path || args.from || args.file_path || args.pattern || args.query || args.command || args.task || '';
       const safeTarget = target && looksLikeSecret(target) ? '[sensitive details omitted]' : target ? digestLine(String(target), 60) : '';
       const out = results.get(tc.id) ?? '';
-      const resultDigest = digestToolResult(name, out);
+      const resultDigest = digestToolResult(name, out, args);
       lines.push(`  ${name}${safeTarget ? ` ${safeTarget}` : ''}${resultDigest ? ` → ${resultDigest}` : ''}`);
     }
   }
@@ -853,11 +730,14 @@ export async function runAgent({
      * request above it, which is also what memory is looked up against and what the
      * read-only subagent is told the goal is. So both note kinds are skipped.
      */
-    const currentRequest = [...priorMessages].reverse().find((m) =>
-      m.role === 'user' &&
-      !String(m.content || '').startsWith('[system notice]') &&
-      !String(m.content || '').startsWith('[continue]')
-    )?.content || '';
+    const taskMessage = [...priorMessages].reverse().find((m) => {
+      if (m.role !== 'user') return false;
+      const text = contentText(m.content).trim();
+      return text && !text.startsWith('[system notice]') && !text.startsWith('[continue]');
+    });
+    // Multimodal turns stay intact in model history, but retrieval and task
+    // memory use only their text parts — never String(array) / "[object Object]".
+    const currentRequest = contentText(taskMessage?.content).trim();
     lastUserRequest = currentRequest;
 
     /**
@@ -1079,15 +959,36 @@ export async function runAgent({
         if (!pathText) return st.writerPromise || Promise.resolve(null);
         if (!st.writerPromise) {
           st.writerPromise = tools
-            .liveWrite(pathText)
+            .liveWrite(pathText, state)
             .then((w) => {
-              st.writer = w;
               if (w) state.liveWriters.push(w);
               return w;
             })
             .catch(() => null);
         }
         return st.writerPromise;
+      };
+
+      const queueLiveWrite = (st, pathText, body, args, { force = false } = {}) => {
+        st.writeQueue = st.writeQueue.then(async () => {
+          const writer = await writerFor(st, pathText);
+          if (!writer || signal.aborted) return;
+          await writer.push(body, { force });
+          if (signal.aborted || !writer.hasWritten()) return;
+          const progress = writer.progress(); // numbers and tail come from the file now on disk
+          const key = JSON.stringify([progress.added, progress.removed, progress.tail]);
+          const now = Date.now();
+          if (key === st.lastProgressKey || (!force && now - st.lastProgressAt < PROGRESS_THROTTLE_MS)) return;
+          st.lastProgressKey = key;
+          st.lastProgressAt = now;
+          send({
+            agent: {
+              type: 'action_update',
+              id: st.uiId,
+              patch: { args: tools.displayArgs('write_file', args), progress },
+            },
+          });
+        }).catch(() => {});
       };
 
       const onDelta = (slot) => {
@@ -1100,66 +1001,38 @@ export async function runAgent({
         let st = live.get(slot);
         if (!st) {
           st = {
-            uiId: genId('a'), firstAt: now, lastSent: now, lastKey: '',
-            deltas: 0, published: false, replay: null, writer: null, writerPending: false,
-            tracker: tools.progressTracker(slot.name),
+            uiId: genId('a'), lastSent: now, lastKey: '', lastProgressAt: 0, lastProgressKey: '',
+            deltas: 0, bodyUpdates: 0, lastBody: null, writeQueue: Promise.resolve(),
+            writerPromise: null,
           };
           live.set(slot, st);
         }
         st.deltas++;
-        const { args, progress, body } = st.tracker.update(slot.args);
+        const { args, body } = tools.peek(slot.name, slot.args || '');
 
-
-        // A body that lands WHOLE within a blink of the call starting (Vyce/agnes send one frame;
-        // Gemini and some proxies send the name and then the entire body) has nothing to stream.
-        // Hold its numbers back and replay it while it is written — but only while nothing has been
-        // shown yet, so a count the user is already watching is never restarted from zero.
-        const wholeAtOnce =
-          REVEAL_TOOLS.has(slot.name) && !st.published && !st.replay &&
-          slot.args.length >= REVEAL_MIN_CHARS && isCompleteJson(slot.args) &&
-          now - st.firstAt < ONE_SHOT_WINDOW_MS;
-        if (wholeAtOnce) {
-          st.replay = { text: slot.args, tracker: replayTracker(tools, slot.name, slot.args) };
-          // The row opens at "+0"; the replay below counts it up from there.
-          if (st.deltas === 1) {
-            send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args, progress: ZERO_PROGRESS() } });
-          }
-          return;
-        }
-        st.replay = null; // it turned out to be a real stream after all: follow it as usual
-
-        // Following a real stream: the file starts existing the moment its path is known, and every
-        // line that arrives after that lands on disk as it arrives. A replay paces its own writes.
-        if (slot.name === 'write_file' && body !== undefined && args.path) {
+        // A call is streamed only when the provider actually sends the body in
+        // multiple argument deltas. A complete body delivered in one frame is
+        // left alone: write_file will create it in its normal tool execution.
+        let bodyChanged = false;
+        if (slot.name === 'write_file' && typeof body === 'string' && body !== '' && body !== st.lastBody) {
+          st.bodyUpdates++;
           st.lastBody = body;
-          writerFor(st, args.path).then((w) => {
-            if (w && !st.replay) w.push(st.lastBody || '');
-          });
+          bodyChanged = true;
         }
-        // A live stream cannot wait for the disk, so the count is capped at what the file really
-        // holds: the chat may lag behind the model, but it never runs ahead of the file.
-        if (progress && st.writer) {
-          const real = st.writer.linesOnDisk();
-          if (progress.added > real) progress.added = real;
+        if (slot.name === 'write_file' && bodyChanged && st.bodyUpdates > 1 && args.path) {
+          queueLiveWrite(st, args.path, body, args);
         }
 
         if (st.deltas === 1) {
-          // A real reading when the tracker already has one, otherwise the honest "+0" of a
-          // file that has not received its first line yet. `published` stays tied to a REAL
-          // reading, so a body the throttle swallowed is still replayed later.
-          const first = progress ?? (REVEAL_TOOLS.has(slot.name) ? ZERO_PROGRESS() : undefined);
-          send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args, ...(first ? { progress: first } : {}) } });
-          if (progress) st.published = true;
-          st.lastSent = now;
+          send({ agent: { type: 'action_start', id: st.uiId, tool: slot.name, args } });
+          st.lastKey = JSON.stringify(args);
           return;
         }
-        if (now - st.lastSent < PROGRESS_THROTTLE_MS) return;
-        const key = JSON.stringify([args, progress && [progress.added, progress.removed, progress.tail]]);
-        if (key === st.lastKey) return;
+        const key = JSON.stringify(args);
+        if (key === st.lastKey || now - st.lastSent < PROGRESS_THROTTLE_MS) return;
         st.lastKey = key;
         st.lastSent = now;
-        if (progress) st.published = true;
-        send({ agent: { type: 'action_update', id: st.uiId, patch: { args, ...(progress ? { progress } : {}) } } });
+        send({ agent: { type: 'action_update', id: st.uiId, patch: { args } } });
       };
 
       let round;
@@ -1343,9 +1216,9 @@ export async function runAgent({
       // ---- echo the assistant turn, then run each tool -------------------------
       const prepared = calls.map((slot) => {
         const st = live.get(slot) || {
-          uiId: genId('a'), firstAt: Date.now(), lastSent: 0, lastKey: '',
-          deltas: 0, published: false, replay: null, writer: null, writerPending: false,
-          tracker: tools.progressTracker(slot.name),
+          uiId: genId('a'), lastSent: 0, lastKey: '', lastProgressAt: 0, lastProgressKey: '',
+          deltas: 0, bodyUpdates: 0, lastBody: null, writeQueue: Promise.resolve(),
+          writerPromise: null,
         };
         const isNew = !live.has(slot);
         live.set(slot, st);
@@ -1387,14 +1260,9 @@ export async function runAgent({
           p.isNew = false; // execute() will move this already-visible row from queued to running
           continue;
         }
-        // The model has finished writing every call: show each one's FINAL numbers right away
-        // (the throttle may have swallowed the last few lines), and mark those still waiting as queued.
-        // A call queued for replay keeps its numbers back — they will be counted up as it is written.
+        // The streamed arguments are complete; do not infer file progress from them.
+        // Only liveWrite may publish counts, after it has confirmed those lines on disk.
         const patch = { ...(i > 0 ? { status: 'queued' } : {}) };
-        if (!p.st.replay) {
-          const { progress } = p.st.tracker.update(p.slot.args);
-          if (progress) patch.progress = progress;
-        }
         if (Object.keys(patch).length) send({ agent: { type: 'action_update', id: p.st.uiId, patch } });
       }
 
@@ -1420,7 +1288,7 @@ export async function runAgent({
           await workspace.writeText(file, body);
           // The run wrote this file itself, so the policy gate must let the model
           // move it into place without reading it back first.
-          observeOwned(state, file);
+          observeOwned(state, file, { content: body });
           const rel = `${dir}/${String(name).replace(/[^a-z_]/gi, '')}-${stats.toolCalls}.txt`;
           state.parkedBodies.add(rel);
           return { path: rel, lines: splitLines(body).length, body };
@@ -1467,35 +1335,28 @@ export async function runAgent({
           argError = `This ${name} call has no "path" (string). Send the path, and put it FIRST in the arguments.`;
         }
 
-        const shownArgs = argError ? {} : tools.displayArgs(name, args);
-        // A write that has not been given a number yet opens at "+0" here too. This is the path a
-        // provider that never streams tool calls takes, and the replay below counts it up from there.
-        const opening = !argError && !st.published && REVEAL_TOOLS.has(name) ? ZERO_PROGRESS() : null;
-        if (isNew) {
-          send({ agent: { type: 'action_start', id, tool: name, args: shownArgs, ...(opening ? { progress: opening } : {}) } });
+        // Drain only a writer that was started by multiple real argument deltas. A
+        // provider that delivered the complete body in one frame has no live writer
+        // or progress animation; the ordinary write tool creates the finished file.
+        let writer = null;
+        if (name === 'write_file' && st.writerPromise) {
+          writer = await st.writerPromise;
+          if (writer) {
+            await st.writeQueue;
+            if (typeof st.lastBody === 'string') {
+              // Flush the complete lines already received in the final real delta; this is a disk write,
+              // not a replay, and remains limited to tools that were genuinely streamed.
+              queueLiveWrite(st, args.path, st.lastBody, args, { force: true });
+              await st.writeQueue;
+            }
+            await writer.settle();
+          }
         }
-        send({ agent: { type: 'action_update', id, patch: { status: 'running', args: shownArgs, ...(opening ? { progress: opening } : {}) } } });
+        if (signal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
 
-        // A body the user has not watched arrive — dumped in one frame, squeezed inside the
-        // throttle window, or sent by a provider that never streams tool calls at all — is
-        // replayed now. If a count is already on screen (`st.published`) it is left alone:
-        // restarting it from zero would look like the file was being rewritten.
-        if (
-          !argError && !st.replay && !st.published && REVEAL_TOOLS.has(name) &&
-          String(slot.args || '').length >= REVEAL_MIN_CHARS && isCompleteJson(slot.args)
-        ) {
-          st.replay = { text: slot.args, tracker: replayTracker(tools, name, slot.args) };
-        }
-        if (st.replay) {
-          const { text, tracker } = st.replay;
-          st.replay = null;
-          // No writer yet (a provider that sent no deltas at all): the file starts existing now.
-          if (name === 'write_file') st.writer = await writerFor(st, args.path);
-          await replayBody({ text, tracker, send, id, signal, writer: name === 'write_file' ? st.writer : null });
-          // Stopped while the file was still being written: do NOT run the tool. Bailing out here is
-          // what lets the run's cleanup put the half-written file back the way it was.
-          if (signal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-        }
+        const shownArgs = argError ? {} : tools.displayArgs(name, args);
+        if (isNew) send({ agent: { type: 'action_start', id, tool: name, args: shownArgs } });
+        send({ agent: { type: 'action_update', id, patch: { status: 'running', args: shownArgs } } });
 
         // coalesce terminal output so a chatty build doesn't flood the stream
         let outBuf = '';
@@ -1525,16 +1386,32 @@ export async function runAgent({
             return allowed;
           },
         };
+        const executeChecked = async (toolName, toolArgs) => {
+          const blocked = await checkAction({ workspace, state, name: toolName, args: toolArgs });
+          if (blocked?.allow) {
+            const saved = await tools.execute(toolName, toolArgs, ctx);
+            if (blocked.note) saved.output = `${blocked.note}\n${saved.output}`;
+            return saved;
+          }
+          if (blocked) {
+            return {
+              ok: false,
+              blocked: true,
+              failedSoft: true, // a refusal is guidance, not a failure streak
+              output: `Error: ${blocked.message}`,
+              error: blocked.message,
+              ui: { ok: false, ...blocked.ui },
+            };
+          }
+          return tools.execute(toolName, toolArgs, ctx);
+        };
 
         // Every line written so far is already on disk; let the last of them land, and tell the
         // tool what the file held BEFORE — otherwise it would diff against our own draft.
         let execArgs = args;
-        const writer = name === 'write_file' ? await writerFor(st, args.path) : null;
-        st.writer = writer || st.writer || null;
         if (writer) {
-          await writer.settle();
           writer.close(); // from here the file is the tool's, not the stream's
-          execArgs = { ...args, _original: writer.original, _originalExisted: writer.existed };
+          execArgs = { ...args, _original: writer.original, _originalExisted: writer.existed, _liveWriter: writer };
         }
 
         const t0 = Date.now();
@@ -1572,8 +1449,8 @@ export async function runAgent({
           // already answered by the parked-body path above
         } else if (rescued) {
           const salvaged = { path: rescued.path, content: rescued.content, _partial: true };
-          if (writer) Object.assign(salvaged, { _original: writer.original, _originalExisted: writer.existed });
-          const saved = await tools.execute(name, salvaged, ctx);
+          if (writer) Object.assign(salvaged, { _original: writer.original, _originalExisted: writer.existed, _liveWriter: writer });
+          const saved = await executeChecked(name, salvaged);
           if (saved.ok) {
             const tailLines = splitLines(rescued.content).slice(-3).join('\n');
             res = {
@@ -1593,7 +1470,7 @@ export async function runAgent({
         } else if (argsTruncated) {
           // Recovered from cut-off JSON: write what arrived, do not judge the unfinished file yet.
           const partialArgs = { ...execArgs, _partial: true };
-          const saved = await tools.execute(name, partialArgs, ctx);
+          const saved = await executeChecked(name, partialArgs);
           if (saved.ok && (name === 'write_file' || name === 'append_file')) {
             const lines = splitLines(args.content || '').length;
             const tailLines = splitLines(args.content || '').slice(-3).join('\n');
@@ -1618,28 +1495,9 @@ export async function runAgent({
             : hint || `Unknown tool "${name}". Available tools: ${tools.definitions.map((d) => d.function.name).join(', ')}.`;
           res = { ok: false, output: `Error: ${msg}`, error: msg, ui: { kind: name, ok: false } };
         } else {
-          // The invariant, checked before anything is touched: a call that would
-          // remove or move something the agent has never looked at does not run.
-          // The model reads the refusal as the tool's result and can go and get
-          // the evidence — which is the whole point of refusing.
-          const blocked = await checkAction({ workspace, state, name, args: execArgs });
-          if (blocked?.allow) {
-            // The gate's own question was answered by looking: the call runs, and
-            // the model is told in the result what that look found.
-            res = await tools.execute(name, execArgs, ctx);
-            if (blocked.note) res.output = `${blocked.note}\n${res.output}`;
-          } else if (blocked) {
-            res = {
-              ok: false,
-              blocked: true,
-              failedSoft: true, // a refusal is guidance, not a failure streak
-              output: `Error: ${blocked.message}`,
-              error: blocked.message,
-              ui: { ok: false, ...blocked.ui },
-            };
-          } else {
-            res = await tools.execute(name, execArgs, ctx);
-          }
+          // The invariant is checked for ordinary, streamed, and recovered
+          // calls through the same path before their tool implementation runs.
+          res = await executeChecked(name, execArgs);
         }
         if (!res.ok && !res.denied && !res.blocked) {
           state.toolFailures++;

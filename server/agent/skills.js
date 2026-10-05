@@ -16,6 +16,8 @@ const MAX_SKILLS = 26;
 const MAX_SKILL_BYTES = 48_000;
 const MAX_DISCOVERY_BYTES = 480_000;
 const MAX_SKILL_CHARS = 16_000;
+const MAX_DISCOVERY_ATTEMPTS = 2;
+const EXPECTED_SCAN_ERRORS = new Set(['not_found', 'not_dir', 'is_dir', 'outside_workspace', 'denied', 'too_large']);
 const MAX_DESCRIPTION_CHARS = 180;
 
 const oneLine = (value, limit) => String(value ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, limit);
@@ -64,6 +66,7 @@ const relativeSkillPath = (root, entryPath) => `${root}/${String(entryPath || ''
 
 export function createSkillRegistry(workspace, redact = (text) => text) {
   let discovered = false;
+  let discoveryAttempts = 0;
   let catalog = [];
 
   const safePath = async (relative) => typeof workspace.safePath === 'function'
@@ -71,8 +74,9 @@ export function createSkillRegistry(workspace, redact = (text) => text) {
     : workspace.resolve(relative);
 
   async function discover(workspaceListing) {
-    if (discovered) return catalog.map(({ key, name, description, path, source }) => ({ key, name, description, path, source }));
-    discovered = true;
+    if (discovered || discoveryAttempts >= MAX_DISCOVERY_ATTEMPTS) return catalog.map(({ key, name, description, path, source }) => ({ key, name, description, path, source }));
+    discoveryAttempts++;
+    let incomplete = false;
     const candidates = BUILTIN_SKILLS.map((skill) => ({ ...skill, size: skill.body.length }));
     let inspectedBytes = 0;
     const visibleRootDirs = workspaceListing && !workspaceListing.truncated && Array.isArray(workspaceListing.entries)
@@ -85,7 +89,11 @@ export function createSkillRegistry(workspace, redact = (text) => text) {
       try {
         const rootAbs = await safePath(root);
         const listing = await workspace.listTree(rootAbs, { depth: 2, maxEntries: 300 });
-        for (const entry of listing.entries || []) {
+        if (!listing || !Array.isArray(listing.entries)) {
+          incomplete = true;
+          continue;
+        }
+        for (const entry of listing.entries) {
           const entryPath = String(entry.path || '').replace(/\\/g, '/');
           // The standard is <skill-name>/SKILL.md. Do not crawl arbitrary
           // nested folders or vendor trees looking for files called SKILL.md.
@@ -105,12 +113,16 @@ export function createSkillRegistry(workspace, redact = (text) => text) {
             const fallback = entryPath.slice(0, -'/SKILL.md'.length);
             const parsed = parseFrontmatter(text, fallback);
             candidates.push({ ...parsed, path: relative, source: root, size });
-          } catch {
-            // A bad link, unreadable file, or oversize file cannot block the run.
+          } catch (err) {
+            // A bad link, missing/oversize file, or secret cannot block the run.
+            // A transient workspace read failure gets one bounded discovery retry.
+            if (!EXPECTED_SCAN_ERRORS.has(String(err?.code || ''))) incomplete = true;
           }
         }
-      } catch {
+      } catch (err) {
         // Skill folders are optional; an unavailable root is not a run failure.
+        // Do not cache a transient scan failure as an empty skill catalogue.
+        if (!EXPECTED_SCAN_ERRORS.has(String(err?.code || ''))) incomplete = true;
       }
     }
 
@@ -122,6 +134,8 @@ export function createSkillRegistry(workspace, redact = (text) => text) {
       ...item,
       key: counts.get(item.name.toLocaleLowerCase()) > 1 ? `${item.name} [${item.source}]` : item.name,
     }));
+    if (incomplete && discoveryAttempts < MAX_DISCOVERY_ATTEMPTS) return discover(workspaceListing);
+    discovered = true;
     return catalog.map(({ key, name, description, path, source }) => ({ key, name, description, path, source }));
   }
 

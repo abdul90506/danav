@@ -59,6 +59,7 @@ import {
   getAgentConfig,
   getSandboxStatus,
   listWorkspaces,
+  stopAgentRun,
   updateWorkspace as updateAgentWorkspace,
   wakeWorkspace,
 } from './services/agentApi';
@@ -90,6 +91,9 @@ const isContinuationText = (text: string): boolean => {
     'baqi karo', 'baki karo', 'poora karo', 'pura karo', 'mukammal karo',
   ].includes(t);
 };
+
+const isProviderBusyStatus = (status?: string): boolean =>
+  Boolean(status && /provider\s+(?:is\s+)?busy/i.test(status));
 
 export const App: React.FC = () => {
   // Theme state
@@ -364,6 +368,26 @@ export const App: React.FC = () => {
   const resetComposer = useCallback(() => setComposerReset((n) => n + 1), []);
   const [isLoading, setIsLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  /** The selection captured when the current upstream request started. */
+  const currentRunSelectionRef = useRef<{
+    conversationId: string;
+    assistantMessageId: string;
+    providerId: string;
+    modelId: string;
+  } | null>(null);
+  /** A model change noticed during a busy backoff, to apply only after the stream stops. */
+  const pendingModelRetryRef = useRef<{
+    conversationId: string;
+    assistantMessageId: string;
+    provider: Provider;
+    modelId: string;
+  } | null>(null);
+  /** Synchronous marker for the exact provider-busy backoff window (no render race). */
+  const providerBusyRunRef = useRef<{ conversationId: string; assistantMessageId: string } | null>(null);
+  /** Agent switch is waiting for the server to release the old workspace lock. */
+  const modelRetryWaitRef = useRef<{ conversationId: string; assistantMessageId: string } | null>(null);
+  /** Invalidates a model-switch transition when the user stops or changes chats. */
+  const modelRetryEpochRef = useRef(0);
   const contentStreamerRef = useRef<SmoothStreamer | null>(null);
   const thinkingStreamerRef = useRef<SmoothStreamer | null>(null);
 
@@ -448,6 +472,17 @@ export const App: React.FC = () => {
     return activeProvider.models[0]?.id || 'agnes-3.0-flash';
   }, [activeConversation, activeProvider]);
 
+  const latestModelSelectionRef = useRef<{
+    conversationId: string | null;
+    provider: Provider | undefined;
+    modelId: string;
+  }>({ conversationId: activeConversation?.id ?? null, provider: activeProvider, modelId: activeModelId });
+  latestModelSelectionRef.current = {
+    conversationId: activeConversation?.id ?? null,
+    provider: activeProvider,
+    modelId: activeModelId,
+  };
+
   // Handle Theme Change
   const handleThemeChange = (newTheme: Theme) => {
     setTheme(newTheme);
@@ -528,6 +563,7 @@ export const App: React.FC = () => {
   const handleConversationsRestored = useCallback(async () => {
     const data = await fetchBackendConversations();
     if (!data) return;
+    discardPendingModelRetry();
     const previousRun = abortControllerRef.current;
     abortControllerRef.current = null;
     previousRun?.abort();
@@ -550,6 +586,7 @@ export const App: React.FC = () => {
 
   // Create New Chat: retains the exact model, provider and thinking level
   const handleNewChat = () => {
+    discardPendingModelRetry();
     const previousRun = abortControllerRef.current;
     abortControllerRef.current = null;
     previousRun?.abort();
@@ -575,6 +612,7 @@ export const App: React.FC = () => {
     // Re-selecting the active chat is only a sidebar interaction; it must not
     // cancel the run or discard an unfinished composer draft.
     if (id === activeChatId) return;
+    discardPendingModelRetry();
     const previousRun = abortControllerRef.current;
     abortControllerRef.current = null;
     previousRun?.abort();
@@ -597,6 +635,7 @@ export const App: React.FC = () => {
     // A run belongs to the active transcript. Deleting that transcript must stop
     // its request before its callbacks can affect the newly selected chat.
     if (activeChatId === id) {
+      discardPendingModelRetry();
       const previousRun = abortControllerRef.current;
       abortControllerRef.current = null;
       previousRun?.abort();
@@ -621,7 +660,126 @@ export const App: React.FC = () => {
   };
 
   // Model & Thinking selection
+  const discardPendingModelRetry = () => {
+    modelRetryEpochRef.current += 1;
+    pendingModelRetryRef.current = null;
+    providerBusyRunRef.current = null;
+    currentRunSelectionRef.current = null;
+    const waiting = modelRetryWaitRef.current;
+    modelRetryWaitRef.current = null;
+    if (waiting) {
+      setConversations((prev) => prev.map((conversation) =>
+        conversation.id !== waiting.conversationId
+          ? conversation
+          : {
+              ...conversation,
+              messages: conversation.messages.map((message) =>
+                message.id === waiting.assistantMessageId
+                  ? { ...message, isGenerating: false, agentStatus: undefined }
+                  : message
+              ),
+            }
+      ));
+    }
+  };
+
+  /**
+   * A stream can only move to another model at the provider-busy backoff point:
+   * the request already sent upstream cannot be retargeted. Stop its retry loop,
+   * finish its local state update, then resume an agent from the same task journal.
+   */
+  const queueModelRetryForActiveTurn = (provider: Provider, modelId: string) => {
+    const run = currentRunSelectionRef.current;
+    const latest = latestModelSelectionRef.current;
+    if (
+      !run ||
+      !activeConversation ||
+      run.conversationId !== activeConversation.id ||
+      latest.conversationId !== run.conversationId
+    ) return;
+
+    const previous = pendingModelRetryRef.current;
+    if (
+      run.providerId === provider.id &&
+      run.modelId === modelId &&
+      !previous
+    ) return;
+    if (
+      previous?.conversationId === run.conversationId &&
+      previous.assistantMessageId === run.assistantMessageId &&
+      previous.provider.id === provider.id &&
+      previous.modelId === modelId
+    ) return;
+
+    pendingModelRetryRef.current = {
+      conversationId: run.conversationId,
+      assistantMessageId: run.assistantMessageId,
+      provider,
+      modelId,
+    };
+    const modelName = provider.models.find((model) => model.id === modelId)?.name || modelId;
+    setConversations((prev) => prev.map((conversation) =>
+      conversation.id !== run.conversationId
+        ? conversation
+        : {
+            ...conversation,
+            messages: conversation.messages.map((message) =>
+              message.id === run.assistantMessageId
+                ? { ...message, agentStatus: `Switching to ${modelName} for the next attempt…` }
+                : message
+            ),
+          }
+    ));
+    abortControllerRef.current?.abort();
+  };
+
+  const queueLatestSelectionAfterBusyStatus = (
+    conversationId: string,
+    assistantMessageId: string,
+    status?: string
+  ) => {
+    const isBusy = isProviderBusyStatus(status);
+    const currentBusy = providerBusyRunRef.current;
+    if (isBusy) {
+      providerBusyRunRef.current = { conversationId, assistantMessageId };
+    } else if (
+      currentBusy?.conversationId === conversationId &&
+      currentBusy.assistantMessageId === assistantMessageId
+    ) {
+      providerBusyRunRef.current = null;
+    }
+    if (!isBusy) return;
+    const run = currentRunSelectionRef.current;
+    const latest = latestModelSelectionRef.current;
+    if (
+      !run ||
+      run.conversationId !== conversationId ||
+      run.assistantMessageId !== assistantMessageId ||
+      latest.conversationId !== conversationId ||
+      !latest.provider
+    ) return;
+    const alreadyQueued = pendingModelRetryRef.current?.assistantMessageId === assistantMessageId;
+    if (!alreadyQueued && run.providerId === latest.provider.id && run.modelId === latest.modelId) return;
+    queueModelRetryForActiveTurn(latest.provider, latest.modelId);
+  };
+
   const handleSelectModel = (providerId: string, modelId: string) => {
+    const nextProvider = providers.find((provider) => provider.id === providerId);
+    const conversationId = activeConversation?.id ?? null;
+    if (conversationId) {
+      latestModelSelectionRef.current = { conversationId, provider: nextProvider, modelId };
+      const run = currentRunSelectionRef.current;
+      const runMessage = run?.conversationId === conversationId
+        ? activeConversation?.messages.find((message) => message.id === run.assistantMessageId)
+        : undefined;
+      const queuedForRun = pendingModelRetryRef.current?.assistantMessageId === run?.assistantMessageId;
+      const busyForRun = providerBusyRunRef.current?.conversationId === conversationId
+        && providerBusyRunRef.current?.assistantMessageId === run?.assistantMessageId;
+      if (nextProvider && (isProviderBusyStatus(runMessage?.agentStatus) || queuedForRun || busyForRun)) {
+        queueModelRetryForActiveTurn(nextProvider, modelId);
+      }
+    }
+
     setLastSelectedProviderId(providerId);
     setLastSelectedModelId(modelId);
 
@@ -665,6 +823,7 @@ export const App: React.FC = () => {
 
   // Stop Generation
   const handleStop = () => {
+    discardPendingModelRetry();
     const controller = abortControllerRef.current;
     abortControllerRef.current = null;
     controller?.abort();
@@ -853,7 +1012,9 @@ export const App: React.FC = () => {
      * the new part into it, and the server's journal hands the model its plan and
      * the files it already changed. Nothing is retyped and nothing restarts.
      */
-    resumeInto?: string
+    resumeInto?: string,
+    /** Explicit target for a safe retry after a provider-busy switch. */
+    requestSelection?: { provider: Provider; modelId: string }
   ) => {
     const rawText = String(textToSend ?? '').trim();
     const currentAttachments = attachmentsToSend || [];
@@ -866,6 +1027,8 @@ export const App: React.FC = () => {
     if (!isResume && !rawText && currentAttachments.length === 0) return;
     if (!activeConversation || isLoading) return;
 
+    const requestProvider = requestSelection?.provider || activeProvider;
+    const requestModelId = requestSelection?.modelId || activeModelId;
     const existingMessages = baseMessages || activeConversation.messages;
 
     /**
@@ -882,7 +1045,7 @@ export const App: React.FC = () => {
       }
     }
 
-    if (!activeProvider) {
+    if (!requestProvider) {
       showNotice('No provider is configured yet — open Settings → Providers & Models to add one.');
       return;
     }
@@ -931,8 +1094,8 @@ export const App: React.FC = () => {
       const convId = activeConversation.id;
       const titleEditRevision = titleEditRevisionRef.current.get(convId) || 0;
       generateAIChatTitle({
-        provider: activeProvider,
-        model: activeModelId,
+        provider: requestProvider,
+        model: requestModelId,
         message: messageContent,
       }).then((aiTitle) => {
         // A slow title request must not replace a name the user has since chosen,
@@ -995,11 +1158,89 @@ export const App: React.FC = () => {
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    currentRunSelectionRef.current = {
+      conversationId: activeConversation.id,
+      assistantMessageId,
+      providerId: requestProvider.id,
+      modelId: requestModelId,
+    };
     const isCurrentRun = () => abortControllerRef.current === controller;
     const clearCurrentRun = () => {
       if (!isCurrentRun()) return;
       abortControllerRef.current = null;
+      currentRunSelectionRef.current = null;
+      providerBusyRunRef.current = null;
       setIsLoading(false);
+    };
+    const restartWithPendingModel = (messages: Message[]): boolean => {
+      const pending = pendingModelRetryRef.current;
+      if (
+        !pending ||
+        pending.conversationId !== activeConversation.id ||
+        pending.assistantMessageId !== assistantMessageId
+      ) return false;
+      pendingModelRetryRef.current = null;
+      const initialSelection = { provider: pending.provider, modelId: pending.modelId };
+      if (agentWorkspace) {
+        // The client fetch aborts immediately, but the server still needs to unwind
+        // its tool/model loop. Wait for its workspace lock to release before resume.
+        // The task journal is keyed by this same message id, so committed work is
+        // continued rather than replayed.
+        const epoch = ++modelRetryEpochRef.current;
+        const waitState = { conversationId: pending.conversationId, assistantMessageId: pending.assistantMessageId };
+        modelRetryWaitRef.current = waitState;
+        const switchingTo = initialSelection.provider.models.find((model) => model.id === initialSelection.modelId)?.name || initialSelection.modelId;
+        setIsLoading(true);
+        setConversations((prev) => prev.map((conversation) =>
+          conversation.id !== waitState.conversationId
+            ? conversation
+            : {
+                ...conversation,
+                messages: conversation.messages.map((item) =>
+                  item.id === waitState.assistantMessageId
+                    ? { ...item, isGenerating: true, agentStatus: `Waiting for the previous workspace run to stop before retrying with ${switchingTo}…` }
+                    : item
+                ),
+              }
+        ));
+        void (async () => {
+          try {
+            await stopAgentRun(agentWorkspace.id);
+            if (modelRetryEpochRef.current !== epoch) return;
+            modelRetryWaitRef.current = null;
+            const latest = latestModelSelectionRef.current;
+            const selection = latest.conversationId === pending.conversationId && latest.provider
+              ? { provider: latest.provider, modelId: latest.modelId }
+              : initialSelection;
+            setIsLoading(false);
+            void handleSendMessage(undefined, undefined, true, messages, assistantMessageId, selection);
+          } catch (error) {
+            if (modelRetryEpochRef.current !== epoch) return;
+            modelRetryWaitRef.current = null;
+            setIsLoading(false);
+            const reason = error instanceof Error ? error.message : 'the server did not confirm that the previous run stopped';
+            const message = `Could not safely resume on the new model: ${reason}. Retry when the workspace is ready.`;
+            setConversations((prev) => prev.map((conversation) =>
+              conversation.id !== pending.conversationId
+                ? conversation
+                : {
+                    ...conversation,
+                    messages: conversation.messages.map((item) =>
+                      item.id === pending.assistantMessageId
+                        ? { ...item, isGenerating: false, agentStatus: undefined, error: message }
+                        : item
+                    ),
+                  }
+            ));
+            showNotice(message);
+          }
+        })();
+      } else {
+        // Regular chat has no mutating agent tools: retry the same user turn, not
+        // the partial assistant output from the request that was interrupted.
+        void handleSendMessage(messageContent, currentAttachments, webSearchEnabled, existingMessages, undefined, initialSelection);
+      }
+      return true;
     };
 
     const augmentedPrompt = `${attachmentsContext}${messageContent}`.trim();
@@ -1106,8 +1347,8 @@ export const App: React.FC = () => {
       };
 
       await runAgentTurn({
-        provider: activeProvider,
-        model: activeModelId,
+        provider: requestProvider,
+        model: requestModelId,
         thinkingLevel: activeConversation.thinkingLevel,
         messages: historyPayload,
         workspaceId: agentWorkspace.id,
@@ -1129,6 +1370,7 @@ export const App: React.FC = () => {
             agentRun: mergeRun(snap.agentRun),
             agentStatus: status,
           });
+          queueLatestSelectionAfterBusyStatus(convId, assistantMessageId, status);
           // keep an open Files panel live while the agent works
           const settled = snap.blocks.filter(
             (b) => b.type === 'action' && MUTATING.has(b.action.tool) && (b.action.status === 'done' || b.action.status === 'error')
@@ -1155,7 +1397,7 @@ export const App: React.FC = () => {
           }
         },
         onFinish: (snap, error) => {
-          patchAssistant({
+          const finishedPatch: Partial<Message> = {
             content: snap.content || baseContent || (error ? 'Unable to complete the request.' : ''),
             thinkingContent: snap.thinkingContent,
             blocks: withBase(snap.blocks),
@@ -1164,12 +1406,19 @@ export const App: React.FC = () => {
             agentStatus: undefined,
             isGenerating: false,
             ...(error ? { error } : {}),
-          });
+          };
+          patchAssistant(finishedPatch);
           const ownsRun = isCurrentRun();
           clearCurrentRun();
           if (ownsRun) setFilesRefresh((n) => n + 1);
           // The active turn changed files the open preview serves: show the result.
           if (ownsRun && previewStale) followPreview();
+          if (ownsRun) {
+            const completedMessages = updatedMessages.map((message) =>
+              message.id === assistantMessageId ? { ...message, ...finishedPatch } : message
+            );
+            restartWithPendingModel(completedMessages);
+          }
         },
       });
       return;
@@ -1183,6 +1432,12 @@ export const App: React.FC = () => {
     let isInsideThinkTag = false;
     let thinkingStartTime: number | null = null;
     let totalThinkingDurationSeconds: number | null = null;
+    const clearProviderBusyWindow = () => {
+      const busy = providerBusyRunRef.current;
+      if (busy?.conversationId === activeConversation.id && busy.assistantMessageId === assistantMessageId) {
+        providerBusyRunRef.current = null;
+      }
+    };
 
     const syncMessageState = () => {
       const snapTools = toolExecutions.slice();
@@ -1198,6 +1453,7 @@ export const App: React.FC = () => {
                     ...m,
                     content: fullAssistantContent,
                     thinkingContent: fullAssistantThinking || undefined,
+                    agentStatus: undefined,
                     toolExecutions: snapTools,
                     blocks: snapBlocks,
                   }
@@ -1294,17 +1550,38 @@ export const App: React.FC = () => {
     thinkingStreamerRef.current = thinkingStreamer;
 
     await streamChatCompletion({
-      provider: activeProvider,
-      model: activeModelId,
+      provider: requestProvider,
+      model: requestModelId,
       thinkingLevel: activeConversation.thinkingLevel,
       messages: historyPayload,
       toolsEnabled: Boolean(webSearchEnabled !== false),
       signal: controller.signal,
-      onTool: upsertTool,
+      onStatus: (status) => {
+        if (!isCurrentRun() || controller.signal.aborted) return;
+        setConversations((prev) => prev.map((conversation) =>
+          conversation.id !== activeConversation.id
+            ? conversation
+            : {
+                ...conversation,
+                messages: conversation.messages.map((message) =>
+                  message.id === assistantMessageId
+                    ? { ...message, agentStatus: status || undefined }
+                    : message
+                ),
+              }
+        ));
+        queueLatestSelectionAfterBusyStatus(activeConversation.id, assistantMessageId, status);
+      },
+      onTool: (tool) => {
+        clearProviderBusyWindow();
+        upsertTool(tool);
+      },
       onThinking: (chunk) => {
+        clearProviderBusyWindow();
         thinkingStreamer.push(chunk);
       },
       onChunk: (chunk) => {
+        clearProviderBusyWindow();
         let text = chunk;
         if (text.includes('<think>') || text.includes('<thought>')) {
           isInsideThinkTag = true;
@@ -1330,6 +1607,7 @@ export const App: React.FC = () => {
         }
       },
       onError: (errMsg) => {
+        const ownsRun = isCurrentRun();
         thinkingStreamer.flushImmediate();
         contentStreamer.flushImmediate();
         if (thinkingStartTime && !totalThinkingDurationSeconds) {
@@ -1350,6 +1628,7 @@ export const App: React.FC = () => {
                   ? {
                       ...m,
                       error: errMsg,
+                      agentStatus: undefined,
                       isGenerating: false,
                       content:
                         fullAssistantContent ||
@@ -1364,8 +1643,10 @@ export const App: React.FC = () => {
           })
         );
         clearCurrentRun();
+        if (ownsRun) restartWithPendingModel(existingMessages);
       },
       onDone: () => {
+        const ownsRun = isCurrentRun();
         thinkingStreamer.finish();
         contentStreamer.finish();
         if (thinkingStartTime && !totalThinkingDurationSeconds) {
@@ -1386,6 +1667,7 @@ export const App: React.FC = () => {
                   ? {
                       ...m,
                       isGenerating: false,
+                      agentStatus: undefined,
                       blocks: finalBlocks,
                       ...(totalThinkingDurationSeconds ? { thinkingDuration: totalThinkingDurationSeconds } : {}),
                     }
@@ -1395,6 +1677,7 @@ export const App: React.FC = () => {
           })
         );
         clearCurrentRun();
+        if (ownsRun) restartWithPendingModel(existingMessages);
       },
     });
   };

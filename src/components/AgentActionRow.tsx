@@ -1,17 +1,20 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronRight, Circle, CircleCheck, CircleDot, ExternalLink, Loader2, PanelRight } from 'lucide-react';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { ChevronRight, Circle, CircleCheck, CircleDot, ExternalLink, Folder, Loader2, PanelRight } from 'lucide-react';
 import type { AgentAction, AgentDiffHunk } from '../types';
 import { actionLabel, formatRanges, isWorking } from '../agent/format';
 import { FileTypeIcon } from './FileTypeIcon';
 import { createPanelStore, usePanelOpen } from './panels';
 import { useDismissOnOutside } from '../utils/useDismissOnOutside';
+import { SearchSourceStack } from './SearchSourceStack';
 
 /**
  * One thing the agent did, as a plain line of text — no card, no status box:
  *
- *   Creating  📄 index.html  +77 −98        (the whole label shimmers while it runs)
- *   Analyzed  📄 App.tsx  L1–L120
- *   Ran  $ npm install  · 4.2s              (click to see the output)
+ *   Edited  📄 prompt.js  +1 -1
+ *   Analyzed  📄 App.tsx  #L1-120
+ *   Ran  npm install                         (click to see the command output)
  */
 
 /** Long paths keep their tail: "…/components/AgentActionRow.tsx". */
@@ -22,6 +25,16 @@ const lastLines = (text = '', n = 3) =>
     .replace(/\s+$/, '')
     .split('\n')
     .slice(-n);
+
+const safeHttpUrl = (value?: string): string | undefined => {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 interface RowProps {
   action: AgentAction;
@@ -54,15 +67,75 @@ const Diff: React.FC<{ hunks: AgentDiffHunk[] }> = ({ hunks }) => (
   </div>
 );
 
+const isCommandAction = (action: AgentAction) => action.tool === 'run_command' || action.tool === 'run_checks';
+
+export const CommandDetails: React.FC<{ action: AgentAction }> = ({ action }) => {
+  const lines = String(action.output || '').split(/\r?\n/);
+  if (lines[0]?.startsWith('$ ')) lines.shift();
+  const output = lines.join('\n')
+    .replace(/\n?\[(?:exit code \d+|stopped by the user|timed out after [^\]]+)\]\s*$/i, '')
+    .trimEnd();
+  const result = action.result;
+  const command = String(result?.command || action.args?.command || 'Command');
+  const cwd = String(result?.cwd || action.args?.cwd || '.');
+  const status = action.status === 'running' || action.status === 'pending'
+    ? 'running'
+    : result?.timedOut
+      ? 'timed out'
+      : result?.aborted
+        ? 'stopped'
+        : typeof result?.exitCode === 'number'
+          ? result.exitCode === 0 ? 'finished' : `exit ${result.exitCode}`
+          : typeof result?.passed === 'boolean'
+            ? result.passed ? 'passed' : 'failed'
+            : action.status === 'done' ? 'finished' : action.status === 'error' ? 'failed' : '';
+  const failed = result?.timedOut || result?.aborted || result?.passed === false || (typeof result?.exitCode === 'number' && result.exitCode !== 0);
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-zinc-200/80 bg-white/70 dark:border-zinc-800 dark:bg-zinc-900/60" data-testid="command-details">
+      <div className="flex min-w-0 items-center gap-1.5 border-b border-zinc-200/70 px-2.5 py-2 text-[11px] dark:border-zinc-800">
+        <Folder className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" aria-hidden="true" />
+        <span className="min-w-0 max-w-[35%] truncate text-zinc-500 dark:text-zinc-400" title={cwd}>{cwd}</span>
+        <ChevronRight className="h-3 w-3 shrink-0 text-zinc-400" aria-hidden="true" />
+        <code className="min-w-0 flex-1 truncate text-zinc-700 dark:text-zinc-300" title={command}>{command}</code>
+        {status ? <span className={`shrink-0 text-[10px] ${failed ? 'text-rose-500 dark:text-rose-400' : 'text-zinc-400 dark:text-zinc-500'}`}>{status}</span> : null}
+      </div>
+      <pre className="panel-scroll max-h-64 overflow-auto whitespace-pre-wrap break-words bg-zinc-50/70 px-3 py-2.5 text-[11.5px] leading-[1.35rem] font-mono text-zinc-600 dark:bg-zinc-950/30 dark:text-zinc-400">
+        {output || (action.status === 'running' || action.status === 'pending' ? '(no output yet)' : '(no output)')}
+      </pre>
+    </div>
+  );
+};
+
 const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
   const r = action.result;
   const recovered = action.status === 'error' && r?.recovered === true;
+  const commandAction = isCommandAction(action);
   const showError =
     action.status === 'error' && action.error && action.error !== 'Stopped' && action.error !== 'Interrupted' &&
     !recovered && !(r && typeof r.exitCode === 'number');
 
   return (
-    <div className="mt-1 mb-1.5 ml-0.5 pl-3 border-l-2 border-zinc-200/80 dark:border-zinc-800 animate-in fade-in duration-150">
+    <div className={`mt-1 mb-1.5 animate-in fade-in duration-150 ${commandAction ? 'ml-0' : 'ml-0.5 pl-3 border-l-2 border-zinc-200/80 dark:border-zinc-800'}`}>
+      {commandAction ? <CommandDetails action={action} /> : null}
+      {r?.markdown && (action.tool === 'fetch_url' || action.tool === 'web_search') ? (
+        <div className="panel-scroll max-h-[65vh] max-w-3xl overflow-y-auto overscroll-y-contain pr-3 pl-3 py-2 border-l-2 border-zinc-200/70 dark:border-zinc-800/70 text-zinc-600 dark:text-zinc-300 text-[12px] leading-relaxed whitespace-normal break-words select-text [&_h1]:mb-2 [&_h1]:mt-1 [&_h1]:text-base [&_h1]:font-semibold [&_h2]:mb-1.5 [&_h2]:mt-4 [&_h2]:text-sm [&_h2]:font-semibold [&_h3]:mb-1 [&_h3]:mt-3 [&_h3]:font-semibold [&_p]:mb-2 [&_ul]:mb-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:mb-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:mb-1 [&_a]:text-sky-700 [&_a]:underline [&_a]:decoration-sky-500/40 [&_a]:underline-offset-2 dark:[&_a]:text-sky-300 [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-zinc-300 [&_blockquote]:pl-3 dark:[&_blockquote]:border-zinc-700 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-zinc-100 [&_pre]:p-2 dark:[&_pre]:bg-zinc-900 [&_code]:rounded [&_code]:bg-zinc-100 [&_code]:px-1 dark:[&_code]:bg-zinc-900 [&_pre_code]:bg-transparent [&_pre_code]:p-0">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            urlTransform={defaultUrlTransform}
+            components={{
+              a: ({ href, children }) => href
+                ? <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+                : <>{children}</>,
+              img: ({ src, alt }) => src
+                ? <img src={src} alt={alt || ''} loading="lazy" className="my-2 max-h-80 max-w-full rounded-md object-contain" />
+                : null,
+            }}
+          >
+            {r.markdown}
+          </ReactMarkdown>
+        </div>
+      ) : null}
       {r?.hunks && r.hunks.length > 0 && <Diff hunks={r.hunks} />}
 
       {r?.changes && (r.changes.length > 1 || action.tool === 'replace_in_files') &&
@@ -73,47 +146,48 @@ const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
               <span className="font-medium text-zinc-800 dark:text-zinc-100 truncate">{f.path}</span>
               {f.ranges && f.ranges.length > 0 && <span className="font-mono text-[11px] text-zinc-400">{formatRanges(f.ranges, 3)}</span>}
               {f.added > 0 && <span className="font-mono tabular-nums text-emerald-600 dark:text-emerald-400">+{f.added}</span>}
-              {f.removed > 0 && <span className="font-mono tabular-nums text-rose-500 dark:text-rose-400">−{f.removed}</span>}
+              {f.removed > 0 && <span className="font-mono tabular-nums text-rose-500 dark:text-rose-400">-{f.removed}</span>}
               {f.edits && f.edits > 1 && <span className="text-zinc-400">· {f.edits} edits</span>}
             </div>
             {f.hunks && f.hunks.length > 0 && <Diff hunks={f.hunks} />}
           </div>
         ))}
 
-      {action.output && (
+      {!commandAction && action.output && (
         <pre className="panel-scroll max-h-64 overflow-auto whitespace-pre-wrap break-words text-[12px] leading-5 font-mono text-zinc-600 dark:text-zinc-400">
           {action.output.trimEnd()}
         </pre>
       )}
 
       {r?.todos && r.todos.length > 0 && (
-        <ul className="space-y-1 text-[12px]">
-          {r.todos.map((t, i) => (
-            <li key={i} className="flex items-start gap-1.5">
-              {/* The plan is plain: the shape of the marker carries the status,
-                  not a colour. Done is checked and dark, the one being worked on
-                  is filled and bold, the rest wait in grey. */}
-              {t.status === 'completed' ? (
-                <CircleCheck className="w-3.5 h-3.5 mt-[3px] shrink-0 text-zinc-500 dark:text-zinc-400" />
-              ) : t.status === 'in_progress' ? (
-                <CircleDot className="w-3.5 h-3.5 mt-[3px] shrink-0 text-zinc-800 dark:text-zinc-100" />
-              ) : (
-                <Circle className="w-3.5 h-3.5 mt-[3px] shrink-0 text-zinc-300 dark:text-zinc-600" />
-              )}
-              <span
-                className={
-                  t.status === 'completed'
-                    ? 'text-zinc-400 line-through'
-                    : t.status === 'in_progress'
-                      ? 'font-medium text-zinc-900 dark:text-zinc-100'
-                      : 'text-zinc-600 dark:text-zinc-400'
-                }
-              >
-                {t.content}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <div>
+          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Plan</div>
+          <ul className="space-y-1.5 text-[12px] leading-5">
+            {r.todos.map((t, i) => (
+              <li key={i} className="flex min-w-0 items-start gap-2">
+                {/* Shape and weight carry status; the plan stays neutral. */}
+                {t.status === 'completed' ? (
+                  <CircleCheck aria-hidden="true" className="mt-[3px] h-3.5 w-3.5 shrink-0 text-zinc-500 dark:text-zinc-400" />
+                ) : t.status === 'in_progress' ? (
+                  <CircleDot aria-hidden="true" className="mt-[3px] h-3.5 w-3.5 shrink-0 text-zinc-800 dark:text-zinc-100" />
+                ) : (
+                  <Circle aria-hidden="true" className="mt-[3px] h-3.5 w-3.5 shrink-0 text-zinc-300 dark:text-zinc-600" />
+                )}
+                <span
+                  className={`min-w-0 break-words ${
+                    t.status === 'completed'
+                      ? 'text-zinc-400 line-through decoration-zinc-300 dark:decoration-zinc-700'
+                      : t.status === 'in_progress'
+                        ? 'font-medium text-zinc-900 dark:text-zinc-100'
+                        : 'text-zinc-600 dark:text-zinc-400'
+                  }`}
+                >
+                  {t.content}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {r?.findings && r.findings.length > 0 && (
@@ -238,35 +312,76 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
 
   const tail = live && action.output && (action.tool === 'run_command' || action.tool === 'read_process_output') ? lastLines(action.output, 3) : [];
   const previewUrl = action.result?.url;
+  const fetchedPageUrl = action.tool === 'fetch_url' && action.status === 'done' && action.result?.markdown
+    ? safeHttpUrl(action.result.url || action.args?.url)
+    : undefined;
+  const fetchedPageSite = (() => {
+    try { return new URL(fetchedPageUrl || '').hostname.replace(/^www\./i, ''); } catch { return ''; }
+  })();
+  const sourceRange = action.tool === 'read_file' && label.lines
+    ? `#${label.lines.replace(/L(\d+)–L(\d+)/g, 'L$1-$2')}`
+    : undefined;
 
   const labelContent = (
-    <span className={`inline-flex items-center gap-1.5 min-w-0 ${live ? 'agent-shimmer' : ''}`}>
-      <span className={`shrink-0 ${live ? '' : verbTone}`}>{label.verb}</span>
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
+      <span className={`shrink-0 font-medium ${live ? 'agent-shimmer' : verbTone}`}>{label.verb}</span>
+
+      {label.fileChanges?.map((change) => (
+        <span key={change.path} className="inline-flex min-w-0 max-w-[18rem] items-center gap-1">
+          <FileTypeIcon path={change.path} className="h-3.5 w-3.5 shrink-0 opacity-80" />
+          <span className={`truncate text-[12px] font-medium ${live ? 'agent-shimmer' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={change.path}>
+            {shortPath(change.path, 38)}
+          </span>
+          <span className="shrink-0 font-mono text-[12px] tabular-nums text-emerald-600 dark:text-emerald-400">+{change.added}</span>
+          {change.removed > 0 ? <span className="shrink-0 font-mono text-[12px] tabular-nums text-rose-500 dark:text-rose-400">-{change.removed}</span> : null}
+        </span>
+      ))}
+      {!label.fileChanges && label.fileTargets?.slice(0, 2).map((target) => (
+        <span key={target} className="inline-flex min-w-0 max-w-[14rem] items-center gap-1">
+          <FileTypeIcon path={target} className="h-3.5 w-3.5 shrink-0 opacity-80" />
+          <span className={`truncate text-[12px] font-medium ${live ? 'agent-shimmer' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={target}>
+            {shortPath(target, 38)}
+          </span>
+        </span>
+      ))}
+      {!label.fileChanges && label.fileTargets && label.fileTargets.length > 2 ? (
+        <span className="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">+{label.fileTargets.length - 2} more</span>
+      ) : null}
 
       {label.target && label.targetKind === 'command' && (
-        <span className={`font-mono text-[12.5px] truncate ${live ? '' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={label.target}>
-          <span className={live ? '' : 'text-zinc-400'}>$ </span>
-          {label.target}
+        <span className="inline-flex min-w-0 max-w-full items-center" title={label.target}>
+          <span className={`min-w-0 truncate font-mono text-[12.5px] ${live ? 'agent-shimmer' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`}>
+            {label.target}
+          </span>
         </span>
       )}
       {label.target && label.targetKind === 'pattern' && (
-        <span className={`font-mono text-[12.5px] truncate ${live ? '' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={label.target}>
+        <span className={`truncate font-mono text-[12px] ${live ? 'agent-shimmer' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={label.target}>
           “{label.target}”
         </span>
       )}
       {label.target && (label.targetKind === 'file' || label.targetKind === 'dir') && (
         <>
-          <FileTypeIcon path={label.iconPath ?? label.target} isDir={label.targetKind === 'dir'} className={`w-4 h-4 ${live || queued ? 'opacity-50' : ''}`} />
-          <span className={`truncate font-medium ${live ? '' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-800 dark:text-zinc-100'}`} title={label.target}>
-            {shortPath(label.target)}
+          <FileTypeIcon
+            path={label.iconPath ?? label.target}
+            isDir={label.targetKind === 'dir'}
+            className={`h-4 w-4 shrink-0 ${live || queued ? 'opacity-60' : ''}`}
+          />
+          <span
+            className={`${label.targetKind === 'dir' ? 'min-w-0 max-w-full whitespace-normal leading-4' : 'min-w-0 max-w-full truncate'} font-medium ${live ? 'agent-shimmer' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-800 dark:text-zinc-100'}`}
+            title={label.target}
+            style={label.targetKind === 'dir' ? { overflowWrap: 'anywhere' } : undefined}
+          >
+            {label.targetKind === 'dir' ? label.target : shortPath(label.target)}
           </span>
         </>
       )}
       {label.target && (label.targetKind === 'url' || label.targetKind === 'text') && (
-        <span className={`truncate font-medium ${live ? '' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-800 dark:text-zinc-100'}`} title={label.target}>
+        <span className={`min-w-0 max-w-full truncate font-medium ${live ? 'agent-shimmer' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-800 dark:text-zinc-100'}`} title={label.target}>
           {label.target}
         </span>
       )}
+      {action.tool === 'web_search' ? <SearchSourceStack sources={action.result?.sources} className="ml-0.5" /> : null}
     </span>
   );
 
@@ -284,26 +399,13 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
         >
           {labelContent}
 
-          {label.lines && <span className="shrink-0 font-mono text-[12.5px] text-zinc-400 dark:text-zinc-500">{label.lines}</span>}
-          {/*
-            Line counts and small facts stay plain: the same grey as the rest of
-            the row, no pills, no green-and-red counters. A failure is the one
-            thing that earns a colour (below), because that is information rather
-            than decoration.
-          */}
-          {/*
-            The counts are the file's real totals, written once and left alone. They
-            used to be read from the live write buffer while a file was still being
-            written and then rolled to the final number — which meant the reader saw
-            a running estimate (+45 −23), watched it change under them, and could
-            catch the minus showing a number that was really the plus. A count that
-            is not a fact yet is simply not shown.
-          */}
-          {label.added !== undefined && (
+          {sourceRange && <span className="shrink-0 font-mono text-[12.5px] text-zinc-400 dark:text-zinc-500">{sourceRange}</span>}
+          {/* Live values are disk-confirmed; settled values come from the final tool result. */}
+          {label.added !== undefined && !label.fileChanges && (
             <span className="shrink-0 font-mono text-[12.5px] tabular-nums text-emerald-600 dark:text-emerald-400">+{label.added}</span>
           )}
-          {label.removed !== undefined && label.removed > 0 && (
-            <span className="shrink-0 font-mono text-[12.5px] tabular-nums text-rose-500 dark:text-rose-400">−{label.removed}</span>
+          {label.removed !== undefined && label.removed > 0 && !label.fileChanges && (
+            <span className="shrink-0 font-mono text-[12.5px] tabular-nums text-rose-500 dark:text-rose-400">-{label.removed}</span>
           )}
           {label.chips?.map((c) => (
             <span key={c} className="shrink-0 font-mono text-[12px] text-zinc-400 dark:text-zinc-500">
@@ -321,6 +423,19 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
             />
           )}
         </button>
+
+        {fetchedPageUrl && (
+          <a
+            href={fetchedPageUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={`Open ${fetchedPageSite || 'source page'} in a new tab`}
+            title={action.result?.title ? `Open ${action.result.title}` : `Open ${fetchedPageSite}`}
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+          >
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
 
         {previewUrl && action.tool === 'get_preview_url' && (
           <span className="shrink-0 inline-flex items-center gap-0.5">

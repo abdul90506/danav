@@ -14,7 +14,7 @@ import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
 import { buildToolset } from '../../server/agent/tools.js';
 import { createRedactor } from '../../server/agent/util.js';
 import {
-  buildIndex, definitionOf, dependentsOf, findDefinitions, importOf, patchFile, rankFiles,
+  buildIndex, cachedIndex, definitionOf, dependentsOf, dropIndex, findDefinitions, fromJSON, getIndex, importOf, patchFile, rankFiles, toJSON,
   renderRepoMap, resolveImport, testsFor, tokenize,
 } from '../../server/agent/codeindex.js';
 
@@ -117,6 +117,89 @@ test('the index reads definitions, languages and imports out of one pass', async
     assert.deepEqual(dependentsOf(index, 'src/panel.ts'), ['src/App.tsx']);
     assert.deepEqual(testsFor(index, 'src/theme.ts'), ['src/theme.test.ts']);
     assert.deepEqual(testsFor(index, 'src/panel.ts', { strict: true }), [], 'nothing imports panel.ts as a test');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a cached index is accepted only when its completeness markers and maps are valid', async () => {
+  const root = project();
+  try {
+    const ws = await workspaceFor(root);
+    const index = await buildIndex(ws);
+    assert.deepEqual(fromJSON(toJSON(index), ws), index, 'a valid snapshot round-trips');
+
+    const wrongScanned = { ...index, scanned: 'many' };
+    const wrongFilePath = { ...index, files: { ...index.files, 'src/fake.ts': { path: 'src/other.ts', symbols: [], imports: [] } } };
+    const missingTruncationState = { ...index };
+    delete missingTruncationState.truncated;
+    const invalidMaps = { ...index, edges: [] };
+    for (const candidate of [wrongScanned, wrongFilePath, missingTruncationState, invalidMaps]) {
+      assert.equal(fromJSON(JSON.stringify(candidate), ws), null, 'malformed cached data is rebuilt, not trusted');
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a failed workspace walk is not cached as an empty index; the next lookup retries', async () => {
+  const root = project();
+  const ws = await workspaceFor(root);
+  const realListTree = ws.listTree.bind(ws);
+  let calls = 0;
+  ws.listTree = async (...args) => {
+    calls++;
+    if (calls === 1) throw new Error('temporary workspace read failure');
+    return realListTree(...args);
+  };
+  dropIndex(ws.id);
+  try {
+    assert.equal(await getIndex(ws, { force: true }), null, 'a failed walk is an index miss, not an empty project');
+    assert.equal(cachedIndex(ws.id), null, 'the failed pending promise was removed');
+    const recovered = await getIndex(ws);
+    assert.ok(recovered?.files['src/theme.ts']);
+    assert.equal(calls, 2, 'the next request performs a fresh walk');
+    assert.equal(cachedIndex(ws.id), recovered);
+  } finally {
+    dropIndex(ws.id);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a transient symbol-search failure is not cached as a path-only index', async () => {
+  const root = project();
+  const ws = await workspaceFor(root);
+  const realGrep = ws.grep.bind(ws);
+  let calls = 0;
+  ws.grep = async (...args) => {
+    calls++;
+    if (calls === 1) throw new Error('temporary search failure');
+    return realGrep(...args);
+  };
+  dropIndex(ws.id);
+  try {
+    assert.equal(await getIndex(ws, { force: true }), null, 'the optional index is omitted for this failed scan');
+    assert.equal(cachedIndex(ws.id), null, 'the path-only fallback was not retained for the cache TTL');
+    const recovered = await getIndex(ws);
+    assert.ok(recovered.files['src/theme.ts'].symbols.some((symbol) => symbol.name === 'toggleTheme'));
+    assert.equal(calls, 2, 'the symbol search is retried on the next lookup');
+  } finally {
+    dropIndex(ws.id);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a depth-capped listing is explicitly marked partial instead of looking complete', async () => {
+  const root = project();
+  try {
+    const deep = path.join(root, 'a/b/c/d/e/f/deep.ts');
+    fs.mkdirSync(path.dirname(deep), { recursive: true });
+    fs.writeFileSync(deep, 'export function buriedDefinition() {}\n');
+    const ws = await workspaceFor(root);
+    const index = await buildIndex(ws);
+    assert.equal(index.truncated, true, 'a directory at the last scanned depth may hide source files');
+    assert.ok(!index.files['a/b/c/d/e/f/deep.ts'], 'the file beyond the depth bound is not claimed as indexed');
+    assert.ok(index.files['src/theme.ts'], 'files within the bound remain useful');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -477,10 +560,19 @@ test('the same file is not paid for twice in one run, but asking again still wor
     const ws = await workspaceFor(root);
     const { run } = toolsetFor(ws);
 
+    const firstRange = await run('read_file', { path: 'src/panel.ts', ranges: [[2, 3], [5, 6]] });
+    assert.match(firstRange.output, /2 chunks: 2-3, 5-6/);
+    const repeatedRange = await run('read_file', { path: 'src/panel.ts', ranges: [[2, 3], [5, 6]] });
+    assert.match(repeatedRange.output, /already received L2-L3, L5-L6/);
+    assert.equal(repeatedRange.ui.repeated, true, 'an unchanged partial read is recognized from exact ranges');
+    const requestedAgain = await run('read_file', { path: 'src/panel.ts', ranges: [[2, 3], [5, 6]] });
+    assert.match(requestedAgain.output, /createPanelStore/);
+    assert.match(requestedAgain.output, /usePanelOpen/);
+
     const first = await run('read_file', { path: 'src/panel.ts' });
     assert.match(first.output, /createPanelStore/);
     const second = await run('read_file', { path: 'src/panel.ts' });
-    assert.match(second.output, /unchanged since you read it in this run/);
+    assert.match(second.output, /unchanged; you already received L1-L6/);
     assert.equal(second.ui.repeated, true);
     const third = await run('read_file', { path: 'src/panel.ts' });
     assert.match(third.output, /createPanelStore/, 'a determined second ask gets the file');

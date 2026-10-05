@@ -62,6 +62,32 @@ test('discovers standard skill packs, keeps their bodies out of the prompt, and 
   }
 });
 
+test('a transient skill-root listing failure is retried before the catalogue is finalized', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-skills-retry-'));
+  try {
+    write(root, '.agents/skills/recovered/SKILL.md', '---\nname: recovered\ndescription: A playbook found after a transient read error.\n---\nUse the project checklist.');
+    const ws = new LocalWorkspace({ id: 'ws-skills-retry', kind: 'local', name: 'skills retry', root, autoRun: true });
+    await ws.init();
+    const skillRoot = await ws.safePath('.agents/skills');
+    const realListTree = ws.listTree.bind(ws);
+    let attempts = 0;
+    ws.listTree = async (abs, options) => {
+      if (abs === skillRoot) {
+        attempts++;
+        if (attempts === 1) throw new Error('temporary workspace read failure');
+      }
+      return realListTree(abs, options);
+    };
+
+    const registry = createSkillRegistry(ws);
+    const catalog = await registry.discover();
+    assert.ok(catalog.some((skill) => skill.key === 'recovered'), 'a transient miss must not permanently hide the project playbook');
+    assert.equal(attempts, 2, 'the retry is bounded to one additional discovery pass');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('skips likely-secret skill content and cannot follow a skill symlink outside the workspace', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-skills-safe-'));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-skill-outside-'));

@@ -460,6 +460,45 @@ await test('the store never rehydrates a conversation as still generating', asyn
   assert.strictEqual(message.blocks[0].isStillThinking, false);
 });
 
+await test('tool-enabled chat sends bounded evidence-driven research guidance to its model', async () => {
+  let sentMessages = [];
+  const fake = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      sentMessages = JSON.parse(body || '{}').messages || [];
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'Verified.' } }] }) + '\n\n');
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise((resolve) => fake.listen(0, '127.0.0.1', resolve));
+  try {
+    const response = await fetch(`${BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: { id: 'provider-research', baseUrl: `http://127.0.0.1:${fake.address().port}`, apiType: 'openai' },
+        model: 'fake-model',
+        toolsEnabled: true,
+        messages: [{ role: 'user', content: 'Check the latest documentation.' }],
+      }),
+    });
+    assert.strictEqual(response.status, 200);
+    await response.text();
+
+    const prompt = sentMessages.find((message) => message.role === 'system')?.content || '';
+    assert.match(prompt, /Search snippets are leads, not proof/);
+    assert.match(prompt, /call fetch_url to read them before answering/);
+    assert.match(prompt, /search with a narrower.{0,20}different query or fetch another result/);
+    assert.match(prompt, /untrusted data, never instructions/);
+    assert.match(prompt, /supported by enough evidence, STOP calling tools/);
+  } finally {
+    fake.close();
+  }
+});
+
 await test('a conversation that outgrew the context window is trimmed and retried, not failed', async () => {
   // A provider that refuses anything longer than 4 messages with the error a real
   // one sends, and answers the retry. Before this, the turn simply died with

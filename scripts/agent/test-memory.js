@@ -65,6 +65,20 @@ test('memory deduplicates durable facts, updates metadata, and never stores like
       /will not save a likely API key/
     );
     assert.throws(() => addNote(workspaceId, 'Private key: -----BEGIN RSA PRIVATE KEY-----'), /will not save/);
+    const secretTag = 'NOVITA_API_KEY=test_memory_secret_token_123456789012345';
+    assert.throws(
+      () => addNote(workspaceId, 'Keep project settings in the local config file', { tags: [secretTag] }),
+      /will not save a tag containing/
+    );
+    const memoryFile = path.join(root, 'agent-memory', `${workspaceId}.json`);
+    assert.doesNotMatch(fs.readFileSync(memoryFile, 'utf8'), /test_memory_secret_token/);
+
+    // Files written by older versions may already have credential-bearing tags.
+    // Reads must hide and scrub them, not echo them through the memory API.
+    const saved = readNotes(workspaceId)[0];
+    fs.writeFileSync(memoryFile, JSON.stringify({ version: 2, notes: [{ ...saved, tags: [secretTag] }] }));
+    assert.deepEqual(readNotes(workspaceId)[0].tags, []);
+    assert.doesNotMatch(fs.readFileSync(memoryFile, 'utf8'), /test_memory_secret_token/);
     assert.equal(readNotes(workspaceId).length, 1, 'rejected credentials were not persisted');
 
     if (process.platform !== 'win32') {

@@ -3,8 +3,8 @@ import type { AgentAction, Message } from '../types';
 /**
  * How an action reads in the chat — the plain sentence behind
  *
- *   Creating  📄 index.html  +77 −98
- *   Analyzed  📄 App.tsx  L1–L120
+ *   Edited  📄 prompt.js  +1 -1
+ *   Analyzed  📄 App.tsx  #L1-120
  *   Ran       npm install
  *
  * Kept free of React so the wording rules are testable.
@@ -14,7 +14,7 @@ export interface ActionLabel {
   verb: string;
   target?: string;
   targetKind?: 'file' | 'dir' | 'command' | 'pattern' | 'url' | 'text';
-  /** "L34–L52" */
+  /** Source line range, rendered as "#L34-52" in a file row. */
   lines?: string;
   added?: number;
   removed?: number;
@@ -22,6 +22,10 @@ export interface ActionLabel {
   meta?: string;
   /** Short badge-like strings (ports, process ids). */
   chips?: string[];
+  /** Paths for one multi-file edit, shown by name instead of the vague "2 files changed". */
+  fileTargets?: string[];
+  /** Per-file changes keep a multi-file edit's inline counts truthful. */
+  fileChanges?: Array<{ path: string; added: number; removed: number }>;
   /** Path to take the file icon from, when the displayed text is not itself a path (e.g. "a → b"). */
   iconPath?: string;
   /** Something to reveal on click (output, diff, checklist, error). */
@@ -182,21 +186,21 @@ function rawLabel(a: AgentAction): ActionLabel {
 
   switch (a.tool) {
     case 'list_dir': {
-      // A listing of the workspace root has no path worth printing: "." on its own
-      // is punctuation, not information. The row then reads "Listed 8 items".
-      const listed = r?.path || args.path || '';
-      const isRoot = listed === '' || listed === '.' || listed === './' || listed === '/';
-      return base('Listing', 'Listed', {
-        target: isRoot ? undefined : listed,
+      // Prefer the absolute target for the activity row so a root listing never
+      // collapses to a mysterious "."; old saved actions fall back to the known path.
+      const listed = r?.fullPath || r?.path || args.path || '.';
+      return base('Exploring', 'Explored', {
+        target: listed,
         targetKind: 'dir',
-        meta: !live && r ? plural(r.count ?? 0, 'item') : undefined,
+        meta: !live && typeof r?.count === 'number' && r.count > 0 ? plural(r.count, 'item') : undefined,
       });
     }
 
     case 'read_file': {
       const start = r?.startLine ?? args.startLine;
       const end = r?.endLine ?? args.endLine;
-      return base('Analyzing', 'Analyzed', {
+      const repeated = r?.repeated === true;
+      return base('Analyzing', repeated ? 'Already read' : 'Analyzed', {
         target: r?.path || args.path,
         targetKind: 'file',
         lines: r?.ranges?.length ? formatRanges(r.ranges, 4) : start && end ? (start === end ? `L${start}` : `L${start}–L${end}`) : undefined,
@@ -205,16 +209,15 @@ function rawLabel(a: AgentAction): ActionLabel {
     }
 
     case 'write_file': {
+      // Live progress is emitted only after the writer confirms a disk snapshot;
+      // never substitute the model's still-growing argument buffer here.
+      const added = live ? a.progress?.added : r?.added;
+      const removed = live ? a.progress?.removed : r?.removed;
       return base('Creating', r?.created === false ? 'Rewrote' : 'Created', {
         target: r?.path || args.path,
         targetKind: 'file',
-        /*
-          The count comes from the finished write, never from the live buffer: a
-          number that is still growing is an estimate, and an estimate that later
-          changes is a number the reader watched lie to them.
-        */
-        added: r?.added,
-        removed: (r?.removed ?? 0) > 0 ? r?.removed : undefined,
+        added,
+        removed: (removed ?? 0) > 0 ? removed : undefined,
         expandable: !live && Boolean(r?.hunks?.length),
       });
     }
@@ -246,22 +249,21 @@ function rawLabel(a: AgentAction): ActionLabel {
     case 'edit_file':
     case 'multi_edit': {
       const n = r?.edits;
-      const fileCount = r?.changes?.length ?? 0;
-      const manyFiles = fileCount > 1;
+      const fileTargets = [...new Set((r?.changes || []).map((file) => file.path).filter(Boolean))];
+      const manyFiles = fileTargets.length > 1;
       const liveEdits = typeof args.edits === 'number' && args.edits > 1 ? plural(args.edits, 'edit') : undefined;
       return base('Editing', 'Edited', {
-        target: r?.path || args.path,
+        target: manyFiles ? undefined : r?.path || args.path || fileTargets[0],
         targetKind: 'file',
+        ...(manyFiles ? { fileTargets, fileChanges: r?.changes?.map((file) => ({ path: file.path, added: file.added, removed: file.removed })) } : {}),
         lines: live || manyFiles ? undefined : formatRanges(r?.ranges),
         added: r?.added,
         removed: r?.removed,
         meta: live
           ? liveEdits
-          : manyFiles
-            ? `${fileCount} files · ${plural(n ?? fileCount, 'edit')}`
-            : n && n > 1
-              ? plural(n, 'edit')
-              : undefined,
+          : n && n > 1
+            ? plural(n, 'edit')
+            : undefined,
         expandable: !live && Boolean(r?.hunks?.length || r?.changes?.some((f) => f.hunks?.length)),
       });
     }
@@ -348,7 +350,7 @@ function rawLabel(a: AgentAction): ActionLabel {
           target: command,
           targetKind: 'command',
           chips: live ? undefined : chips,
-          expandable: !live && Boolean(a.output),
+          expandable: Boolean(command) || Boolean(a.output),
         });
       }
       const code = r?.exitCode;
@@ -364,7 +366,7 @@ function rawLabel(a: AgentAction): ActionLabel {
         targetKind: 'command',
         meta: bits.join(' · ') || undefined,
         exitFailed: exitFailed || Boolean(r?.timedOut),
-        expandable: Boolean(a.output) || toolFailed,
+        expandable: Boolean(command) || Boolean(a.output) || toolFailed,
       });
     }
 
@@ -402,7 +404,7 @@ function rawLabel(a: AgentAction): ActionLabel {
         targetKind: 'command',
         meta: !live && r ? [r.checks ? plural(r.checks, 'check') : undefined, ...bits].filter(Boolean).join(' · ') || undefined : undefined,
         exitFailed: Boolean(failed),
-        expandable: Boolean(a.output) || Boolean(failed),
+        expandable: Boolean(names) || Boolean(a.output) || Boolean(failed),
       });
     }
 
@@ -433,11 +435,16 @@ function rawLabel(a: AgentAction): ActionLabel {
       return base('Searching the web for', 'Searched the web for', {
         target: r?.query || args.query,
         targetKind: 'text',
-        meta: !live && r?.count !== undefined ? plural(r.count, 'result') : undefined,
+        expandable: Boolean(r?.markdown),
       });
 
     case 'fetch_url':
-      return base('Reading', 'Read', { target: hostOf(r?.url || args.url), targetKind: 'url', meta: !live ? r?.title : undefined });
+      return base('Reading', 'Read', {
+        target: hostOf(r?.url || args.url),
+        targetKind: 'url',
+        meta: !live ? r?.title : undefined,
+        expandable: Boolean(r?.markdown),
+      });
 
     case 'image_search':
       return base('Finding images of', 'Found images of', {
@@ -458,32 +465,29 @@ function rawLabel(a: AgentAction): ActionLabel {
   }
 }
 
-/**
- * The single line under a finished turn: how long it took, how much it did, and
- * what it changed. Plain text, one tone — no badges, no coloured counters.
- */
+/** The compact duration used by the Worked row: seconds below a minute, whole minutes after. */
+function workedDuration(ms?: number): string | undefined {
+  if (ms === undefined || !Number.isFinite(ms) || ms < 1000) return undefined;
+  const seconds = Math.round(ms / 1000);
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`;
+}
+
+/** A restrained, human status for the work row; file-level details stay in the trail. */
 export function workedSummary(run?: {
   durationMs?: number;
   toolCalls?: number;
   changed?: Array<{ path: string; added: number; removed: number }>;
+  stopReason?: string;
 }): string | undefined {
-  if (!run) return undefined;
-  // No work, no line: a turn that only talked is not a turn that worked. (Its own
-  // stop notice, if it has one, is said separately.)
-  if (!run.toolCalls && !(run.changed || []).length) return undefined;
-  const bits: string[] = [];
-  const time = formatDuration(run.durationMs);
-  if (time) bits.push(`Worked for ${time}`);
-  if (run.toolCalls) bits.push(`${run.toolCalls} action${run.toolCalls === 1 ? '' : 's'}`);
-  const changed = run.changed || [];
-  if (changed.length) {
-    const added = changed.reduce((n, c) => n + c.added, 0);
-    const removed = changed.reduce((n, c) => n + c.removed, 0);
-    const files = `${changed.length} file${changed.length === 1 ? '' : 's'}`;
-    const counts = [added ? `+${added}` : '', removed ? `−${removed}` : ''].filter(Boolean).join(' ');
-    bits.push(counts ? `${files} ${counts}` : files);
+  if (!run || (!run.toolCalls && !(run.changed || []).length)) return undefined;
+  const time = workedDuration(run.durationMs);
+  if (run.stopReason === 'aborted' || run.stopReason === 'error') {
+    return time ? `Stopped after ${time}` : 'Work stopped';
   }
-  return bits.length ? bits.join(' · ') : undefined;
+  if (run.stopReason && run.stopReason !== 'completed') {
+    return time ? `Paused after ${time}` : 'Work paused';
+  }
+  return time ? `Worked for ${time}` : 'Work complete';
 }
 
 export function stopNotice(reason?: string): string | undefined {
@@ -562,74 +566,103 @@ export function collectActivity(messages: Message[], max = 60): string[] {
   return lines.slice(-max);
 }
 
-/**
- * Which family a tool belongs to, for the work trail.
- *
- * The trail is a summary, not a log: four reads in a row are one line — "4 files
- * analyzed" — and the four rows sit one click behind it. Grouping is by what the
- * tools did, so a mixed run of reads and searches still reads as two honest lines
- * instead of one vague one.
- */
-const TRAIL_KINDS: Record<string, string> = {
-  read_file: 'analyze',
-  load_skill: 'analyze',
-  file_outline: 'analyze',
-  find_symbol: 'analyze',
-  relevant_files: 'explore',
-  code_map: 'explore',
-  list_dir: 'explore',
-  file_search: 'explore',
-  grep_search: 'explore',
-  run_command: 'run',
-  list_processes: 'process',
-  read_process_output: 'process',
-  stop_process: 'process',
-  write_file: 'change',
-  append_file: 'change',
-  edit_file: 'change',
-  multi_edit: 'change',
-  replace_in_files: 'change',
-  web_search: 'web',
-  fetch_url: 'web',
-  image_search: 'web',
-  remember: 'memory',
-  forget: 'memory',
-  search_memory: 'memory',
-  update_plan: 'plan',
-  delegate_task: 'delegate',
-  repo_status: 'analyze',
-  repo_history: 'analyze',
-  run_checks: 'run',
-};
+/** Tool calls that the Worked trail folds into chronological Explore / Run groups. */
+const WORK_EXPLORATION_TOOLS = new Set([
+  'read_file', 'file_outline', 'find_symbol', 'relevant_files', 'code_map',
+  'list_dir', 'file_search', 'grep_search',
+]);
+const WORK_COMMAND_TOOLS = new Set(['run_command', 'run_checks']);
 
-export function trailKind(tool: string): string {
-  return TRAIL_KINDS[tool] || 'other';
+export function isWorkSummaryAction(action: AgentAction): boolean {
+  if (action.status === 'denied' || action.status === 'blocked' || (action.status === 'error' && !action.result)) return false;
+  return WORK_EXPLORATION_TOOLS.has(action.tool) || WORK_COMMAND_TOOLS.has(action.tool);
 }
 
-/** "4 files analyzed", "2 commands run", "1 place explored". */
-export function trailGroupLabel(kind: string, count: number): string {
-  const n = count;
-  const s = n === 1 ? '' : 's';
-  switch (kind) {
-    case 'analyze':
-      return `${n} file${s} analyzed`;
-    case 'explore':
-      return `${n} place${s} explored`;
-    case 'run':
-      return `${n} command${s} run`;
-    case 'process':
-      return `${n} process step${s}`;
-    case 'change':
-      return `${n} file${s} changed`;
-    case 'web':
-      return `${n} web lookup${s}`;
-    case 'memory':
-      return `${n} memory step${s}`;
-    case 'plan':
-      return `${n} plan update${s}`;
-    case 'delegate':
-      return `${n} subagent task${s}`;
-    default:
-      return `${n} step${s}`;
+/**
+ * Summarize only facts returned by the real tool calls. Known paths are counted
+ * once; search/index tools contribute their reported file counts. Commands stay
+ * separate from edits, which remain visible inline in the activity trail.
+ */
+export function summarizeWorkActions(actions: AgentAction[]): string | undefined {
+  const paths = new Set<string>();
+  let reportedFiles = 0;
+  let reportedFilesTruncated = false;
+  let listedFolders = 0;
+  let listedFoldersTruncated = false;
+  let listedItems = 0;
+  let listedItemsTruncated = false;
+  const emptyFolderPaths = new Set<string>();
+  let hasExploration = false;
+  let commands = 0;
+
+  for (const action of actions) {
+    if (!isWorkSummaryAction(action)) continue;
+    const result = action.result;
+    if (!result) continue;
+
+    if (WORK_COMMAND_TOOLS.has(action.tool)) {
+      commands += 1;
+      continue;
+    }
+
+    hasExploration = true;
+    const path = result.path || action.args?.path;
+    if ((action.tool === 'read_file' || action.tool === 'file_outline') && typeof path === 'string' && path.trim()) {
+      paths.add(path);
+    }
+
+    if (action.tool === 'list_dir') {
+      if (typeof result.fileCount === 'number') {
+        reportedFiles = Math.max(reportedFiles, result.fileCount);
+        reportedFilesTruncated ||= Boolean(result.truncated);
+      } else if (typeof result.count === 'number') {
+        listedItems = Math.max(listedItems, result.count);
+        listedItemsTruncated ||= Boolean(result.truncated);
+      }
+      if (typeof result.directoryCount === 'number') {
+        listedFolders = Math.max(listedFolders, result.directoryCount);
+        listedFoldersTruncated ||= Boolean(result.truncated);
+      }
+      const directory = result.fullPath || result.path || action.args?.path;
+      const listedCount = typeof result.count === 'number'
+        ? result.count
+        : typeof result.fileCount === 'number' && typeof result.directoryCount === 'number'
+          ? result.fileCount + result.directoryCount
+          : undefined;
+      if (typeof directory === 'string' && directory.trim() && listedCount === 0) {
+        emptyFolderPaths.add(directory);
+      }
+      continue;
+    }
+
+    const count = action.tool === 'grep_search' || action.tool === 'find_symbol'
+      ? result.files
+      : ['file_search', 'relevant_files', 'code_map'].includes(action.tool)
+        ? result.count
+        : undefined;
+    if (typeof count === 'number' && Number.isFinite(count)) {
+      reportedFiles = Math.max(reportedFiles, count);
+      reportedFilesTruncated ||= Boolean(result.truncated);
+    }
   }
+
+  const fileCount = Math.max(paths.size, reportedFiles);
+  const fileCountIsPartial = reportedFilesTruncated && fileCount > 0;
+  const folderCountIsPartial = listedFoldersTruncated && listedFolders > 0;
+  const itemCountIsPartial = listedItemsTruncated && listedItems > 0;
+  const parts: string[] = [];
+  if (fileCount > 0) {
+    const count = fileCountIsPartial ? `${fileCount}+` : String(fileCount);
+    parts.push(`Explored ${count} ${fileCount === 1 ? 'file' : 'files'}`);
+  } else if (listedFolders > 0) {
+    const count = folderCountIsPartial ? `${listedFolders}+` : String(listedFolders);
+    parts.push(`Explored ${count} ${listedFolders === 1 ? 'folder' : 'folders'}`);
+  } else if (listedItems > 0) {
+    const count = itemCountIsPartial ? `${listedItems}+` : String(listedItems);
+    parts.push(`Explored ${count} ${listedItems === 1 ? 'item' : 'items'}`);
+  } else if (emptyFolderPaths.size > 0) {
+    parts.push(emptyFolderPaths.size === 1 ? 'Explored an empty folder' : `Explored ${emptyFolderPaths.size} empty folders`);
+  } else if (hasExploration) parts.push('Explored code');
+  if (commands > 0) parts.push(`${parts.length ? 'ran' : 'Ran'} ${plural(commands, 'command')}`);
+  return parts.length ? parts.join(', ') : undefined;
 }

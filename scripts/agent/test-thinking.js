@@ -66,6 +66,76 @@ test('Gemini stream normalizes model ids, sends the chosen level, and routes tho
   }
 });
 
+test('Gemini tool-call arguments stream incrementally when the agent opts in', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody;
+  const argFrames = [];
+  const firstArgs = '{"path":"index.html","content":"<h1>Start</h1>\\n';
+  const secondArgs = '<p>Next</p>\\n"}';
+  const events = [
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'write_file', arguments: firstArgs } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'write_file', arguments: secondArgs } }] } }] },
+    { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+  ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n';
+  globalThis.fetch = async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return new Response(events, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  };
+
+  try {
+    await streamCompletion({
+      provider: { baseUrl: GOOGLE, apiKey: 'test-provider-key' },
+      model: 'models/gemini-3.8-flash',
+      thinkingLevel: 'Auto',
+      messages: [{ role: 'user', content: 'Create a page.' }],
+      tools: [{ type: 'function', function: { name: 'write_file', parameters: { type: 'object' } } }],
+      onToolDelta: (_index, slot) => argFrames.push({ name: slot.name, args: slot.args }),
+    });
+    assert.equal(requestBody.stream, true);
+    assert.equal(requestBody.extra_body.google.stream_function_call_arguments, true);
+    assert.equal(requestBody.extra_body.google.thinking_config.include_thoughts, true, 'the streaming opt-in preserves Gemini thinking settings');
+    assert.equal(argFrames.length, 2, 'the server receives argument deltas before the tool call finishes');
+    assert.equal(argFrames[0].args, firstArgs);
+    assert.equal(argFrames[1].args, firstArgs + secondArgs);
+    assert.equal(JSON.parse(argFrames.at(-1).args).content, '<h1>Start</h1>\n<p>Next</p>\n');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('an unsupported Gemini stream-arguments flag falls back without changing model or thinking settings', async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    if (bodies.length === 1) {
+      return new Response(JSON.stringify({ error: { message: 'Unknown field stream_function_call_arguments' } }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response('data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  };
+
+  try {
+    await streamCompletion({
+      provider: { baseUrl: GOOGLE, apiKey: 'test-provider-key' },
+      model: 'models/gemini-2.5-flash',
+      thinkingLevel: 'Auto',
+      messages: [{ role: 'user', content: 'Create a page.' }],
+      tools: [{ type: 'function', function: { name: 'write_file', parameters: { type: 'object' } } }],
+    });
+    assert.equal(bodies.length, 2, 'the unsupported optional feature is retried once');
+    assert.equal(bodies[0].extra_body.google.stream_function_call_arguments, true);
+    assert.equal(bodies[1].extra_body.google.stream_function_call_arguments, undefined);
+    assert.equal(bodies[1].extra_body.google.thinking_config.include_thoughts, true);
+    assert.equal(bodies[1].model, 'gemini-2.5-flash');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('a rejected explicit effort is an honest error, never a silent lower-effort retry', async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;

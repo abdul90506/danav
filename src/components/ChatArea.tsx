@@ -314,7 +314,7 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
 
       {/* Return to the newest message after the user pauses auto-follow. */}
       {!pinned && (
-        <div className="absolute bottom-20 sm:bottom-[88px] left-1/2 -translate-x-1/2 z-30 flex items-center justify-center pointer-events-none">
+        <div className="chat-scroll-latest absolute left-1/2 z-30 flex -translate-x-1/2 items-center justify-center pointer-events-none">
           <button
             type="button"
             onClick={() => scrollToBottom(true)}

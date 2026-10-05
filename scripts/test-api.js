@@ -65,6 +65,28 @@ async function main() {
     assert.strictEqual(text, 'hello world');
   });
 
+  await test('stream status events reach onStatus before later content', async () => {
+    stubFetch(sseResponse([
+      'data: {"status":"Provider is busy — retry 1 of 3 in 2s…"}\n\n',
+      'data: {"content":"answer"}\n\n',
+      'data: [DONE]\n\n',
+    ]));
+    const statuses = [];
+    let text = '';
+    await streamChatCompletion({
+      provider: PROVIDER,
+      model: 'm',
+      thinkingLevel: 'Auto',
+      messages: [],
+      onStatus: (status) => statuses.push(status),
+      onChunk: (chunk) => { text += chunk; },
+      onError: (error) => { throw new Error(error); },
+      onDone: () => {},
+    });
+    assert.deepEqual(statuses, ['Provider is busy — retry 1 of 3 in 2s…']);
+    assert.equal(text, 'answer');
+  });
+
   await test('thinking is separated from content', async () => {
     stubFetch(sseResponse(['data: {"thinking":"let me think"}\n\n', 'data: {"content":"answer"}\n\n', 'data: [DONE]\n\n']));
     let text = '';
@@ -224,7 +246,7 @@ async function main() {
       sseResponse([
         'data: {"tool":{"id":"t1","name":"web_search","status":"running","query":"node lts"}}\n\n',
         'data: {"content":"Let me check. "}\n\n',
-        'data: {"tool":{"id":"t1","name":"web_search","status":"done","ok":true,"summary":"8 results"}}\n\n',
+        'data: {"tool":{"id":"t1","name":"web_search","status":"done","ok":true,"sources":[{"domain":"nodejs.org","name":"Node.js"}]}}\n\n',
         'data: {"content":"Node 22 is LTS."}\n\n',
         'data: [DONE]\n\n',
       ])
@@ -251,7 +273,8 @@ async function main() {
     assert.strictEqual(seen[0].status, 'running', 'the first event must be the running state');
     assert.strictEqual(seen[0].query, 'node lts', 'the query the model chose must survive');
     assert.strictEqual(seen[1].status, 'done');
-    assert.strictEqual(seen[1].summary, '8 results');
+    assert.strictEqual(seen[1].summary, undefined, 'web searches no longer display a bare result count');
+    assert.deepStrictEqual(seen[1].sources, [{ domain: 'nodejs.org', name: 'Node.js' }]);
     assert.strictEqual(seen[0].id, seen[1].id, 'both events must share an id so they merge into one row');
     assert.strictEqual(text, 'Let me check. Node 22 is LTS.');
   });

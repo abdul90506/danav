@@ -78,6 +78,17 @@ function isVerificationCommand(command) {
   return typeof command === 'string' && /\b(?:test|check|verify|lint|typecheck|build|tsc|pytest|cargo\s+test|go\s+test)\b/i.test(command);
 }
 
+function lineRangesLabel(ranges, maxRanges = 4) {
+  if (!Array.isArray(ranges)) return '';
+  const valid = ranges.filter((range) =>
+    Array.isArray(range) && Number.isInteger(range[0]) && Number.isInteger(range[1]) && range[0] > 0 && range[1] >= range[0]
+  ).slice(0, maxRanges);
+  if (!valid.length) return '';
+  const labels = valid.map(([start, end]) => start === end ? `L${start}` : `L${start}-L${end}`);
+  if (ranges.length > valid.length) labels.push(`+${ranges.length - valid.length} more`);
+  return labels.join(', ');
+}
+
 function taskStep(name, args, result, state, redact) {
   const failed = result?.ok === false && result?.denied !== true;
   const verificationCommand = name === 'run_command' && isVerificationCommand(args?.command);
@@ -99,9 +110,13 @@ function taskStep(name, args, result, state, redact) {
       if (!target) return [];
       const added = Number.isFinite(change?.added) ? Math.max(0, change.added) : 0;
       const removed = Number.isFinite(change?.removed) ? Math.max(0, change.removed) : 0;
-      return [`${target} (+${added}/−${removed})`];
+      if (name === 'write_file') return [`${change?.created === true ? 'Created' : 'Rewrote'} ${target} (+${added}/−${removed})`];
+      if (name === 'append_file') return [`${change?.created === true ? 'Created' : 'Appended to'} ${target} (+${added} lines${Number.isFinite(change?.totalLines) ? `; ${change.totalLines} total` : ''})`];
+      const ranges = lineRangesLabel(change?.ranges);
+      const verb = name === 'replace_in_files' ? 'Replaced in' : 'Edited';
+      return [`${verb} ${target} (+${added}/−${removed}${ranges ? ` at ${ranges}` : ''})`];
     });
-    detail = descriptions.length ? `Changed ${descriptions.join(', ')}` : `Completed ${name}; file contents are not retained.`;
+    detail = descriptions.length ? descriptions.join('; ') : `Completed ${name}; file contents are not retained.`;
   } else if (CHECK_TOOLS.has(name) || verificationCommand) {
     kind = 'verification';
     const checks = (Array.isArray(state?.checks) ? state.checks : []).slice(-4).map((check) => {
@@ -121,8 +136,20 @@ function taskStep(name, args, result, state, redact) {
     kind = 'review';
     detail = 'Read-only review completed; compact findings are retained separately.';
   } else if (name === 'read_file') {
-    const range = Number.isFinite(ui.startLine) && Number.isFinite(ui.endLine) ? `, lines ${ui.startLine}-${ui.endLine}` : '';
-    detail = `Read ${files[0] || 'a workspace file'}${range}; source text omitted.`;
+    const ranges = lineRangesLabel(
+      Array.isArray(ui.ranges) && ui.ranges.length
+        ? ui.ranges
+        : Array.isArray(args?.ranges) && args.ranges.length
+          ? args.ranges
+          : Number.isFinite(ui.startLine) && Number.isFinite(ui.endLine)
+            ? [[ui.startLine, ui.endLine]]
+            : Number.isFinite(args?.start_line)
+              ? [[args.start_line, Number.isFinite(args.end_line) ? args.end_line : args.start_line]]
+              : []
+    );
+    const symbol = compact(ui.symbol || args?.symbol, 80, redact);
+    const total = Number.isFinite(ui.totalLines) && ui.totalLines > 0 ? ` of ${ui.totalLines} lines` : '';
+    detail = `Read ${files[0] || 'a workspace file'}${symbol ? ` definition ${symbol}` : ''}${ranges ? ` at ${ranges}` : ''}${total}; source text omitted.`;
   } else if (name === 'file_outline') {
     detail = `Outlined ${files[0] || 'a workspace file'} (${Number(ui.count) || 0} definitions); source text omitted.`;
   } else if (name === 'repo_history') {
@@ -144,12 +171,16 @@ function localEntry(id, events, plan, findings, at) {
   const files = [...new Set(events.flatMap((event) => event.files))].slice(0, 6);
   const errors = events.filter((event) => event.kind === 'failure').map((event) => event.detail.replace(/^Failed:\s*/, '')).slice(-3);
   const decisions = events.filter((event) => event.kind === 'plan').map((event) => event.detail).slice(-2);
-  const summary = events.map((event) => `${event.tool}${event.files.length ? ` (${event.files.slice(0, 2).join(', ')})` : ''}: ${event.detail}`).join(' · ').slice(0, 360);
+  const steps = events.slice(-MAX_BATCH_EVENTS)
+    .map((event) => compact(`${event.tool}: ${event.detail}`, 220))
+    .filter(Boolean);
+  const summary = `${events.length} task action${events.length === 1 ? '' : 's'} recorded${files.length ? `; files: ${files.slice(0, 4).join(', ')}` : ''}.`;
   const next = plan.find((item) => item.status === 'in_progress') || plan.find((item) => item.status === 'pending');
   return {
     id,
     at,
-    summary: summary || 'Task progress checkpoint saved; no raw prompts or file contents retained.',
+    summary,
+    steps,
     facts: findings.slice(-4),
     decisions,
     errors,
@@ -196,13 +227,9 @@ async function summarizeWithModel({ provider, model, events, plan, findings, sig
 }
 
 function promptLine(entry) {
-  const parts = [`Summary: ${entry.summary}`];
-  if (entry.facts.length) parts.push(`Facts: ${entry.facts.slice(0, 3).join('; ')}`);
-  if (entry.decisions.length) parts.push(`Decisions: ${entry.decisions.slice(0, 2).join('; ')}`);
-  if (entry.errors.length) parts.push(`Avoid repeating: ${entry.errors.slice(0, 2).join('; ')}`);
-  if (entry.files.length) parts.push(`Files: ${entry.files.slice(0, 4).join(', ')}`);
-  if (entry.next) parts.push(`Next: ${entry.next}`);
-  return `- ${parts.join(' · ')}`;
+  const steps = (entry.steps || []).slice(-5).map((step) => compact(step, 84)).filter(Boolean);
+  const line = steps.length ? `Steps: ${steps.join('; ')}` : `Summary: ${entry.summary}`;
+  return `- ${line}`.slice(0, 460);
 }
 
 /** Create a run-scoped memory queue; summarization never blocks the main agent. */
@@ -226,8 +253,12 @@ export function createTaskMemory({
   let finished = false;
   let summaryQueue = Promise.resolve();
   let memories = [];
+  const activeSummaries = new Set();
 
   const save = (entry) => {
+    // A provider may resolve after abort/finish. Its result must never overwrite
+    // the final local checkpoint or race the run-journal write in loop cleanup.
+    if (finished && entry?.source === 'model') return;
     try {
       const run = upsertRunMemory(workspaceId, { runId, taskKey, entry });
       const stored = run?.memories?.find((item) => item.id === entry.id);
@@ -250,8 +281,9 @@ export function createTaskMemory({
   }
 
   async function summarizeBatch(batch) {
-    if (signal?.aborted) return;
+    if (finished || signal?.aborted) return;
     const controller = new AbortController();
+    activeSummaries.add(controller);
     const abort = () => controller.abort();
     if (signal?.aborted) abort();
     else signal?.addEventListener('abort', abort, { once: true });
@@ -266,6 +298,7 @@ export function createTaskMemory({
         signal: controller.signal,
         onRetry: (info) => { if (!finished) onRetry?.(info); },
       });
+      if (finished || controller.signal.aborted || signal?.aborted) return;
       const parsed = parseSummary(result);
       if (!parsed) return;
       const entry = {
@@ -282,13 +315,14 @@ export function createTaskMemory({
     } catch {
       // Keep the immediately persisted local checkpoint if the selected provider fails.
     } finally {
+      activeSummaries.delete(controller);
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
     }
   }
 
   function startSummary(batch) {
-    if (summaryCount >= Math.max(0, Number(maxSummaries) || 0)) return;
+    if (finished || summaryCount >= Math.max(0, Number(maxSummaries) || 0)) return;
     summaryCount++;
     const job = summaryQueue.then(() => summarizeBatch(batch), () => summarizeBatch(batch));
     summaryQueue = job.catch(() => {});
@@ -297,7 +331,7 @@ export function createTaskMemory({
   function flushCurrent() {
     if (timer) clearTimeout(timer);
     timer = null;
-    if (!currentBatch?.events.length) return summaryQueue;
+    if (finished || !currentBatch?.events.length) return summaryQueue;
     const batch = currentBatch;
     currentBatch = null;
     batch.plan = batch.plan || [];
@@ -337,15 +371,21 @@ export function createTaskMemory({
   }
 
   function finish(state) {
+    if (finished) return;
     finished = true;
-    if (currentBatch && state) {
-      currentBatch.plan = planSnapshot(state);
-      currentBatch.findings = findingsSnapshot(state);
+    if (timer) clearTimeout(timer);
+    timer = null;
+    if (currentBatch?.events.length) {
+      if (state) {
+        currentBatch.plan = planSnapshot(state);
+        currentBatch.findings = findingsSnapshot(state);
+      }
       currentBatch.at = Date.now();
       currentBatch.local = localEntry(currentBatch.id, currentBatch.events, currentBatch.plan, currentBatch.findings, currentBatch.at);
-      save(currentBatch.local);
+      save(currentBatch.local); // keep the local checkpoint; do not launch a final model call
     }
-    flushCurrent();
+    currentBatch = null;
+    for (const controller of activeSummaries) controller.abort();
   }
 
   async function flush() {

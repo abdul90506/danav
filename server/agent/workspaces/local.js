@@ -132,7 +132,14 @@ export class LocalWorkspace extends BaseWorkspace {
   async stat(abs) {
     try {
       const st = await fsp.stat(abs);
-      return { type: st.isDirectory() ? 'dir' : 'file', size: st.size };
+      return {
+        type: st.isDirectory() ? 'dir' : 'file',
+        size: st.size,
+        mtimeMs: st.mtimeMs,
+        ctimeMs: st.ctimeMs,
+        ino: st.ino,
+        dev: st.dev,
+      };
     } catch {
       return { type: null, size: 0 };
     }

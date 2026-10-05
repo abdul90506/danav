@@ -6,7 +6,8 @@
  *   node scripts/fake-llm.js 4010        # then use baseUrl http://127.0.0.1:4010/v1
  *
  * The `model` name picks the scenario: fake-build, fake-slow, fake-fail,
- * fake-approval, fake-bad-calls, fake-loop, fake-bulky, fake-preview, fake-project, fake-burst, fake-batch, fake-edit-streak, fake-gate, fake-quiet, fake-quiet-end.
+ * fake-approval, fake-bad-calls, fake-loop, fake-bulky, fake-preview, fake-project,
+ * fake-burst, fake-stream-write, fake-batch, fake-edit-streak, fake-gate, fake-quiet, fake-quiet-end.
  */
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
@@ -230,6 +231,36 @@ export const scenarios = {
           toolCalls: [{ name: 'write_file', fragment: 1e9, args: { path: 'big.js', content: Array.from({ length: 200 }, (_, i) => `console.log(${i + 1});`).join('\n') + '\n' } }],
         }
       : { text: 'Done.' },
+
+  /** The same body as burst, but split into genuine incremental tool-argument deltas. */
+  streamWrite: ({ roundIdx }) =>
+    roundIdx === 0
+      ? {
+          text: 'Writing a big file.',
+          toolCalls: [{ name: 'write_file', args: { path: 'big.js', content: Array.from({ length: 200 }, (_, i) => `console.log(${i + 1});`).join('\n') + '\n' } }],
+        }
+      : { text: 'Done.' },
+
+  // Existing-file stream tests first inspect the target, matching the enforced
+  // read-before-overwrite policy instead of relying on an unsafe blind write.
+  burstOverwrite: ({ roundIdx }) => {
+    if (roundIdx === 0) return { toolCalls: [{ name: 'read_file', args: { path: 'big.js' } }] };
+    if (roundIdx === 1) return { text: 'Replacing the inspected file.', toolCalls: [{ name: 'write_file', fragment: 1e9, args: { path: 'big.js', content: Array.from({ length: 200 }, (_, i) => `console.log(${i + 1});`).join('\n') + '\n' } }] };
+    return { text: 'Done.' };
+  },
+
+  slowOverwrite: ({ roundIdx }) => {
+    if (roundIdx === 0) return { toolCalls: [{ name: 'read_file', args: { path: 'index.html' } }] };
+    if (roundIdx === 1) return { text: 'Writing the inspected page now.', delayMs: 45, toolCalls: [{ name: 'write_file', args: { path: 'index.html', content: HTML.repeat(3).replace(/<!DOCTYPE html>/g, '<!-- part -->') } }] };
+    return { text: 'Done.' };
+  },
+
+  blindOverwrite: ({ roundIdx }) => {
+    if (roundIdx === 0) return { text: 'Trying a blind overwrite.', toolCalls: [{ name: 'write_file', args: { path: 'notes.txt', content: 'replacement\n' } }] };
+    if (roundIdx === 1) return { text: 'Reading the existing file first.', toolCalls: [{ name: 'read_file', args: { path: 'notes.txt' } }] };
+    if (roundIdx === 2) return { text: 'Now overwriting the inspected file.', toolCalls: [{ name: 'write_file', args: { path: 'notes.txt', content: 'replacement\n' } }] };
+    return { text: 'Done.' };
+  },
 
   /** Runs a recognizable verification command for the private run-journal tests. */
   /**
@@ -479,6 +510,10 @@ const byModel = {
   'fake-preview': scenarios.preview,
   'fake-project': scenarios.project,
   'fake-burst': scenarios.burst,
+  'fake-stream-write': scenarios.streamWrite,
+  'fake-burst-overwrite': scenarios.burstOverwrite,
+  'fake-slow-overwrite': scenarios.slowOverwrite,
+  'fake-blind-overwrite': scenarios.blindOverwrite,
   'fake-batch': scenarios.batch,
   'fake-edit-streak': scenarios.editStreak,
   'fake-truncate': scenarios.truncate,

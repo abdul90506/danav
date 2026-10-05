@@ -279,7 +279,12 @@ export class SandboxWorkspace extends BaseWorkspace {
     const sbx = await this.sandbox();
     try {
       const info = await sbx.files.getInfo(abs);
-      return { type: info.type === 'dir' ? 'dir' : 'file', size: info.size ?? 0 };
+      const modifiedTime = info.modifiedTime instanceof Date ? info.modifiedTime.getTime() : Number.NaN;
+      return {
+        type: info.type === 'dir' ? 'dir' : 'file',
+        size: info.size ?? 0,
+        ...(Number.isFinite(modifiedTime) ? { mtimeMs: modifiedTime } : {}),
+      };
     } catch (err) {
       if (isNotFound(err)) return { type: null, size: 0 };
       throw this.wrap(err);

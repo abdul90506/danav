@@ -6,12 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { startFakeLlm, HTML, CSS } from '../fake-llm.js';
-import { runAgent, pruneMessages, revealPlan, worklogLines, verificationLabel } from '../../server/agent/loop.js';
+import { runAgent, pruneMessages, worklogLines, verificationLabel } from '../../server/agent/loop.js';
 import { streamCompletion } from '../../server/agent/llm.js';
+import { buildSystemPrompt } from '../../server/agent/prompt.js';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
 import { registerAgentRoutes, _activeRuns } from '../../server/agent/routes.js';
 import { resolveApproval } from '../../server/agent/approvals.js';
-import { countLines } from '../../server/agent/textops.js';
+import { countLines, liveDiffStats, splitLines } from '../../server/agent/textops.js';
 import { normalizeAgentBlockForDisk } from '../../server/agent/persist.js';
 import { readRunJournal, recentRunsForPrompt, taskKeyFor } from '../../server/agent/journal.js';
 import { genId } from '../../server/agent/util.js';
@@ -26,54 +27,29 @@ let llm;
 const getLlm = async () => (llm ||= await startFakeLlm({ chunkDelayMs: 0 }));
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 
-test('the reveal of a dumped tool call is paced for a person to watch', () => {
-  // Every provider measured on this app hands over the whole write_file call in
-  // ONE SSE frame (see scripts/probe-raw.js), so this reveal is the only thing
-  // that can show a file being written. It used to be a fixed 6–45 steps at 30ms,
-  // which finished a 40-line file in 240ms — a blur that read as a jump.
-  const perSec = Number(process.env.DANAV_REVEAL_CHARS_PER_SEC) || 1100;
-  const minMs = Number(process.env.DANAV_REVEAL_MIN_MS) || 800;
-  const maxMs = Number(process.env.DANAV_REVEAL_MAX_MS) || 2800;
-
-  // A small file is still on screen long enough to read.
-  assert.equal(revealPlan(0).durationMs, minMs);
-  assert.equal(revealPlan(120).durationMs, minMs, 'a tiny body gets the floor, not a flash');
-
-  // A typical file lands in the middle of the range...
-  const typical = revealPlan(1800);
-  assert.ok(typical.durationMs > minMs && typical.durationMs < maxMs, `1800 chars -> ${typical.durationMs}ms`);
-
-  // ...and a huge one is capped so it cannot hold the run up.
-  assert.equal(revealPlan(200_000).durationMs, maxMs, 'a huge body is capped');
-
-  // Bigger bodies are revealed for longer, up to the cap.
-  assert.ok(revealPlan(4000).durationMs >= typical.durationMs);
-
-  // The steps are small: several per 100ms, so the count climbs instead of jumping.
-  const stepsPerSecond = typical.steps / (typical.durationMs / 1000);
-  assert.ok(stepsPerSecond >= 20, `expected a smooth ~30 updates a second, got ${stepsPerSecond.toFixed(1)}`);
-  assert.ok(typical.steps >= 20, `a typical file is revealed over many steps, got ${typical.steps}`);
-  assert.ok(revealPlan(200_000).steps <= 120, 'and the step count stays bounded');
-
-  // Never fewer than two, so even the floor produces a visible climb.
-  assert.ok(revealPlan(1).steps >= 2);
-  assert.ok(Number.isFinite(revealPlan(NaN).durationMs), 'a nonsense size does not produce a nonsense plan');
+test('the system prompt distinguishes a full overwrite read from an outline or partial range', () => {
+  const prompt = buildSystemPrompt({
+    workspace: { kind: 'local', name: 'fixture', root: '/workspace', describeEnv: () => '' },
+    snapshot: '',
+  });
+  assert.match(prompt, /For a whole-file overwrite or append, read_file must show the complete file/);
+  assert.match(prompt, /file_outline, a symbol read, or a partial range does not count/);
+  assert.match(prompt, /Treat search snippets as leads, not proof/);
+  assert.match(prompt, /read them with fetch_url before relying on details/);
 });
 
-test('a live update always carries a number for BOTH counters', async () => {
-  // A brand-new file removes nothing, and the payload used to omit `removed`
-  // entirely — every live update then carried `removed: undefined`.
-  const { events } = await agentRun({ model: 'fake-burst' });
-  const progress = events
-    .map((e) => e.agent?.patch?.progress)
-    .filter(Boolean);
-  assert.ok(progress.length > 0, 'the write was reported');
-  for (const p of progress) {
-    assert.equal(typeof p.added, 'number', `added must be a number: ${JSON.stringify(p)}`);
-    assert.equal(typeof p.removed, 'number', `removed must be a number: ${JSON.stringify(p)}`);
-    assert.ok(Number.isFinite(p.added) && Number.isFinite(p.removed));
-    assert.ok(Array.isArray(p.tail));
-  }
+test('a completed tool call is written once, with no synthetic progress replay', async () => {
+  const { events, dir } = await agentRun({ model: 'fake-burst' });
+  const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
+  const running = events.findIndex((e, i) => i > start && e.agent?.patch?.status === 'running');
+  const end = events.findIndex((e, i) => i > running && e.agent?.type === 'action_end' && e.agent.result?.kind === 'write');
+  assert.ok(start >= 0 && running > start && end > running, `start < running < end (${start}, ${running}, ${end})`);
+
+  const progress = events.slice(start, end).flatMap((e) => [e.agent?.progress, e.agent?.patch?.progress]).filter(Boolean);
+  assert.deepEqual(progress, [], 'a one-frame body has no made-up +0, partial lines, or typing animation');
+  const written = fs.readFileSync(path.join(dir, 'big.js'), 'utf8');
+  assert.equal(countLines(written), 200);
+  assert.equal(events[end].agent.result.added, 200, 'the completed result reports the actual write');
 });
 
 /** Everything the user saw in the chat, in order: the streamed answer. */
@@ -163,6 +139,64 @@ test('successful tool work is saved as an automatic task checkpoint and appears 
 });
 
 // ---------------------------------------------------------------------------
+
+test('multimodal user turns keep their image for the model and use text parts for project retrieval', async () => {
+  const root = tmp('danav-multimodal-');
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'src/theme-toggle.ts'), 'export function toggleTheme() { return "dark"; }\n');
+  const ws = new LocalWorkspace({ id: 'ws-multimodal-retrieval', kind: 'local', name: 'multimodal', root, autoRun: true });
+  try {
+    await ws.init();
+    const imagePart = { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } };
+    const { requests } = await agentRun({
+      workspace: ws,
+      history: [{ role: 'user', content: [{ type: 'text', text: 'Find the theme toggle' }, imagePart] }],
+    });
+
+    const first = requests[0];
+    const system = first.messages.find((message) => message.role === 'system' && typeof message.content === 'string')?.content || '';
+    assert.match(system, /src\/theme-toggle\.ts/, 'retrieval ranks the source file from the text part');
+    assert.doesNotMatch(system, /\[object Object\]/, 'multimodal objects are not stringified into the retrieval query');
+    const user = first.messages.find((message) => message.role === 'user');
+    assert.ok(Array.isArray(user.content), 'history stays multimodal for the model');
+    assert.equal(user.content[1].type, 'image_url');
+    assert.equal(user.content[1].image_url.url, imagePart.image_url.url);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the loop blocks a blind streamed overwrite and permits it after read_file', async () => {
+  const root = tmp('danav-blind-overwrite-');
+  fs.mkdirSync(root, { recursive: true });
+  const file = path.join(root, 'notes.txt');
+  fs.writeFileSync(file, 'original contents\n');
+  const ws = new LocalWorkspace({ id: 'ws-blind-overwrite', kind: 'local', name: 'overwrite guard', root, autoRun: true });
+  const atRefusal = [];
+  try {
+    const { events, requests, result } = await agentRun({
+      model: 'fake-blind-overwrite',
+      workspace: ws,
+      onEvent: (event) => {
+        if (event.agent?.type === 'action_end' && event.agent.result?.kind === 'write' && event.agent.status === 'blocked') {
+          atRefusal.push(fs.readFileSync(file, 'utf8'));
+        }
+      },
+    });
+    const writes = agentEvents(events, 'action_end').filter((action) => action.result?.kind === 'write');
+    assert.equal(result.stopReason, 'completed');
+    assert.equal(writes.length, 2);
+    assert.equal(writes[0].status, 'blocked');
+    assert.equal(writes[0].result.blocked, true);
+    assert.deepEqual(atRefusal, ['original contents\n'], 'the early streaming path never touches the file');
+    assert.match(writes[0].error, /complete contents.*read_file/);
+    assert.equal(writes[1].status, 'done', 'the same write runs after read_file inspected its target');
+    assert.equal(fs.readFileSync(file, 'utf8'), 'replacement\n');
+    assertConsistentTranscript(requests.at(-1).messages);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('happy path: plan, write, read, multi-edit, edit, command, search, list — in order', async () => {
   const { events, result, dir, requests } = await agentRun();
@@ -340,7 +374,7 @@ test('the run discovers project playbooks cheaply and loads a matching one throu
     });
     assert.equal(result.stopReason, 'completed');
     const manifest = requests[0].messages[0].content;
-    assert.match(manifest, /Available project skills/);
+    assert.match(manifest, /Available skills \(Danav built-ins and project playbooks/);
     assert.match(manifest, /security-review/);
     assert.doesNotMatch(manifest, /Inspect request parsing/);
     assert.ok(agentEvents(events, 'action_start').some((action) => action.tool === 'load_skill'));
@@ -394,181 +428,57 @@ test('task checkpoints carry findings and resume only the matching assistant tur
   }
 });
 
-test('live progress: the action row appears early and its line count grows while the model writes', async () => {
-  const l = await getLlm();
-  const slow = await startFakeLlm({ chunkDelayMs: 12 });
-  try {
-    const events = [];
-    const ws = new LocalWorkspace({ id: 'ws-p', kind: 'local', name: 'p', root: tmp('danav-prog-'), autoRun: true });
-    await ws.init();
-    await runAgent({
-      provider: { baseUrl: slow.baseUrl },
-      model: 'fake-slow',
-      history: [{ role: 'user', content: 'go' }],
-      workspace: ws,
-      runSearchTool: async () => ({}),
-      send: (e) => events.push(e),
-      signal: new AbortController().signal,
-      runId: genId('run'),
-    });
-    const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
-    const running = events.findIndex((e, i) => i > start && e.agent?.patch?.status === 'running');
-    const updates = events.slice(start, running).filter((e) => e.agent?.patch?.progress?.added);
-    const counts = updates.map((e) => e.agent.patch.progress.added);
-    assert.ok(start >= 0 && running > start, 'start precedes running');
-    assert.ok(counts.length >= 3, `expected several progress updates, got ${counts}`);
-    assert.deepEqual([...counts].sort((a, b) => a - b), counts, 'line count never goes backwards');
-    assert.ok(counts.at(-1) > counts[0]);
-    // the path is known early, from the partial JSON
-    const early = events.slice(start, running).find((e) => e.agent?.patch?.args?.path || e.agent?.args?.path);
-    assert.ok(early, 'path arrives before execution starts');
-  } finally {
-    await slow.close();
-  }
-});
-
-test('a tool call that arrives ALL AT ONCE is still watched being written (replayed, not dumped)', async () => {
-  // Providers such as Vyce/agnes send a whole tool call in a single frame. The row must not
-  // jump straight to "+200": the body is replayed so the count climbs and the tail scrolls.
-  const { events, dir } = await agentRun({ model: 'fake-burst' });
-
-  const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
-  const running = events.findIndex((e, i) => i > start && e.agent?.patch?.status === 'running');
-  const end = events.findIndex((e, i) => i > running && e.agent?.type === 'action_end');
-  assert.ok(start >= 0 && running > start && end > running, `start < running < end (${start}, ${running}, ${end})`);
-
-  // the row opens at "+0" — a real reading of a file that has no lines yet — and the final
-  // count is never claimed up front
-  assert.equal(events[start].agent.progress?.added, 0, 'a one-shot call opens at +0, not at its final count');
-  assert.notEqual(events[start].agent.progress?.added, 200, 'the final count is never claimed up front');
-
-  const replayed = events
-    .slice(running, end)
-    .filter((e) => e.agent?.patch?.progress)
-    .map((e) => e.agent.patch.progress);
-  const counts = replayed.map((p) => p.added);
-  assert.ok(counts.length >= 5, `expected the body to be replayed over several updates, got ${counts}`);
-  assert.deepEqual([...counts].sort((a, b) => a - b), counts, `the replayed count never goes backwards: ${counts}`);
-  assert.ok(counts[0] < counts.at(-1), `the count climbs: ${counts[0]} -> ${counts.at(-1)}`);
-  assert.equal(counts[0], 0, 'the count starts at zero, before the first line is on disk');
-  assert.ok(replayed.some((p) => p.tail?.length > 0), 'the lines being written scroll by');
-
-  // the replay is display only: the file on disk is the full one, and the row ends with real numbers
-  const written = fs.readFileSync(path.join(dir, 'big.js'), 'utf8');
-  assert.equal(countLines(written), 200);
-  assert.equal(events[end].agent.result.added, 200);
-  assert.equal(counts.at(-1), 200, 'the replay reaches the number the result confirms');
-});
-
-test('a provider that really streams is never replayed twice', async () => {
-  // The live count already grew while the model was writing; after `running` there is nothing left to show.
-  const slow = await startFakeLlm({ chunkDelayMs: 6 });
-  try {
-    const events = [];
-    const ws = new LocalWorkspace({ id: 'ws-nr', kind: 'local', name: 'nr', root: tmp('danav-noreplay-'), autoRun: true });
-    await ws.init();
-    await runAgent({
-      provider: { baseUrl: slow.baseUrl },
-      model: 'fake-slow',
-      history: [{ role: 'user', content: 'go' }],
-      workspace: ws,
-      runSearchTool: async () => ({}),
-      send: (e) => events.push(e),
-      signal: new AbortController().signal,
-      runId: genId('run'),
-    });
-    const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
-    const running = events.findIndex((e, i) => i > start && e.agent?.patch?.status === 'running');
-    const end = events.findIndex((e, i) => i > running && e.agent?.type === 'action_end');
-    const before = events.slice(start, running).filter((e) => e.agent?.patch?.progress?.added).length;
-    const after = events.slice(running, end).filter((e) => e.agent?.patch?.progress?.added).length;
-    assert.ok(before >= 3, `a streaming provider is followed live (${before} updates before running)`);
-    assert.equal(after, 0, `nothing is replayed once the call was already streamed (${after} updates after running)`);
-  } finally {
-    await slow.close();
-  }
-});
-
-test('a stream squeezed inside the throttle window still counts up (replay covers what the throttle swallowed)', async () => {
-  // A provider can deliver every fragment within ~100ms: the 140ms throttle then suppresses every
-  // intermediate update, and without the replay the row would jump straight to its final number.
-  const fast = await startFakeLlm({ chunkDelayMs: 1 });
-  try {
-    const events = [];
-    const ws = new LocalWorkspace({ id: 'ws-fast', kind: 'local', name: 'fast', root: tmp('danav-fast-'), autoRun: true });
-    await ws.init();
-    await runAgent({
-      provider: { baseUrl: fast.baseUrl },
-      model: 'fake-slow',
-      history: [{ role: 'user', content: 'go' }],
-      workspace: ws,
-      runSearchTool: async () => ({}),
-      send: (e) => events.push(e),
-      signal: new AbortController().signal,
-      runId: genId('run'),
-    });
-    const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
-    const end = events.findIndex((e, i) => i > start && e.agent?.type === 'action_end');
-    const counts = events
-      .slice(start, end)
-      .filter((e) => e.agent?.patch?.progress?.added)
-      .map((e) => e.agent.patch.progress.added);
-    assert.ok(counts.length >= 3, `the count must climb in several steps, got ${counts}`);
-    assert.deepEqual([...counts].sort((a, b) => a - b), counts, `never backwards: ${counts}`);
-    assert.equal(counts.at(-1), events[end].agent.result.added, 'the replay lands on the number the result confirms');
-  } finally {
-    await fast.close();
-  }
-});
-
-test('the file really exists and grows ON DISK while it is being written', async () => {
-  // The counter in the chat is not an animation standing in for the write. Every time the chat
-  // reports "+N", the file on disk is read straight away and must already hold those lines.
-  const l = await getLlm();
-  const dir = tmp('danav-disk-');
-  const ws = new LocalWorkspace({ id: 'ws-disk', kind: 'local', name: 'disk', root: dir, autoRun: true });
-  await ws.init();
+test('live file progress follows streamed deltas and only reports lines actually on disk', async () => {
+  const stream = await startFakeLlm({ chunkDelayMs: 6 });
+  const dir = tmp('danav-stream-write-');
+  const ws = new LocalWorkspace({ id: 'ws-stream-write', kind: 'local', name: 'stream', root: dir, autoRun: true });
   const file = path.join(dir, 'big.js');
+  const events = [];
+  const samples = [];
+  try {
+    await ws.init();
+    const send = (event) => {
+      events.push(event);
+      const progress = event.agent?.patch?.progress || event.agent?.progress;
+      if (!progress) return;
+      let text = '';
+      try { text = fs.readFileSync(file, 'utf8'); } catch { /* a reported write must prove this wrong */ }
+      samples.push({ eventIndex: events.length - 1, progress, onDisk: countLines(text) });
+    };
+    await runAgent({
+      provider: { baseUrl: stream.baseUrl },
+      model: 'fake-stream-write',
+      history: [{ role: 'user', content: 'go' }],
+      workspace: ws,
+      runSearchTool: async () => ({}),
+      send,
+      signal: new AbortController().signal,
+      runId: genId('run'),
+    });
 
-  const samples = []; // { claimed, onDisk }
-  const send = (e) => {
-    const added = e.agent?.patch?.progress?.added;
-    if (added === undefined) return;
-    let onDisk = -1;
-    try {
-      const text = fs.readFileSync(file, 'utf8');
-      onDisk = text.endsWith('\n') ? text.split('\n').length - 1 : text.split('\n').length;
-    } catch {
-      onDisk = -1; // not created yet
+    const start = events.findIndex((e) => e.agent?.type === 'action_start' && e.agent.tool === 'write_file');
+    const running = events.findIndex((e, i) => i > start && e.agent?.patch?.status === 'running');
+    const end = events.findIndex((e, i) => i > running && e.agent?.type === 'action_end' && e.agent.result?.kind === 'write');
+    assert.ok(start >= 0 && running > start && end > running, 'the file action starts, runs, and completes');
+    assert.ok(samples.length >= 3, `a real stream produces several disk-backed updates (${samples.length})`);
+    assert.ok(samples.every((s) => s.eventIndex < running), 'no post-completion replay follows the streamed deltas');
+    const counts = samples.map((s) => s.progress.added);
+    assert.deepEqual([...counts].sort((a, b) => a - b), counts, 'disk-backed line counts never go backwards');
+    for (const sample of samples) {
+      assert.equal(sample.progress.added, sample.onDisk, `reported +${sample.progress.added}, disk has ${sample.onDisk}`);
+      assert.equal(sample.progress.removed, 0, 'a new file removes no lines');
+      assert.ok(Array.isArray(sample.progress.tail));
+      assert.equal(typeof sample.progress.added, 'number');
+      assert.equal(typeof sample.progress.removed, 'number');
     }
-    samples.push({ claimed: added, onDisk });
-  };
-
-  await runAgent({
-    provider: { baseUrl: l.baseUrl },
-    model: 'fake-burst',
-    history: [{ role: 'user', content: 'go' }],
-    workspace: ws,
-    runSearchTool: async () => ({}),
-    send,
-    signal: new AbortController().signal,
-    runId: genId('run'),
-  });
-
-  assert.ok(samples.length >= 3, `the write was reported in several steps: ${samples.length}`);
-  const created = samples.filter((s) => s.onDisk >= 0);
-  assert.ok(created.length >= 3, `the file existed while it was being written: ${JSON.stringify(samples)}`);
-  assert.ok(created.some((s) => s.onDisk > 0 && s.onDisk < 200), `it was caught half-written: ${JSON.stringify(created)}`);
-
-  for (let i = 1; i < created.length; i++) {
-    assert.ok(created[i].onDisk >= created[i - 1].onDisk, `the file never shrinks: ${JSON.stringify(created)}`);
+    const pathUpdate = events.slice(start, running).find((e) => e.agent?.patch?.args?.path || e.agent?.args?.path);
+    assert.ok(pathUpdate, 'the destination arrives before execution starts');
+    assert.equal(countLines(fs.readFileSync(file, 'utf8')), 200);
+    assert.equal(events[end].agent.result.added, 200, 'the final result confirms the completed file');
+  } finally {
+    await stream.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
-  // the claim never runs ahead of the real file (at most the one line still being typed)
-  for (const s of created) {
-    assert.ok(s.claimed <= s.onDisk + 1, `chat says +${s.claimed} but the file holds ${s.onDisk} lines`);
-  }
-  assert.equal(created.at(-1).onDisk >= 188, true, `it reaches (nearly) the full file: ${created.at(-1).onDisk}`);
-  assert.equal(fs.readFileSync(file, 'utf8').trimEnd().split('\n').length, 200, 'the file on disk ends up complete');
 });
 
 test('an overwrite diffs against what was REALLY there, not against the half-written draft', async () => {
@@ -580,7 +490,7 @@ test('an overwrite diffs against what was REALLY there, not against the half-wri
   const events = [];
   await runAgent({
     provider: { baseUrl: l.baseUrl },
-    model: 'fake-burst',
+    model: 'fake-burst-overwrite',
     history: [{ role: 'user', content: 'go' }],
     workspace: ws,
     runSearchTool: async () => ({}),
@@ -588,7 +498,7 @@ test('an overwrite diffs against what was REALLY there, not against the half-wri
     signal: new AbortController().signal,
     runId: genId('run'),
   });
-  const end = events.find((e) => e.agent?.type === 'action_end');
+  const end = events.find((e) => e.agent?.type === 'action_end' && e.agent.result?.kind === 'write');
   // the file on disk was our own draft when the tool ran; the numbers must still describe the
   // real before/after: 30 old lines replaced by 200 new ones.
   assert.deepEqual([end.agent.result.added, end.agent.result.removed], [200, 30]);
@@ -596,7 +506,6 @@ test('an overwrite diffs against what was REALLY there, not against the half-wri
 });
 
 test('a run stopped mid-write leaves no half-written file behind', async () => {
-  const l = await getLlm();
   const dir = tmp('danav-rollback-');
   const ws = new LocalWorkspace({ id: 'ws-rb', kind: 'local', name: 'rb', root: dir, autoRun: true });
   await ws.init();
@@ -618,50 +527,65 @@ test('a run stopped mid-write leaves no half-written file behind', async () => {
   };
 
   const first = stopOnFirstProgress();
-  await runAgent({
-    provider: { baseUrl: l.baseUrl },
-    model: 'fake-burst',
-    history: [{ role: 'user', content: 'go' }],
-    workspace: ws,
-    runSearchTool: async () => ({}),
-    send: first.send,
-    signal: first.signal,
-    runId: genId('run'),
-  });
-  assert.equal(fs.existsSync(file), false, 'a file that was never finished is removed again');
-
-  // and an interrupted overwrite gives back the file that was there
-  fs.writeFileSync(file, 'PRECIOUS\n');
-  const second = stopOnFirstProgress();
-  await runAgent({
-    provider: { baseUrl: l.baseUrl },
-    model: 'fake-burst',
-    history: [{ role: 'user', content: 'go' }],
-    workspace: ws,
-    runSearchTool: async () => ({}),
-    send: second.send,
-    signal: second.signal,
-    runId: genId('run'),
-  });
-  assert.equal(fs.readFileSync(file, 'utf8'), 'PRECIOUS\n', 'an interrupted overwrite is put back');
-});
-
-test('overwriting a file: "−" is live too (what really differs from the file on disk), with the tail of what is being typed', async () => {
-  const slow = await startFakeLlm({ chunkDelayMs: 12 });
+  const stream = await startFakeLlm({ chunkDelayMs: 6 });
   try {
-    const events = [];
-    const dir = tmp('danav-over-');
-    const ws = new LocalWorkspace({ id: 'ws-o', kind: 'local', name: 'o', root: dir, autoRun: true });
-    await ws.init();
-    const old = Array.from({ length: 30 }, (_, i) => `old line ${i + 1}`).join('\n') + '\n';
-    fs.writeFileSync(path.join(dir, 'index.html'), old);
     await runAgent({
-      provider: { baseUrl: slow.baseUrl },
-      model: 'fake-slow',
+      provider: { baseUrl: stream.baseUrl },
+      model: 'fake-stream-write',
       history: [{ role: 'user', content: 'go' }],
       workspace: ws,
       runSearchTool: async () => ({}),
-      send: (e) => events.push(e),
+      send: first.send,
+      signal: first.signal,
+      runId: genId('run'),
+    });
+    assert.equal(fs.existsSync(file), false, 'a file that was never finished is removed again');
+
+    // and an interrupted overwrite gives back the file that was there
+    const overwriteFile = path.join(dir, 'index.html');
+    fs.writeFileSync(overwriteFile, 'PRECIOUS\n');
+    const second = stopOnFirstProgress();
+    await runAgent({
+      provider: { baseUrl: stream.baseUrl },
+      model: 'fake-slow-overwrite',
+      history: [{ role: 'user', content: 'go' }],
+      workspace: ws,
+      runSearchTool: async () => ({}),
+      send: second.send,
+      signal: second.signal,
+      runId: genId('run'),
+    });
+    assert.equal(fs.readFileSync(overwriteFile, 'utf8'), 'PRECIOUS\n', 'an interrupted overwrite is put back');
+  } finally {
+    await stream.close();
+  }
+});
+
+test('overwriting a file: live counts and tail match the real disk contents', async () => {
+  const slow = await startFakeLlm({ chunkDelayMs: 12 });
+  try {
+    const events = [];
+    const samples = [];
+    const dir = tmp('danav-over-');
+    const file = path.join(dir, 'index.html');
+    const ws = new LocalWorkspace({ id: 'ws-o', kind: 'local', name: 'o', root: dir, autoRun: true });
+    await ws.init();
+    const old = Array.from({ length: 30 }, (_, i) => `old line ${i + 1}`).join('\n') + '\n';
+    fs.writeFileSync(file, old);
+    await runAgent({
+      provider: { baseUrl: slow.baseUrl },
+      model: 'fake-slow-overwrite',
+      history: [{ role: 'user', content: 'go' }],
+      workspace: ws,
+      runSearchTool: async () => ({}),
+      send: (e) => {
+        events.push(e);
+        const progress = e.agent?.patch?.progress || e.agent?.progress;
+        if (!progress) return;
+        let onDisk = null;
+        try { onDisk = fs.readFileSync(file, 'utf8'); } catch { /* asserted below */ }
+        samples.push({ progress, onDisk });
+      },
       signal: new AbortController().signal,
       runId: genId('run'),
     });
@@ -669,18 +593,30 @@ test('overwriting a file: "−" is live too (what really differs from the file o
     const end = events.findIndex((e) => e.agent?.type === 'action_end' && e.agent.result?.kind === 'write');
     const live = events.slice(start, end).map((e) => e.agent?.patch?.progress || e.agent?.progress).filter(Boolean);
     const removed = live.map((p) => p.removed).filter((n) => n !== undefined);
+    assert.ok(samples.length >= 3, `multiple disk-backed overwrite updates are reported (${samples.length})`);
+    for (const sample of samples) {
+      assert.notEqual(sample.onDisk, null, 'no progress is reported before a disk write lands');
+      const diskLines = splitLines(sample.onDisk);
+      const expected = liveDiffStats(splitLines(old), diskLines);
+      assert.deepEqual(
+        [sample.progress.added, sample.progress.removed],
+        [expected.added, expected.removed],
+        'each reported overwrite count is calculated from the original and current disk text',
+      );
+      assert.deepEqual(sample.progress.tail, diskLines.slice(-6), 'the visible tail comes from the current disk text');
+    }
     assert.ok(removed.length >= 3, `"−" is reported while writing (${removed})`);
     assert.ok(removed.every((n) => n <= 30), 'never more than the old file has');
     assert.ok(removed.at(-1) > removed[0], 'and it grows as more of the old file is replaced');
-    assert.ok(live.some((p) => p.tail?.length >= 2 && /part/.test(p.tail.join('\n'))), 'the last lines being typed are streamed');
+    assert.ok(live.some((p) => p.tail?.length >= 2 && /part/.test(p.tail.join('\n'))), 'the tail comes from lines already written to disk');
     const final = events[end].agent.result;
     assert.equal(final.created, false);
     assert.equal(final.removed, 30, 'the final numbers are the exact diff');
     assert.equal(events[end].agent.result.added, countLines(fs.readFileSync(path.join(dir, 'index.html'), 'utf8')));
-    // the final numbers were also shown BEFORE the tool ran (the throttle can swallow the last lines)
+    // The final force flush writes only lines already present in the completed stream arguments.
     const running = events.findIndex((e, i) => i > start && e.agent?.patch?.status === 'running');
     const lastLive = events.slice(start, running + 1).map((e) => e.agent?.patch?.progress).filter(Boolean).at(-1);
-    assert.ok(lastLive.added >= final.added - 1, `the last live "+" (${lastLive.added}) matches the final (${final.added})`);
+    assert.deepEqual([lastLive.added, lastLive.removed], [final.added, final.removed], 'the final disk snapshot matches the tool result');
   } finally {
     await slow.close();
   }
@@ -954,6 +890,32 @@ test('context pruning: old tool output and file bodies are elided first; whole r
   assert.ok(withMemory.includes(pinnedMemory), 'automatic task memory survives context pruning');
   assert.ok(withMemory.some((m) => m.role === 'user' && m.content === 'current request'), 'the active request survives beside the memory');
   assertConsistentTranscript(withMemory);
+});
+
+test('compaction keeps exact inspected ranges and whether a file was created or edited', () => {
+  const messages = [{ role: 'system', content: 'rules' }, { role: 'user', content: 'continue the auth fix' }];
+  const filler = 'ordinary tool output '.repeat(180);
+  const actions = [
+    ['read_file', { path: 'src/auth.ts', ranges: [[2, 8], [40, 50]] }, 'src/auth.ts — 100 lines; 2 chunks: 2-8, 40-50\n' + filler],
+    ['edit_file', { path: 'src/auth.ts', old_string: 'old', new_string: 'new' }, 'Edited src/auth.ts: 1 replacement, +1 −1 (L12).\n' + filler],
+    ['write_file', { path: 'src/created.ts', content: 'new file' }, 'Created src/created.ts (20 lines).\n' + filler],
+    ...Array.from({ length: 5 }, (_, i) => ['read_file', { path: `src/other${i}.ts`, start_line: 1, end_line: 20 }, `src/other${i}.ts — lines 1-20 of 100\n${filler}`]),
+  ];
+  for (const [i, [name, args, output]] of actions.entries()) {
+    const id = `range-${i}`;
+    messages.push({
+      role: 'assistant', content: null,
+      tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+    });
+    messages.push({ role: 'tool', tool_call_id: id, content: output });
+  }
+
+  const compacted = pruneMessages(messages, 8000);
+  assert.ok(compacted.droppedRounds > 0);
+  const digest = worklogLines(messages).join('\n');
+  assert.match(digest, /read_file src\/auth\.ts.*L2-L8, L40-L50/, 'the exact disjoint read ranges survive compaction');
+  assert.match(digest, /edit_file src\/auth\.ts.*Edited src\/auth\.ts.*L12/, 'an edit and its changed line survive');
+  assert.match(digest, /write_file src\/created\.ts.*Created src\/created\.ts/, 'creation is not reduced to an ambiguous line count');
 });
 
 test('compaction keeps the decisive tail diagnostic instead of the first terminal lines', () => {
@@ -1233,6 +1195,39 @@ test('the run refuses to delete what it has never looked at, and says what to lo
   // A refusal is guidance, not a failure streak: the run finishes normally.
   assert.equal(agentEvents(events, 'run_end')[0].stopReason, 'completed');
   assertConsistentTranscript(requests.at(-1).messages);
+});
+
+test('persist: web search keeps only a few actual publisher hosts', () => {
+  const block = normalizeAgentBlockForDisk({
+    id: 'b-web', type: 'action',
+    action: {
+      id: 'a-web', tool: 'web_search', status: 'done',
+      result: {
+        kind: 'web_search',
+        markdown: 'x'.repeat(20_000),
+        sources: [
+          { domain: 'www.docs.example', name: 'Docs' },
+          { domain: 'docs.example', name: 'Duplicate' },
+          { domain: 'news.example', name: 'News' },
+          { domain: 'unsafe.local', name: 'Local' },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(block.action.result.sources, [
+    { domain: 'docs.example', name: 'Docs' },
+    { domain: 'news.example', name: 'News' },
+  ]);
+  assert.equal(block.action.result.markdown.length, 9000, 'search details are persisted as a bounded excerpt');
+
+  const page = normalizeAgentBlockForDisk({
+    id: 'b-page', type: 'action',
+    action: {
+      id: 'a-page', tool: 'fetch_url', status: 'done',
+      result: { kind: 'fetch', url: 'https://docs.example/guide', title: 'Guide', markdown: 'p'.repeat(20_000) },
+    },
+  });
+  assert.equal(page.action.result.markdown.length, 12000, 'fetched Markdown remains readable after reload');
 });
 
 test('persist: unfinished actions are settled as interrupted; everything is bounded', () => {
@@ -1823,7 +1818,7 @@ test('the prompt arrives already knowing the project, and the request it has to 
     assert.match(system, /# Files this request is probably about/, 'and the files the request is about');
     assert.match(system, /src\/theme\.ts[\s\S]{0,200}toggleTheme/, 'the ranked file names the symbol that matched');
     assert.match(system, /Find code with the index, not with your eyes/, 'the prompt teaches the index tools');
-    assert.match(system, /Never read the same thing twice/, 'and the no-repeat rule');
+    assert.match(system, /Reuse the work already done/, 'the prompt tells the agent to use its work log instead of starting over');
     assert.match(system, /Edit by the safest handle you have/, 'edits get their recovery paths named');
     assert.match(system, /# Workspace right now\n[\s\S]*the code index above lists what is in the folders/, 'a rich index replaces the nested listing instead of repeating it');
   } finally {

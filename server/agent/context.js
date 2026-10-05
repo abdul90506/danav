@@ -11,6 +11,16 @@ const FIXED_GUIDANCE = [
   '.windsurfrules',
   '.github/copilot-instructions.md',
 ];
+const EXPECTED_CONTEXT_ERRORS = new Set(['not_found', 'not_dir', 'is_dir', 'outside_workspace', 'denied', 'too_large']);
+
+async function retryUnexpected(read) {
+  try {
+    return await read();
+  } catch (err) {
+    if (EXPECTED_CONTEXT_ERRORS.has(String(err?.code || ''))) throw err;
+    return read(); // exactly one retry for a transient workspace failure
+  }
+}
 
 function isGuidancePath(value) {
   const p = String(value || '').replace(/\\/g, '/').replace(/^\.\//, '');
@@ -36,7 +46,7 @@ export async function collectProjectGuidance(workspace, redact = (s) => s) {
 
   // Nested AGENTS.md applies to code in its subtree, as in common coding agents.
   try {
-    const found = await workspace.findFiles({ pattern: 'AGENTS.md', path: workspace.root, maxResults: 80 });
+    const found = await retryUnexpected(() => workspace.findFiles({ pattern: 'AGENTS.md', path: workspace.root, maxResults: 80 }));
     for (const p of found.files || []) if (isGuidancePath(p)) candidates.add(p);
   } catch {
     /* a missing/unreadable index must not stop the run */
@@ -45,10 +55,12 @@ export async function collectProjectGuidance(workspace, redact = (s) => s) {
   // Cursor and GitHub Copilot keep rule files in these well-known folders.
   for (const [folder, suffix] of [['.cursor/rules', '.mdc'], ['.github/instructions', '.instructions.md']]) {
     try {
-      const dir = typeof workspace.safePath === 'function' ? await workspace.safePath(folder) : workspace.resolve(folder);
-      if ((await workspace.stat(dir)).type !== 'dir') continue;
-      const listing = await workspace.listTree(dir, { depth: 3, maxEntries: 100 });
-      for (const entry of listing.entries || []) {
+      const entries = await retryUnexpected(async () => {
+        const dir = typeof workspace.safePath === 'function' ? await workspace.safePath(folder) : workspace.resolve(folder);
+        const listing = await workspace.listTree(dir, { depth: 3, maxEntries: 100 });
+        return Array.isArray(listing?.entries) ? listing.entries : [];
+      });
+      for (const entry of entries) {
         const rel = `${folder}/${entry.path}`;
         if (entry.type === 'file' && rel.endsWith(suffix) && isGuidancePath(rel)) candidates.add(rel);
       }
@@ -63,10 +75,10 @@ export async function collectProjectGuidance(workspace, redact = (s) => s) {
     if (chunks.length >= MAX_GUIDANCE_FILES || used >= MAX_GUIDANCE_CHARS) break;
     if (!isGuidancePath(relative)) continue;
     try {
-      const abs = typeof workspace.safePath === 'function' ? await workspace.safePath(relative) : workspace.resolve(relative);
-      const stat = await workspace.stat(abs);
-      if (stat.type !== 'file' || stat.size > MAX_GUIDANCE_FILE_BYTES) continue;
-      const read = await workspace.readText(abs, { maxBytes: MAX_GUIDANCE_FILE_BYTES });
+      const read = await retryUnexpected(async () => {
+        const abs = typeof workspace.safePath === 'function' ? await workspace.safePath(relative) : workspace.resolve(relative);
+        return workspace.readText(abs, { maxBytes: MAX_GUIDANCE_FILE_BYTES });
+      });
       if (read.binary) continue;
       const remaining = MAX_GUIDANCE_CHARS - used;
       const clean = String(redact(read.text || '')).trim();

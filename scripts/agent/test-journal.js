@@ -63,6 +63,7 @@ test('automatic task-step memory is compact, redacted, model-summarized in the b
   await withDataDir((root) => {
     const taskKey = taskKeyFor('assistant-message-private-task-id');
     let summaryInput = null;
+    let liveMemory = '';
     const state = {
       plan: [
         { content: 'Trace the authentication guard', status: 'completed' },
@@ -78,6 +79,7 @@ test('automatic task-step memory is compact, redacted, model-summarized in the b
       provider: { id: 'summary-provider', baseUrl: 'https://summary.test/v1' },
       model: 'compact-summary',
       redact: (text) => String(text).replaceAll('provider-secret-value', '[REDACTED]'),
+      onUpdate: (text) => { liveMemory = text; },
       debounceMs: 60_000,
       summarize: async (input) => {
         summaryInput = input;
@@ -95,7 +97,19 @@ test('automatic task-step memory is compact, redacted, model-summarized in the b
     memory.capture({
       name: 'read_file',
       args: { path: 'src/auth.ts' },
-      result: { ok: true, output: 'PRIVATE FILE BODY MUST NOT BE STORED', ui: { kind: 'read', path: 'src/auth.ts', startLine: 1, endLine: 40 } },
+      result: { ok: true, output: 'PRIVATE FILE BODY MUST NOT BE STORED', ui: { kind: 'read', path: 'src/auth.ts', startLine: 1, endLine: 80, ranges: [[1, 40], [70, 80]], totalLines: 120 } },
+      state,
+    });
+    memory.capture({
+      name: 'write_file',
+      args: { path: 'src/new.ts' },
+      result: { ok: true, ui: { kind: 'write', path: 'src/new.ts', created: true, added: 4, removed: 0 } },
+      state,
+    });
+    memory.capture({
+      name: 'edit_file',
+      args: { path: 'src/auth.ts' },
+      result: { ok: true, ui: { kind: 'edit', path: 'src/auth.ts', added: 1, removed: 1, ranges: [[12, 12]] } },
       state,
     });
     memory.capture({
@@ -109,7 +123,10 @@ test('automatic task-step memory is compact, redacted, model-summarized in the b
     assert.equal(provisional.runId, 'run-task-memory');
     assert.equal(provisional.memories.length, 1);
     assert.equal(provisional.memories[0].source, 'local', 'a useful fallback is written before the model responds');
-    assert.match(provisional.memories[0].summary, /src\/auth\.ts/);
+    assert.match(provisional.memories[0].steps.join(' '), /Read src\/auth\.ts at L1-L40, L70-L80/);
+    assert.match(provisional.memories[0].steps.join(' '), /Created src\/new\.ts/);
+    assert.match(provisional.memories[0].steps.join(' '), /Edited src\/auth\.ts.*L12/);
+    assert.match(liveMemory, /Read src\/auth\.ts at L1-L40, L70-L80/, 'the current run gets the exact ranges without waiting for a summary model');
 
     return memory.flush().then(() => {
       const merged = recordRun('ws-task-memory', {
@@ -122,7 +139,10 @@ test('automatic task-step memory is compact, redacted, model-summarized in the b
       assert.equal(readRunJournal('ws-task-memory').length, 1, 'the final run updates the same checkpoint instead of duplicating it');
       assert.equal(run.memories[0].source, 'model');
       assert.match(run.memories[0].summary, /focused check passes/);
-      assert.deepEqual(run.memories[0].files, ['src/auth.ts']);
+      assert.ok(run.memories[0].files.includes('src/auth.ts'));
+      assert.ok(run.memories[0].steps.some((step) => /Read src\/auth\.ts at L1-L40, L70-L80/.test(step)), 'model summarization preserves exact read ranges');
+      assert.ok(run.memories[0].steps.some((step) => /Created src\/new\.ts/.test(step)), 'file creation remains explicit after summarization');
+      assert.ok(run.memories[0].steps.some((step) => /Edited src\/auth\.ts.*L12/.test(step)), 'edit locations remain explicit after summarization');
       assert.equal(run.memories[0].facts.some((fact) => /ACCESS_TOKEN/.test(fact)), false);
       assert.match(JSON.stringify(summaryInput), /src\/auth\.ts/);
       assert.doesNotMatch(JSON.stringify(summaryInput), /PRIVATE FILE BODY|assistant-message-private-task-id|provider-secret-value/);
@@ -130,6 +150,10 @@ test('automatic task-step memory is compact, redacted, model-summarized in the b
       const retrieved = recentRunsForPrompt('ws-task-memory', 'authentication guard protected routing', 1800, 6, { taskKey: taskKeyFor('different-task') });
       assert.match(retrieved, /Earlier task memory/);
       assert.match(retrieved, /focused check passes/);
+      const resumed = recentRunsForPrompt('ws-task-memory', 'continue', 5000, 6, { taskKey, resume: true });
+      assert.match(resumed, /Read src\/auth\.ts at L1-L40, L70-L80/);
+      assert.match(resumed, /Created src\/new\.ts/);
+      assert.match(resumed, /Edited src\/auth\.ts.*L12/);
       const unrelated = recentRunsForPrompt('ws-task-memory', 'landing page color palette', 1800, 6, { taskKey: taskKeyFor('another-task') });
       assert.equal(unrelated, '', 'unrelated tasks do not inherit the newest checkpoint');
 
@@ -151,6 +175,56 @@ test('automatic task-step memory is compact, redacted, model-summarized in the b
         assert.equal(savedFallback.memories[0].source, 'local', 'provider failures leave the local task note usable');
       });
     });
+  });
+});
+
+test('finishing a run cancels background summaries and keeps the final local checkpoint', async () => {
+  await withDataDir(async () => {
+    let startedResolve;
+    const started = new Promise((resolve) => { startedResolve = resolve; });
+    let calls = 0;
+    const memory = createTaskMemory({
+      workspaceId: 'ws-memory-finish',
+      runId: 'run-memory-finish',
+      taskKey: taskKeyFor('finish-before-summary'),
+      debounceMs: 0,
+      summarize: async ({ signal }) => {
+        calls++;
+        startedResolve();
+        return new Promise((resolve) => {
+          const finishLate = () => setTimeout(() => resolve({
+            summary: 'late model summary must not overwrite the local checkpoint',
+            facts: ['late result'], decisions: [], errors: [], files: [], next: '',
+          }), 10);
+          if (signal.aborted) finishLate();
+          else signal.addEventListener('abort', finishLate, { once: true });
+        });
+      },
+    });
+    const state = {
+      plan: [{ content: 'Keep the final local note', status: 'in_progress' }],
+      findings: ['The local checkpoint survives provider cancellation.'],
+    };
+    memory.capture({
+      name: 'edit_file',
+      args: { path: 'src/thing.ts' },
+      result: { ok: true, output: 'source omitted', ui: { path: 'src/thing.ts', added: 1, removed: 0 } },
+      state,
+    });
+    // The production debounce timer is intentionally unref'ed; keep this unit
+    // test's event loop alive while it flushes the batch and starts the fake model.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await started; // ensure the model summary is in flight before the run ends
+    const before = readRunJournal('ws-memory-finish')[0].memories[0];
+    assert.equal(before.source, 'local');
+
+    memory.finish(state);
+    await memory.flush();
+    const after = readRunJournal('ws-memory-finish')[0].memories[0];
+    assert.equal(after.source, 'local', 'a late model response never replaces the local record');
+    assert.match(after.facts[0], /local checkpoint survives/);
+    assert.doesNotMatch(after.summary, /late model summary/);
+    assert.equal(calls, 1);
   });
 });
 

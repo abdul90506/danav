@@ -54,6 +54,25 @@ test('a finished tool keeps its outcome', () => {
   assert.strictEqual(out[1].ok, false, 'an honest failure must survive the round trip');
 });
 
+test('real search source hosts survive persistence without duplicates or unsafe URLs', () => {
+  const out = normalizeToolExecutionsForDisk([
+    {
+      id: 't1', name: 'web_search', status: 'done',
+      sources: [
+        { domain: 'www.docs.example', name: 'Docs' },
+        { domain: 'docs.example', name: 'Duplicate' },
+        { domain: 'news.example', name: 'News' },
+        { domain: 'localhost', name: 'Local' },
+        { domain: 'javascript:alert(1)', name: 'Bad' },
+      ],
+    },
+  ]);
+  assert.deepStrictEqual(out[0].sources, [
+    { domain: 'docs.example', name: 'Docs' },
+    { domain: 'news.example', name: 'News' },
+  ]);
+});
+
 test('images are preserved so the gallery can be redrawn', () => {
   const out = normalizeToolExecutionsForDisk([
     { id: 't1', name: 'image_search', status: 'done', images: [{ url: 'a' }, { url: 'b' }] },
@@ -61,11 +80,18 @@ test('images are preserved so the gallery can be redrawn', () => {
   assert.strictEqual(out[0].images.length, 2);
 });
 
-test('detail is truncated rather than stored verbatim', () => {
+test('search and page Markdown stay readable but remain bounded on disk', () => {
   const out = normalizeToolExecutionsForDisk([
-    { id: 't1', name: 'fetch_url', status: 'done', detail: 'x'.repeat(50000) },
+    { id: 't1', name: 'web_search', status: 'done', detail: 's'.repeat(50000) },
+    {
+      id: 't2', name: 'fetch_url', status: 'done', detail: 'p'.repeat(50000),
+      url: 'https://docs.example/guide', title: 'Guide',
+    },
   ]);
-  assert.strictEqual(out[0].detail.length, 600, 'page text must not bloat the store');
+  assert.strictEqual(out[0].detail.length, 9000, 'search results should have a bounded readable preview');
+  assert.strictEqual(out[1].detail.length, 12000, 'fetched Markdown should remain readable after reload');
+  assert.strictEqual(out[1].url, 'https://docs.example/guide');
+  assert.strictEqual(out[1].title, 'Guide');
 });
 
 test('the trail is capped so one turn cannot grow without bound', () => {

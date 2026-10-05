@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
-import { checkAction, createLedger, observeFile, observeListing, observeOwned, removalTargets } from '../../server/agent/policy.js';
+import { checkAction, createLedger, fileVersion, observeFile, observeFileRange, observeListing, observeOwned, removalTargets } from '../../server/agent/policy.js';
 
 const { test } = globalThis.__agentTest;
 
@@ -39,7 +39,7 @@ async function setup(files) {
     const { entries, truncated } = await ws.listTree(abs, { depth, maxEntries: 300 });
     observeListing(ws, state, abs, entries, { truncated, depth });
   };
-  const read = async (rel) => observeFile(state, await ws.safePath(rel));
+  const read = async (rel) => observeFile(state, await ws.safePath(rel), { complete: true });
   return { ws, root, state, gate, list, read };
 }
 
@@ -149,6 +149,110 @@ test('a generated folder needs one look, not a tour of every package', async () 
   await list('node_modules');
   assert.equal(await gate('run_command', remove('node_modules')), null);
   assert.equal(await gate('run_command', { command: 'rm -rf node_modules' }), null);
+});
+
+test('overwriting or appending to an existing file requires its contents, not just its name', async () => {
+  const { gate, root, list, read, state, ws } = await setup({ 'src/config.json': '{\n  "keep": true\n}\n' });
+  try {
+    const abs = await ws.safePath('src/config.json');
+    const original = fs.readFileSync(abs, 'utf8');
+    const forged = await gate('write_file', { path: 'src/config.json', content: 'forged\n', _originalExisted: false });
+    assert.ok(forged && !forged.allow, 'model-supplied internal stream metadata cannot bypass the read gate');
+    assert.equal(fs.readFileSync(abs, 'utf8'), original);
+    const first = await gate('write_file', { path: 'src/config.json', content: '{"replace": true}\n' });
+    assert.ok(first && !first.allow, 'an uninspected overwrite is stopped before it runs');
+    assert.match(first.message, /complete contents.*read_file/);
+    assert.equal(fs.readFileSync(abs, 'utf8'), original);
+
+    await list('src');
+    assert.ok(await gate('write_file', { path: 'src/config.json', content: 'replacement\n' }), 'a listing shows the path, not its contents');
+    assert.ok(await gate('append_file', { path: 'src/config.json', content: 'more\n' }), 'append is guarded too');
+
+    await read('src/config.json');
+    assert.equal(await gate('write_file', { path: 'src/config.json', content: 'replacement\n' }), null);
+    assert.equal(await gate('append_file', { path: 'src/config.json', content: 'more\n' }), null);
+
+    const generated = await ws.safePath('src/generated.txt');
+    observeOwned(state, generated);
+    assert.equal(await gate('append_file', { path: 'src/generated.txt', content: 'more\n' }), null, 'a file this run created is already known');
+
+    const streamed = await ws.safePath('src/streamed.txt');
+    fs.writeFileSync(streamed, 'partial live stream\n');
+    assert.ok(await gate('write_file', { path: 'src/streamed.txt', _originalExisted: false }), 'internal metadata alone cannot bypass inspection');
+    observeOwned(state, streamed); // the real live writer records ownership after its first successful write
+    assert.equal(await gate('write_file', { path: 'src/streamed.txt', _originalExisted: false }), null, 'an actually created streaming file is already owned');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a versioned read stops authorizing whole-file writes after the file changes', async () => {
+  const original = 'setting = original\n';
+  const { gate, root, state, ws } = await setup({ 'settings.conf': original });
+  try {
+    const abs = await ws.safePath('settings.conf');
+    observeFile(state, abs, { complete: true, version: fileVersion(original) });
+    fs.writeFileSync(abs, 'setting = edited elsewhere\n');
+
+    const stale = await gate('write_file', { path: 'settings.conf', content: 'replacement\n' });
+    assert.ok(stale && !stale.allow, 'a complete but stale read does not authorize replacement');
+    assert.match(stale.message, /changed after the version you read/);
+    const staleAppend = await gate('append_file', { path: 'settings.conf', content: 'more\n' });
+    assert.ok(staleAppend && !staleAppend.allow, 'a stale complete read cannot authorize an append either');
+    assert.equal(fs.readFileSync(abs, 'utf8'), 'setting = edited elsewhere\n', 'the external change remains untouched');
+
+    const current = fs.readFileSync(abs, 'utf8');
+    observeFile(state, abs, { complete: true, version: fileVersion(current) });
+    assert.equal(await gate('write_file', { path: 'settings.conf', content: 'replacement\n' }), null, 'reading the new version restores permission');
+    assert.equal(await gate('append_file', { path: 'settings.conf', content: 'more\n' }), null, 'the matching current version also permits an append');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('outlines and partial ranges do not authorize a full overwrite; complete ranges do', async () => {
+  const original = 'one\ntwo\nthree\n';
+  const { gate, root, state, ws } = await setup({ 'src/large.txt': original });
+  try {
+    const abs = await ws.safePath('src/large.txt');
+    const version1 = fileVersion(original);
+    observeFile(state, abs, { version: version1 }); // file_outline sees structure, not the full body
+    assert.ok(await gate('write_file', { path: 'src/large.txt', content: 'replacement\n' }));
+
+    assert.equal(observeFileRange(state, abs, { startLine: 1, endLine: 1, totalLines: 3, version: version1 }), false);
+    assert.ok(await gate('append_file', { path: 'src/large.txt', content: 'more\n' }), 'a partial read is not complete contents');
+    assert.equal(observeFileRange(state, abs, { startLine: 2, endLine: 3, totalLines: 3, version: version1 }), true);
+    assert.equal(await gate('write_file', { path: 'src/large.txt', content: 'replacement\n' }), null, 'all visible ranges together cover the file');
+
+    // A changed file invalidates old coverage; ranges from two versions cannot combine.
+    const changed = 'ONE\ntwo\nthree\n';
+    fs.writeFileSync(abs, changed);
+    const version2 = fileVersion(changed);
+    assert.equal(observeFileRange(state, abs, { startLine: 1, endLine: 1, totalLines: 3, version: version2 }), false);
+    assert.ok(await gate('write_file', { path: 'src/large.txt', content: 'stale replacement\n' }));
+    assert.equal(observeFileRange(state, abs, { startLine: 2, endLine: 3, totalLines: 3, version: version2 }), true);
+    assert.equal(await gate('append_file', { path: 'src/large.txt', content: 'more\n' }), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a truncated recursive listing cannot certify a whole folder as inspected', async () => {
+  const files = Object.fromEntries(Array.from({ length: 1105 }, (_, i) => [`large/f${String(i).padStart(4, '0')}.txt`, 'x\n']));
+  const { gate, root, state, ws } = await setup(files);
+  try {
+    const abs = await ws.safePath('large');
+    const listing = await ws.listTree(abs, { depth: 1, maxEntries: 1000 });
+    assert.equal(listing.truncated, true, 'the fixture exceeds the gate listing cap');
+    observeListing(ws, state, abs, listing.entries, { truncated: listing.truncated, depth: 1 });
+
+    const blocked = await gate('run_command', remove('large'));
+    assert.ok(blocked && !blocked.allow, 'the omitted tail is not silently treated as inspected');
+    assert.match(blocked.message, /listing came back incomplete/);
+    assert.ok(exists(path.join(root, 'large/f1104.txt')));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('a tree too big for the automatic look is refused, with the reason', async () => {

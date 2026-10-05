@@ -352,6 +352,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   agentControls,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRootRef = useRef<HTMLDivElement>(null);
   const attachTriggerRef = useRef<HTMLButtonElement>(null);
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
   const thinkingTriggerRef = useRef<HTMLButtonElement>(null);
@@ -370,7 +371,6 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   const processQueueRef = useRef<Promise<void>>(Promise.resolve());
   /** Why a dropped or picked file did not attach — shown once above the composer. */
   const [attachmentNotice, setAttachmentNotice] = useState('');
-  const [isInputExpanded, setIsInputExpanded] = useState(false);
   /** Docked controls bar: hidden until you reach for the arrow, click to pin. */
   const [controlsPinned, setControlsPinned] = useState(false);
 
@@ -564,6 +564,12 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
    * hide the real content height.
    */
   const lastDraftLengthRef = useRef(0);
+  const publishComposerOverflow = () => {
+    const height = composerRootRef.current?.getBoundingClientRect().height ?? 96;
+    const extra = Math.max(0, height - 96);
+    if (extra > 0) document.documentElement.style.setProperty('--danav-composer-extra', `${Math.round(extra)}px`);
+    else document.documentElement.style.removeProperty('--danav-composer-extra');
+  };
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -584,28 +590,41 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     el.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden';
 
     /**
-     * Tell the transcript how much of it the composer is covering.
-     *
-     * The composer floats above the messages, and a long prompt makes it taller
-     * than the space the layout reserved — past a line or two its top edge starts
-     * hiding the end of the answer. Publishing the overflow as a CSS variable (not
-     * React state) keeps that in the browser's layout pass instead of re-rendering
-     * the whole chat on every keystroke.
+     * Publish the actual composer's overflow (including its controls/attachments)
+     * without React state, so the transcript clears the floating panel smoothly.
      */
-    const extra = Math.max(0, targetHeight - 96);
-    const root = document.documentElement;
-    if (extra > 0) root.style.setProperty('--danav-composer-extra', `${Math.round(extra)}px`);
-    else root.style.removeProperty('--danav-composer-extra');
+    publishComposerOverflow();
 
-    /**
-     * The two layouts give the text different widths (the pill keeps the send
-     * button beside it), so a prompt sitting exactly on the boundary would flip
-     * the composer back and forth — each flip re-wrapping the text and moving the
-     * box. So: expand as soon as the text no longer fits one line, and only go
-     * back to the pill when the box is empty again.
-     */
-    setIsInputExpanded((wasExpanded) => draft.trim().length > 0 && (wasExpanded || contentHeight > minHeight + 6));
   }, [draft, isCentered, draftResetKey]);
+
+  // A docked preview or a narrow viewport can change the chat width without
+  // changing the draft. Re-measure only on width changes so wrapped text never
+  // gets clipped, without measuring again for the textarea's own height updates.
+  useEffect(() => {
+    const el = textareaRef.current;
+    const parent = el?.parentElement;
+    const root = composerRootRef.current;
+    if (!el || !parent || !root || typeof ResizeObserver === 'undefined') return;
+
+    const minHeight = isCentered ? 44 : 32;
+    const maxHeight = isCentered ? 220 : 160;
+    let previousWidth = parent.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => {
+      const width = parent.getBoundingClientRect().width;
+      if (Math.abs(width - previousWidth) >= 1) {
+        previousWidth = width;
+        el.style.height = 'auto';
+        const contentHeight = el.scrollHeight;
+        const targetHeight = Math.min(Math.max(contentHeight, minHeight), maxHeight);
+        el.style.height = `${targetHeight}px`;
+        el.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden';
+      }
+      // Also tracks control reveal, attachment chips and the composer itself.
+      publishComposerOverflow();
+    });
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [isCentered]);
 
   /**
    * The app bumps `draftResetKey` when the draft must go: it sent the message, or
@@ -626,7 +645,6 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     setPendingFileCount(0);
     setAttachments([]);
     setAttachmentNotice('');
-    setIsInputExpanded(false);
     setDraft('');
     lastDraftLengthRef.current = 0;
     document.documentElement.style.removeProperty('--danav-composer-extra');
@@ -680,7 +698,6 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
       textareaRef.current.style.overflowY = 'hidden';
     }
     document.documentElement.style.removeProperty('--danav-composer-extra');
-    setIsInputExpanded(false);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -893,7 +910,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
               </div>
 
               {/* Think Selector Button */}
-              <div className="relative" ref={thinkingMenuRef}>
+              <div className="relative shrink-0" ref={thinkingMenuRef}>
                 <button
                   ref={thinkingTriggerRef}
                   type="button"
@@ -901,15 +918,15 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                     setThinkingDropdownOpen((open) => !open);
                     setModelDropdownOpen(false);
                   }}
-                  aria-label={`Reasoning depth: ${currentDisplayThinking}`}
+                  aria-label={`Reasoning depth: ${thinkingLevel}`}
                   aria-expanded={thinkingDropdownOpen}
                   aria-controls="thinking-options"
-                  className="flex items-center gap-1 h-7 px-2 text-[12px] rounded-lg font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer"
-                  title="Reasoning Depth"
+                  className="flex shrink-0 items-center gap-1 whitespace-nowrap h-7 px-2 text-[12px] rounded-lg font-medium text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer"
+                  title={`Reasoning depth: ${thinkingLevel}`}
                 >
                   <Brain className="w-3 h-3 text-zinc-400 shrink-0" />
                   <span>Think</span>
-                  <span className="text-[10px] text-zinc-400 opacity-80">
+                  <span className="shrink-0 text-[10px] text-zinc-400 opacity-80">
                     ({currentDisplayThinking})
                   </span>
                   <ChevronDown className="w-2.5 h-2.5 text-zinc-400 opacity-70 shrink-0" />
@@ -927,7 +944,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                       setThinkingDropdownOpen(false);
                       thinkingTriggerRef.current?.focus({ preventScroll: true });
                     }}
-                    className="absolute left-0 bottom-full mb-1.5 z-50 w-48 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in zoom-in-95 duration-100"
+                    className="absolute right-0 bottom-full mb-1.5 z-50 w-48 max-w-[calc(100vw-2rem)] py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in zoom-in-95 duration-100"
                   >
                     <div className="px-2.5 py-1 text-[10px] uppercase font-semibold text-zinc-400">
                       Reasoning Depth
@@ -1064,7 +1081,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   );
 
   const thinkControl = (
-    <div className="relative" ref={thinkingMenuRef}>
+    <div className="relative shrink-0" ref={thinkingMenuRef}>
       <button
         ref={thinkingTriggerRef}
         type="button"
@@ -1072,15 +1089,15 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
           setThinkingDropdownOpen((open) => !open);
           setModelDropdownOpen(false);
         }}
-        aria-label={`Reasoning depth: ${currentDisplayThinking}`}
+        aria-label={`Reasoning depth: ${thinkingLevel}`}
         aria-expanded={thinkingDropdownOpen}
         aria-controls="thinking-options"
-        className="flex items-center gap-1 h-7 px-2 text-[11px] font-medium rounded-full text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer"
-        title="Reasoning Depth"
+        className="flex shrink-0 items-center gap-1 whitespace-nowrap h-7 px-1.5 sm:px-2 text-[11px] font-medium rounded-full text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors bg-transparent border-0 cursor-pointer"
+        title={`Reasoning depth: ${thinkingLevel}`}
       >
         <Brain className="w-3 h-3 text-zinc-400 shrink-0" />
         <span>Think</span>
-        <span className="text-[10px] text-zinc-400 opacity-80 hidden sm:inline">
+        <span className="shrink-0 text-[10px] text-zinc-400 opacity-80">
           ({currentDisplayThinking})
         </span>
         <ChevronDown className="w-2.5 h-2.5 text-zinc-400 opacity-70 shrink-0" />
@@ -1098,7 +1115,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
             setThinkingDropdownOpen(false);
             thinkingTriggerRef.current?.focus({ preventScroll: true });
           }}
-          className="absolute right-0 bottom-full mb-2 z-50 w-48 py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in zoom-in-95 duration-100"
+          className="absolute right-0 bottom-full mb-2 z-50 w-48 max-w-[calc(100vw-2rem)] py-1 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs animate-in fade-in zoom-in-95 duration-100"
         >
           <div className="px-2.5 py-1 text-[10px] uppercase font-semibold text-zinc-400">
             Reasoning Depth
@@ -1172,13 +1189,13 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
       placeholder={placeholder}
       disabled={disabled}
       rows={1}
-      style={{ outline: 'none' }}
-      className="w-full resize-none bg-transparent leading-relaxed text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 border-none outline-none focus:outline-none focus-visible:outline-none ring-0 focus:ring-0 focus-visible:ring-0 shadow-none text-[14px] sm:text-[14.5px] py-1 min-h-[32px] max-h-[160px] panel-scroll"
+      style={{ outline: 'none', maxHeight: `${isCentered ? 220 : 160}px` }}
+      className="w-full resize-none bg-transparent leading-relaxed text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 border-none outline-none focus:outline-none focus-visible:outline-none ring-0 focus:ring-0 focus-visible:ring-0 shadow-none text-[14px] sm:text-[14.5px] py-1 min-h-[32px] panel-scroll transition-[height] duration-100 ease-out motion-reduce:transition-none"
     />
   );
 
   return (
-    <div className="relative w-full max-w-3xl mx-auto select-none">
+    <div ref={composerRootRef} className="relative w-full max-w-3xl mx-auto select-none">
       {/* Hidden File and Folder Inputs */}
       <input
         ref={fileInputRef}
@@ -1307,40 +1324,28 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
         </div>
       </div>
 
-      {/* Capsule pill on one line; a full-width card with the controls on their
-          own row once the text wraps, so nothing squeezes the message. */}
+      {/* Stable two-row composer: the text area never changes shape or swaps
+          positions with the controls as the prompt grows. */}
       <div
         onDragOver={handleDragOver}
         onDragEnter={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className={`relative bg-white dark:bg-zinc-900 ${
-          isInputExpanded ? 'rounded-2xl sm:rounded-3xl' : 'rounded-full'
-        } border border-zinc-200/90 dark:border-zinc-800 shadow-[0_4px_24px_rgba(0,0,0,0.06)] dark:shadow-[0_4px_24px_rgba(0,0,0,0.35)] focus-within:border-zinc-300 dark:focus-within:border-zinc-700 transition-all ${
+        data-testid="chat-composer"
+        className={`relative rounded-2xl sm:rounded-3xl border border-zinc-200/90 bg-white shadow-[0_4px_24px_rgba(0,0,0,0.06)] transition-colors dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-[0_4px_24px_rgba(0,0,0,0.35)] focus-within:border-zinc-300 dark:focus-within:border-zinc-700 ${
           isDraggingOver ? 'ring-2 ring-blue-500/50 dark:ring-blue-400/50 border-blue-500' : ''
         }`}
       >
-        {/*
-          One tree, two layouts. The textarea sits at the same position in the DOM
-          either way and only its wrapper's classes change, because React rebuilds a
-          node that moves between branches: the old markup put the textarea inside
-          two different structures, so the box changing shape — which happens the
-          moment the text grows past one line — threw away the element and with it
-          the caret, and the user had to click back into the box to carry on typing.
-          The order of the rows is CSS `order`, the element itself never moves.
-        */}
-        <div
-          className={`flex flex-wrap items-center ${
-            isInputExpanded ? 'gap-x-1 px-1.5 pb-1.5 pt-0.5' : 'pl-2 pr-1.5 py-1.5'
-          }`}
-        >
-          <div className={isInputExpanded ? 'order-1 w-full px-2 pt-2' : 'order-2 flex-1 min-w-0 px-2 flex items-center'}>
+        <div className="flex min-w-0 flex-col px-2 pt-1.5 pb-1.5">
+          <div className="w-full min-w-0 px-1.5 pt-1">
             {textarea}
           </div>
-          <div className={isInputExpanded ? 'order-2 flex items-center gap-1 pl-1' : 'order-1 shrink-0'}>{attachControl}</div>
-          <div className={`order-3 ml-auto flex items-center gap-1 shrink-0 ${isInputExpanded ? 'pr-1' : ''}`}>
-            {thinkControl}
-            {sendControl}
+          <div className="flex w-full min-w-0 items-center justify-between gap-2 px-1">
+            <div className="flex min-w-0 items-center gap-1">
+              {attachControl}
+              {thinkControl}
+            </div>
+            <div className="shrink-0">{sendControl}</div>
           </div>
         </div>
       </div>

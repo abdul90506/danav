@@ -192,6 +192,72 @@ export function parseBraveSearchResults(html) {
   return results;
 }
 
+/**
+ * Normalize real publisher sources for the compact search trail. The saved
+ * result URL (or a publisher URL supplied by an RSS source) is the authority;
+ * names alone are never turned into guessed domains.
+ */
+export function normalizeSearchSources(sources, limit = 3) {
+  if (!Array.isArray(sources)) return [];
+  const max = Math.max(0, Math.min(5, Math.floor(Number(limit) || 0)));
+  if (!max) return [];
+  const seen = new Set();
+  const out = [];
+
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    let domain = '';
+    const providedDomain = typeof source.domain === 'string' ? source.domain.trim().toLowerCase() : '';
+    if (providedDomain && !/[\s/?#@:]|\.\./.test(providedDomain)) {
+      try {
+        const parsed = new URL(`https://${providedDomain}`);
+        const host = parsed.hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+        if (parsed.port || parsed.pathname !== '/' || parsed.search || parsed.hash || !host.includes('.') || /^(?:localhost|.*\.localhost|.*\.local)$/.test(host)) {
+          continue;
+        }
+        domain = host;
+      } catch {
+        // Fall through to the actual URL below if the display host is malformed.
+      }
+    }
+    if (!domain) {
+      for (const candidate of [source.sourceUrl, source.url]) {
+        if (typeof candidate !== 'string' || !candidate.trim()) continue;
+        try {
+          const parsed = new URL(candidate);
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+          const host = parsed.hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+          if (!host.includes('.') || /^(?:localhost|.*\.localhost|.*\.local)$/.test(host)) continue;
+          domain = host;
+          break;
+        } catch {
+          // A malformed URL is not a source we can show.
+        }
+      }
+    }
+    if (!domain || seen.has(domain)) continue;
+    seen.add(domain);
+    const name = typeof source.name === 'string'
+      ? source.name.trim().slice(0, 80)
+      : typeof source.source === 'string'
+        ? source.source.trim().slice(0, 80)
+        : '';
+    out.push({ domain, ...(name ? { name } : {}) });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/** The top distinct publisher sites, in the order they were actually returned. */
+export function summarizeSearchSources(results, limit = 3) {
+  if (!Array.isArray(results)) return [];
+  return normalizeSearchSources(results.map((result) => ({
+    url: result?.url,
+    sourceUrl: result?.sourceUrl,
+    source: result?.source,
+  })), limit);
+}
+
 /** Google News article URLs are client-rendered redirect shells, not publisher articles. */
 export function isGoogleNewsArticleWrapper(rawUrl) {
   try {

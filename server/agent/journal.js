@@ -63,6 +63,7 @@ function cleanMemoryEntry(raw) {
     decisions: list(raw.decisions, 3, 160),
     errors: list(raw.errors, 3, 180),
     files,
+    steps: list(raw.steps, 5, 220),
     next: compactText(raw.next, 200),
     source: raw.source === 'model' ? 'model' : 'local',
   };
@@ -251,7 +252,7 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   const handoff = resume ? taskRuns[0] || null : null;
   const handoffMemories = handoff
     ? [...new Map(taskRuns.flatMap((run) => run.memories).sort((a, b) => a.at - b.at).map((item) => [
-        JSON.stringify([item.summary, item.facts, item.decisions, item.errors, item.files, item.next]), item,
+        JSON.stringify([item.summary, item.facts, item.decisions, item.errors, item.files, item.steps, item.next]), item,
       ])).values()].slice(-MAX_TASK_MEMORIES)
     : [];
   const words = new Set(normalizeQuery(query).split(' ').filter((w) => w.length > 2));
@@ -262,7 +263,7 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
       ...run.findings,
       ...run.toolErrors.flatMap((item) => [item.tool, item.message]),
       ...run.plan.map((item) => item.content),
-      ...run.memories.flatMap((item) => [item.summary, ...item.facts, ...item.decisions, ...item.errors, item.next, ...item.files]),
+      ...run.memories.flatMap((item) => [item.summary, ...item.facts, ...item.decisions, ...item.errors, item.next, ...item.files, ...(item.steps || [])]),
     ].join(' '));
     let relevance = 0;
     for (const word of words) if (searchable.includes(word)) relevance += Math.min(3, word.length / 3);
@@ -308,13 +309,15 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
     if (handoffMemories.length && used < cap) {
       addLine('- Concise task-step memories carried across this exact task (verify mutable facts against current files):');
       for (const memory of handoffMemories.slice(-4)) {
-        const parts = [memory.summary];
-        if (memory.facts.length) parts.push(`facts: ${memory.facts.slice(0, 2).join('; ')}`);
-        if (memory.decisions.length) parts.push(`decisions: ${memory.decisions.slice(0, 2).join('; ')}`);
-        if (memory.errors.length) parts.push(`avoid repeating: ${memory.errors.slice(0, 2).join('; ')}`);
-        if (memory.files.length) parts.push(`files: ${memory.files.slice(0, 4).join(', ')}`);
-        if (memory.next) parts.push(`next: ${memory.next}`);
-        if (!addLine(`  - ${clipLine(parts.join(' · '), 360)}`)) break;
+        const parts = [];
+        if (memory.steps?.length) parts.push(`steps: ${memory.steps.slice(-5).map((step) => clipLine(step, 100)).join(' → ')}`);
+        else if (memory.files.length) parts.push(`files: ${memory.files.slice(0, 4).join(', ')}`);
+        if (memory.summary) parts.push(`summary: ${clipLine(memory.summary, 100)}`);
+        if (memory.facts.length) parts.push(`fact: ${clipLine(memory.facts[0], 100)}`);
+        if (memory.decisions.length) parts.push(`decision: ${clipLine(memory.decisions[0], 90)}`);
+        if (memory.errors.length) parts.push(`avoid: ${clipLine(memory.errors[0], 100)}`);
+        if (memory.next) parts.push(`next: ${clipLine(memory.next, 100)}`);
+        if (!addLine(`  - ${clipLine(parts.join(' · '), 900)}`)) break;
       }
     }
     if (handoff.toolErrors.length && used < cap) {
@@ -351,7 +354,7 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
     // request. They are hints, not current workspace truth.
     if (sameHandoff) continue;
     const matchingMemories = run.memories.map((memory) => {
-      const searchable = normalizeQuery([memory.summary, ...memory.facts, ...memory.decisions, ...memory.errors, memory.next, ...memory.files].join(' '));
+      const searchable = normalizeQuery([memory.summary, ...memory.facts, ...memory.decisions, ...memory.errors, memory.next, ...memory.files, ...(memory.steps || [])].join(' '));
       const relevance = [...words].reduce((score, word) => score + (searchable.includes(word) ? Math.min(3, word.length / 3) : 0), 0);
       return { memory, relevance };
     }).filter((item) => item.relevance > 0).sort((a, b) => b.relevance - a.relevance || b.memory.at - a.memory.at).slice(0, 2);
@@ -361,6 +364,7 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
       if (memory.decisions.length) parts.push(`decisions: ${memory.decisions.slice(0, 1).join('; ')}`);
       if (memory.errors.length) parts.push(`avoid repeating: ${memory.errors.slice(0, 1).join('; ')}`);
       if (memory.files.length) parts.push(`files: ${memory.files.slice(0, 3).join(', ')}`);
+      if (sameTask && memory.steps?.length) parts.push(`steps: ${memory.steps.slice(-2).join(' → ')}`);
       if (memory.next) parts.push(`next: ${memory.next}`);
       if (!addLine(`- Earlier task memory, verify against current files: ${clipLine(parts.join(' · '), 340)}`)) break;
     }

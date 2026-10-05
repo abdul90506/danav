@@ -1,3 +1,5 @@
+import { normalizeSearchSources } from '../webSearch.js';
+
 /**
  * Disk form of an agent turn.
  *
@@ -7,13 +9,15 @@
  *
  *   - an action that was still pending/running when the page went away never
  *     finished: it is stored as an interrupted failure, not a spinner
- *   - only bounded summaries are kept — never file bodies, never unbounded
- *     terminal output, never anything the UI doesn't render
+ *   - bounded summaries are kept; web tools retain a capped Markdown excerpt
+ *     because fetched pages and results are user-readable in the action trail
  */
 
 const MAX_TEXT = 200_000;
 const MAX_OUTPUT = 4000;
 const MAX_STR = 400;
+const MAX_WEB_MARKDOWN = 9000;
+const MAX_FETCH_MARKDOWN = 12000;
 const FINISHED = new Set(['done', 'error', 'denied']);
 
 const clip = (s, n) => (typeof s === 'string' ? (s.length > n ? `${s.slice(0, n - 1)}…` : s) : undefined);
@@ -81,6 +85,11 @@ export function normalizeResult(r) {
       .filter((t) => t && typeof t.content === 'string')
       .slice(0, 25)
       .map((t) => ({ content: clip(t.content, 200), status: ['pending', 'in_progress', 'completed'].includes(t.status) ? t.status : 'pending' }));
+  }
+  const sources = normalizeSearchSources(r.sources, 3);
+  if (sources.length) out.sources = sources;
+  if (typeof r.markdown === 'string' && (r.kind === 'fetch' || r.kind === 'web_search')) {
+    out.markdown = r.markdown.slice(0, r.kind === 'fetch' ? MAX_FETCH_MARKDOWN : MAX_WEB_MARKDOWN);
   }
   if (Array.isArray(r.ports)) out.ports = r.ports.filter(Number.isFinite).slice(0, 4);
   if (Array.isArray(r.images)) {

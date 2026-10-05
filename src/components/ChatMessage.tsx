@@ -14,131 +14,28 @@ import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from
 import { stopNotice, workedSummary } from '../agent/format';
 import { useDismissOnOutside, useEscapeToClose } from '../utils/useDismissOnOutside';
 import { createPanelStore, usePanelOpen } from './panels';
-import { AgentTrail, TrailNotes } from './AgentTrailGroup';
+import { AgentTrail } from './AgentTrailGroup';
 import { useThrottledValue } from '../utils/throttledValue';
 import { useElapsedSeconds } from '../utils/useElapsedSeconds';
-
-/**
- * A summary line with its line counts in colour: "+7" green, "−1" red, everything
- * else as plain as the rest of the row.
- */
-const SummaryText: React.FC<{ text?: string }> = ({ text }) => (
-  <>
-    {(text || '').split(/(\+\d+|−\d+)/g).map((part, i) => {
-      if (/^\+\d+$/.test(part)) {
-        return (
-          <span key={i} className="tabular-nums font-medium text-emerald-600 dark:text-emerald-400">
-            {part}
-          </span>
-        );
-      }
-      if (/^−\d+$/.test(part)) {
-        return (
-          <span key={i} className="tabular-nums font-medium text-rose-500 dark:text-rose-400">
-            {part}
-          </span>
-        );
-      }
-      return <React.Fragment key={i}>{part}</React.Fragment>;
-    })}
-  </>
-);
 
 /** One work row open at a time, chat-wide — the same rule as every other panel. */
 const workStore = createPanelStore();
 
-/**
- * How long one pair of words stays on screen. Kept in step with the
- * `narrationStep` animation in index.css.
- */
-const NARRATION_STEP_MS = 1700;
-
-/**
- * The newest line the agent said, two words at a time.
- *
- * It sits under the trail's rows — down where the work is happening — and never as
- * a sentence: two words appear, fade out, and the next two take their place,
- * looping for as long as this is the newest line. A fresh line starts over at its
- * own first words. Nothing here is text to keep: the trail holds the lines in its
- * "N line(s) written" rows, while the accepted answer streams below the work row.
- */
-const NarrationLine: React.FC<{ text: string; lineId?: string }> = ({ text, lineId }) => {
-  /** The line in twos: "Ab sab files banata hoon" → ["Ab sab", "files banata", "hoon"]. */
-  const steps = React.useMemo(() => {
-    const words = text.trim().split(/\s+/).filter(Boolean);
-    const out: string[] = [];
-    for (let i = 0; i < words.length; i += 2) out.push(words.slice(i, i + 2).join(' '));
-    return out;
-  }, [text]);
-  const [step, setStep] = React.useState(0);
-
-  /** A new line is a new start. */
-  React.useEffect(() => {
-    setStep(0);
-  }, [lineId]);
-
-  /**
-   * The pairs walk forward for as long as the line is the live one, wrapping at
-   * the end rather than stopping — the line is still being written, so the loop
-   * says "still going" without inventing a progress bar out of word count.
-   */
-  const cycling = steps.length > 1;
-  React.useEffect(() => {
-    if (!cycling) return;
-    const timer = window.setInterval(() => setStep((s) => s + 1), NARRATION_STEP_MS);
-    return () => window.clearInterval(timer);
-  }, [lineId, cycling]);
-
-  if (!steps.length) return null;
-  const at = cycling ? step % steps.length : 0;
-  return (
-    <div className="mt-1 max-w-full overflow-hidden" title={text} data-testid="narration-line">
-      <span
-        key={at}
-        className="narration-step block truncate text-[12.5px] leading-5 text-zinc-500 dark:text-zinc-400"
-      >
-        {steps[at]}
-      </span>
-    </div>
-  );
-};
-
-/**
- * The one line a turn ends with: what it did, and everything it did behind it.
- *
- * A run reads as a dozen rows — reads, edits, commands, searches, notes to
- * memory — and a transcript of them is a wall. They all live in here instead: the
- * line says the turn's own numbers ("Worked for 32s · 8 actions · 2 files +7 −1")
- * and opening it shows the whole run in the order it happened, thoughts included,
- * in the place each one happened. Nothing is lost — it is one click instead of a
- * screenful.
- *
- * While the run is still going the same line is the live one ("Working… 12s",
- * "Thinking… 12s"), so the trail can be watched as it is written.
- */
+/** A compact status header plus the expandable, real tool activity for one run. */
 const AgentWorkRow: React.FC<{
   messageId: string;
   live: boolean;
   liveLabel: string;
-  /** The newest line the agent is writing, shown two words at a time under the rows. */
-  narration?: string;
-  narrationId?: string;
+  /** Latest assistant progress text, displayed as received (never word-cycled). */
+  progressText?: string;
   elapsedSeconds: number;
-  /** The finished numbers, once the run is over. */
   summary?: string;
   notice?: string;
   children: React.ReactNode;
-}> = ({ messageId, live, liveLabel, narration, narrationId, elapsedSeconds, summary, notice, children }) => {
+}> = ({ messageId, live, liveLabel, progressText, elapsedSeconds, summary, notice, children }) => {
   const id = `work-${messageId}`;
   const open = usePanelOpen(workStore, id);
-  /** The user's own choice, so the automatic open and close can leave it alone. */
   const pinnedRef = useRef(false);
-  /**
-   * Once the user opens it (or closes it) it is theirs: reading it and clicking
-   * somewhere else is not the same as dismissing a menu. Escape still puts it
-   * away — and, being registered, that Escape does not also stop a run that is
-   * still working.
-   */
   useEscapeToClose(
     React.useCallback(() => {
       pinnedRef.current = false;
@@ -147,12 +44,7 @@ const AgentWorkRow: React.FC<{
     open
   );
 
-  /**
-   * While the run is working the trail is on screen — that is the whole point of
-   * watching it work — and the moment the run ends it folds away again, leaving
-   * the one line that says what it did. A trail the user opened (or closed) by
-   * hand is left exactly as they left it.
-   */
+  // Keep the live trail open by default; once the user chooses, respect that choice.
   React.useEffect(() => {
     if (pinnedRef.current) return;
     if (live && workStore.get() !== id) workStore.set(id);
@@ -165,64 +57,52 @@ const AgentWorkRow: React.FC<{
     if (nowOpen) workStore.close();
     else workStore.set(id);
   };
-
   return (
-    <div className="mt-1 select-none">
+    <div className="mt-2 max-w-2xl select-none">
       <button
         type="button"
         onClick={toggle}
         aria-expanded={open}
         aria-controls={`work-details-${messageId}`}
-        title={open ? 'Hide what this turn did' : 'Show what this turn did'}
-        className="group/work inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5 max-w-full text-left cursor-pointer -mx-1.5 px-1.5 py-1 rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
+        title={open ? 'Hide this run’s activity' : 'Show this run’s activity'}
+        className="group/work flex w-full min-w-0 items-start gap-1.5 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-zinc-50/70 dark:hover:bg-zinc-800/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40"
       >
-        {live ? (
-          <span className="agent-shimmer text-[14px] leading-6">{liveLabel}</span>
-        ) : (
-          /*
-            The turn's own numbers, one size up from the small print: this is the
-            line a finished turn is read by, so it gets room to breathe and wraps
-            at the separators on a narrow screen instead of being cut off. The line
-            counts are the one place colour is allowed — +green, −red is how anyone
-            reads a diff at a glance.
-          */
-          <span className="text-[14px] leading-6 font-medium text-zinc-600 dark:text-zinc-300 group-hover/work:text-zinc-900 dark:group-hover/work:text-zinc-100 transition-colors">
-            <SummaryText text={summary} />
-            {summary && notice ? <span className="font-normal text-zinc-400 dark:text-zinc-500"> · </span> : null}
-            {notice ? <span className="font-normal text-zinc-500 dark:text-zinc-400">{notice}</span> : null}
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
+            <span className={`min-w-0 max-w-full truncate text-[13.5px] font-medium leading-5 ${live ? 'agent-shimmer' : 'text-zinc-700 dark:text-zinc-200'}`}>
+              {live ? liveLabel : summary || 'Work complete'}
+            </span>
+            <ChevronRight
+              aria-hidden="true"
+              className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform duration-150 group-hover/work:text-zinc-700 dark:text-zinc-500 dark:group-hover/work:text-zinc-200 ${open ? 'rotate-90' : ''}`}
+            />
           </span>
-        )}
-        {live && elapsedSeconds >= 2 && (
-          <span className="text-[13px] text-zinc-400 dark:text-zinc-500">{elapsedSeconds}s</span>
-        )}
-        {/* The arrow sits after the words and points the way the panel comes out:
-            forward while it is closed, down once it is open. */}
-        <ChevronRight
-          className={`w-3.5 h-3.5 shrink-0 text-zinc-400 dark:text-zinc-500 transition-transform duration-200 group-hover/work:text-zinc-700 dark:group-hover/work:text-zinc-200 ${
-            open ? 'rotate-90' : ''
-          }`}
-        />
+          {live && progressText?.trim() ? (
+            <span
+              className="block min-w-0 truncate text-[12px] leading-4 text-zinc-500/90 dark:text-zinc-400/85"
+              title={progressText}
+              data-testid="live-progress"
+            >
+              {progressText}
+            </span>
+          ) : null}
+          {!live && notice ? (
+            <span className="block min-w-0 truncate text-[11px] leading-4 text-amber-700/80 dark:text-amber-300/80" title={notice}>
+              {notice}
+            </span>
+          ) : null}
+        </span>
+
+        {live && elapsedSeconds >= 2 ? (
+          <span className="mt-0.5 shrink-0 font-mono text-[11px] tabular-nums text-zinc-400 dark:text-zinc-500">
+            {elapsedSeconds}s
+          </span>
+        ) : null}
       </button>
 
-      {/*
-        What the agent says while it works, in one line under the label: the newest
-        line, cut off at the edge rather than wrapped, shimmering so it reads as
-        something being written rather than a sentence to keep. A new line replaces
-        it — a fresh element, so it fades in again — and with no narration the row is
-        just the label, which is how it was.
-      */}
-      {/*
-        Kept mounted and hidden rather than unmounted: the rows inside keep their
-        state (an opened diff stays opened), and a trail that is opened mid-run is
-        already up to date instead of rebuilding itself from the start.
-
-        The line the run is writing sits at the end of it, under the rows: that is
-        where the work is, and a line under the label read as a caption for the
-        whole turn instead of the thing being written right now.
-      */}
-      <div id={`work-details-${messageId}`} hidden={!open} className="mt-2 ml-0.5 pl-3 border-l border-zinc-200 dark:border-zinc-800">
+      {/* Mounted while collapsed so an open diff and live tool state are preserved. */}
+      <div id={`work-details-${messageId}`} hidden={!open} className="mt-1 ml-2.5 border-l border-zinc-200/70 pl-3 dark:border-zinc-800">
         {children}
-        {live && narration ? <NarrationLine text={narration} lineId={narrationId} /> : null}
       </div>
     </div>
   );
@@ -1048,12 +928,9 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
   const liveTurn = Boolean(message.isGenerating) && !message.error;
 
   /**
-   * What a finished agent turn shows, and what it keeps behind its one line.
-   *
-   * Every action of the run — every read, edit, command, search, note — folds
-   * into the work row, along with the reasoning and work-round narration. The
-   * server marks a response as final only after follow-up checks are ruled out;
-   * that accepted answer streams below the row while the turn is still live.
+   * What a finished agent turn shows, and what it keeps behind the work summary.
+   * Actions and reasoning stay in the expandable trail; genuine progress text is
+   * shown whole while it arrives, and the accepted final answer streams below.
    */
   const textBlocks = blocks.filter((b) => b.type === 'text');
   /**
@@ -1085,18 +962,16 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
         ? spokenText.slice(-1)
         : /* a turn that never spoke: whatever it has is what it has */ textBlocks.slice(-1);
   const visibleTextIds = new Set(visibleText.map((b) => b.id));
-  const foldedText = textBlocks.filter((b) => !visibleTextIds.has(b.id));
 
-  /** The newest line the agent said while working — the line under the trail rows. */
+  /** The latest actual progress text; rendered whole as it streams, never word-cycled. */
   const liveNarration = (() => {
     if (!liveTurn) return null;
     const spoken = textBlocks.filter((b) => !visibleTextIds.has(b.id) && !b.notice && !b.finalAnswer && b.content.trim());
     return spoken.length ? spoken[spoken.length - 1] : null;
   })();
   const actionCount = blocks.filter((b) => b.type === 'action' && inFold(b)).length;
-  // A turn with nothing to fold (no actions, nothing said along the way) has no
-  // work row at all — its reasoning shows in place instead of hiding behind it.
-  const hasWorkRow = actionCount > 0 || foldedText.length > 0;
+  // Only real activity (or its actual live progress text) creates a work panel.
+  const hasWorkRow = actionCount > 0 || (liveTurn && Boolean(liveNarration));
 
   /** One markdown block of the turn's own words. */
   const textNode = (block: Extract<MessageBlock, { type: 'text' }>, inTrail: boolean) => {
@@ -1123,15 +998,10 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
     );
   };
 
-  /**
-   * Everything the run did, in the order it did it: each round of reasoning where
-   * it happened, the lines it said along the way, and the actions themselves.
-   */
+  /** The compact activity trail keeps tool results and reasoning, not fake note counters. */
   const renderTrail = () => {
     const out: React.ReactNode[] = [];
     let group: AgentAction[] = [];
-    let notes: string[] = [];
-    let notesFrom = '';
     const flushActions = () => {
       if (group.length === 0) return;
       const first = group[0].id;
@@ -1148,43 +1018,20 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
       );
       group = [];
     };
-    /**
-     * The lines the agent said along the way fold into one row of their own — "3
-     * lines written" — instead of arriving in the trail as paragraphs: they are
-     * commentary on the work, and the work is what the trail is for. They are kept,
-     * in order, one click behind their row.
-     */
-    const flushNotes = () => {
-      if (notes.length === 0) return;
-      out.push(
-        <div key={`n-${notesFrom}`} className="my-1.5">
-          <TrailNotes id={`${message.id}:notes-${notesFrom}`} notes={notes} />
-        </div>
-      );
-      notes = [];
-    };
+
     for (const block of blocks) {
       if (block.type === 'action') {
-        flushNotes();
         if (!inFold(block)) continue; // the preview row stands on its own, outside
         group.push(block.action);
         continue;
       }
       if (block.type === 'text' && visibleTextIds.has(block.id)) continue;
-      // The newest line is on screen as the live pair of words under the rows; the
-      // trail keeps it — with the rest of what it said — from the next line on.
-      if (block.type === 'text' && liveNarration && block.id === liveNarration.id) continue;
-      if (block.type === 'text' && !block.notice) {
-        if (notes.length === 0) notesFrom = block.id;
-        notes.push(block.content);
-        continue;
-      }
+      // Live progress is shown verbatim in the work header. Older narration is
+      // intentionally not turned into fake "lines written" rows.
+      if (block.type === 'text' && !block.notice) continue;
+
       flushActions();
-      flushNotes();
       if (block.type === 'thinking') {
-        // Every round in the place it happened, with its own seconds. The merged
-        // "3 rounds" line belongs to the simple case (a turn with no work to fold),
-        // not here — in the trail the run should look like the run.
         out.push(
           <TrailThinkingEntry
             key={block.id}
@@ -1195,12 +1042,10 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
           />
         );
       } else if (block.type === 'text') {
-        // A notice (a system line, not the agent's words) stays as it is.
         out.push(textNode(block, true));
       }
     }
     flushActions();
-    flushNotes();
     return out;
   };
 
@@ -1314,8 +1159,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
                 messageId={message.id}
                 live={liveTurn}
                 liveLabel={workingText}
-                narration={liveNarration?.content}
-                narrationId={liveNarration?.id}
+                progressText={liveNarration?.content}
                 elapsedSeconds={elapsedSeconds}
                 summary={runLine}
                 notice={notice}
@@ -1394,10 +1238,17 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
           </div>
         )}
 
+        {!isAgentTimeline && message.isGenerating && message.agentStatus ? (
+          <div className="my-1 text-[12px] leading-5 text-zinc-500 dark:text-zinc-400" role="status">
+            {message.agentStatus}
+          </div>
+        ) : null}
+
         {/* Typing dot — ONLY while actually generating. Suppressed while
-            tool/thinking cards are on screen or content is present. */}
+            tool/thinking cards are on screen, status copy is visible, or content is present. */}
         {!isAgentTimeline &&
         message.isGenerating &&
+        !message.agentStatus &&
         !safeMessageContent.trim() &&
         !message.error &&
         blocks.length === 0 ? (

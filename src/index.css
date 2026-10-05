@@ -48,8 +48,23 @@
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
 
+/* Keep the return-to-latest control just above the whole floating composer.
+   The composer publishes only its measured overflow, so multiline drafts and
+   revealed controls move the arrow without a React render or a guessed height. */
+.chat-scroll-latest {
+  bottom: calc(6rem + max(0.75rem, env(safe-area-inset-bottom)) + 0.75rem + var(--danav-composer-extra, 0px));
+  transition: bottom 160ms ease-out;
+}
+
 @media (min-width: 640px) {
   .safe-bottom { padding-bottom: 1rem; }
+  .chat-scroll-latest {
+    bottom: calc(6rem + 1rem + 0.75rem + var(--danav-composer-extra, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-scroll-latest { transition: none; }
 }
 
 @layer base {
@@ -486,48 +501,6 @@
   }
 }
 
-/*
- * The line the agent says while it works: a slow sweep of light across the words,
- * looping for as long as the line is the current one. It replaces the moment a
- * newer line arrives (the element is re-keyed), so it never grows into a paragraph
- * of narration sitting above the work.
- */
-/*
-  The line the agent is writing right now, two words at a time: a pair fades in,
-  holds, fades out, and the next pair takes its place — so the line reads as
-  something being written rather than a sentence to keep. The duration matches
-  NARRATION_STEP_MS in ChatMessage.tsx, so each pair leaves exactly as the next
-  one is swapped in.
-*/
-@keyframes narrationStep {
-  0% {
-    opacity: 0;
-    transform: translateY(2px);
-  }
-  14% {
-    opacity: 1;
-    transform: none;
-  }
-  76% {
-    opacity: 1;
-    transform: none;
-  }
-  100% {
-    opacity: 0;
-  }
-}
-
-.narration-step {
-  animation: narrationStep 1700ms both ease-in-out;
-  will-change: opacity;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .narration-step {
-    animation: none;
-  }
-}
-
 /* Thinking Shimmer Loading Animations */
 @keyframes shimmerText {
   0% {
@@ -683,34 +656,34 @@
    Agent mode
    ========================================================================== */
 
-/* One shimmer sweeps across a whole action label ("Creating  index.html")
-   while it is running; the finished label is plain text. */
+/* Subtle live-status shimmer: text-only, low contrast, and reserved for real work. */
 @keyframes agentShimmer {
-  from { background-position: 100% 0; }
-  to   { background-position: 0% 0; }
+  from { background-position: 120% 0; }
+  to   { background-position: -120% 0; }
 }
 
 .agent-shimmer {
   color: transparent;
   background-image: linear-gradient(
-    100deg,
-    rgb(161 161 170) 35%,
-    rgb(24 24 27) 50%,
-    rgb(161 161 170) 65%
+    105deg,
+    rgb(113 113 122 / 62%) 28%,
+    rgb(63 63 70 / 92%) 50%,
+    rgb(113 113 122 / 62%) 72%
   );
-  background-size: 250% 100%;
+  background-size: 220% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: agentShimmer 1.7s linear infinite;
+  opacity: 0.72;
+  animation: agentShimmer 2.25s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
 .dark .agent-shimmer {
   background-image: linear-gradient(
-    100deg,
-    rgb(113 113 122) 35%,
-    rgb(250 250 250) 50%,
-    rgb(113 113 122) 65%
+    105deg,
+    rgb(161 161 170 / 55%) 28%,
+    rgb(244 244 245 / 90%) 50%,
+    rgb(161 161 170 / 55%) 72%
   );
 }
 
@@ -720,6 +693,10 @@
     background-image: none;
     -webkit-text-fill-color: currentColor;
     color: rgb(113 113 122);
+    opacity: 1;
+  }
+  .dark .agent-shimmer {
+    color: rgb(161 161 170);
   }
 }
 

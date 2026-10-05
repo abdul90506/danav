@@ -77,6 +77,10 @@ export async function updateWorkspace(
   return (await call<{ workspace: AgentWorkspace }>('PATCH', `/workspaces/${encodeURIComponent(id)}`, patch)).workspace;
 }
 
+/** Stop an active agent stream and wait until the server releases its workspace lock. */
+export const stopAgentRun = (workspaceId: string) =>
+  call<{ success: true; active: false }>('POST', `/workspaces/${encodeURIComponent(workspaceId)}/stop`, {});
+
 export const deleteWorkspace = (id: string) => call('DELETE', `/workspaces/${encodeURIComponent(id)}`);
 
 // ---------------------------------------------------------------------------
