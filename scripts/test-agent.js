@@ -258,6 +258,7 @@ const MODULES = [
   './agent/test-codeindex.js',
   './agent/test-git.js',
   './agent/test-thinking.js',
+  './agent/test-llm.js',
   './agent/test-settings.js',
   './agent/test-edits.js',
   './agent/test-workspace.js',

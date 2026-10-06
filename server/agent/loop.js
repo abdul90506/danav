@@ -1413,7 +1413,7 @@ export async function runAgent({
           } else {
             argError =
               round.finishReason === 'length'
-                ? 'Your tool call was cut off because the output limit was reached, so its JSON is incomplete. Do not send one huge call: write the first ~150 lines with write_file, then continue the SAME file with append_file, one call per part.'
+                ? 'Your tool call was cut off because the output limit was reached, so its JSON is incomplete and nothing could be saved from it. Send the call again, smaller: write as much of the file as comfortably fits in one write_file, then finish it with append_file from the next line.'
                 : parsedArgs.message;
           }
         }
@@ -1591,7 +1591,7 @@ export async function runAgent({
                 `${saved.output}\n⚠ Your output hit the length limit in the middle of this call, so the JSON was cut off. ` +
                 `I saved the ${rescued.lines} complete lines you had written to ${rescued.path} (the half-written last line was dropped). ` +
                 `The file currently ends with:\n${tailLines}\n` +
-                'Continue WITHOUT repeating anything: call append_file with the remaining content, starting right after that last line, and keep each call to about 150 lines or fewer.',
+                'Continue WITHOUT repeating anything: call append_file once with ALL the remaining content, starting right after that last line.',
             };
           } else {
             res = saved;

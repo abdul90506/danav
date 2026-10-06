@@ -71,7 +71,7 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 ### 2. Configure Providers
 1. Click **Settings** in the bottom of the sidebar.
 2. Select **Providers & Models** tab.
-3. Click **Add Provider**, enter your base URL (e.g., `https://api.openai.com/v1`, `https://api.groq.com/openai/v1`, or `http://localhost:11434`), enter one or more API keys if needed, and click **Fetch Models**. Keys stay on the server. A rejected key advances to the next one; busy/rate-limit failures trigger visible retries and rotate through the saved list.
+3. Click **Add Provider**, enter your base URL (e.g., `https://api.openai.com/v1`, `https://api.groq.com/openai/v1`, or `http://localhost:11434`), enter one or more API keys if needed, and click **Fetch Models**. Keys stay on the server. **Save several and they are swept, not queued**: when a key is rejected or rate-limited the next one is tried immediately, with no wait at all. Only once *every* key has failed is the provider itself treated as busy, and the run backs off before sweeping them all again (five waits, doubling from 2s). Switching model starts that over.
 4. Click **Save Provider**. Your newly fetched models will appear in the top model selector.
 
 ## 🤖 Agent mode

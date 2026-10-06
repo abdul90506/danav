@@ -1089,7 +1089,7 @@ test('provider errors surface as a clear error event (after retrying), and the r
   }
 });
 
-test('Agent provider retries rotate saved keys and use five distinct backoff waits', async () => {
+test('Agent provider retries sweep every saved key for free, then take five backoff waits', async () => {
   const l = await getLlm();
   l.requests.length = 0;
   l.authorizations.length = 0;
@@ -1106,13 +1106,18 @@ test('Agent provider retries rotate saved keys and use five distinct backoff wai
       onText: () => {},
       onRetry: (info) => retries.push(info),
     }), /upstream exploded/);
-    assert.equal(l.requests.length, 6, 'five retries follow the initial request');
-    assert.deepEqual(l.authorizations, [
-      'Bearer first-fake-key', 'Bearer second-fake-key', 'Bearer first-fake-key',
-      'Bearer second-fake-key', 'Bearer first-fake-key', 'Bearer second-fake-key',
-    ]);
-    assert.deepEqual(retries.map((retry) => retry.attempt), [1, 2, 3, 4, 5]);
-    assert.deepEqual(retries.map((retry) => retry.delayMs), [1, 2, 4, 8, 16]);
+    // Both keys are tried before anything sleeps, so five backoffs buy six sweeps.
+    assert.equal(l.requests.length, 12, 'two keys swept across six attempts');
+    assert.deepEqual(l.authorizations, Array.from({ length: 6 }, () => [
+      'Bearer first-fake-key', 'Bearer second-fake-key',
+    ]).flat());
+
+    const waits = retries.filter((retry) => retry.delayMs > 0);
+    const rotations = retries.filter((retry) => retry.delayMs === 0);
+    assert.deepEqual(waits.map((retry) => retry.delayMs), [1, 2, 4, 8, 16], 'the backoff still doubles');
+    assert.deepEqual(waits.map((retry) => retry.attempt), [1, 2, 3, 4, 5], 'a whole sweep costs one retry');
+    assert.equal(rotations.length, 6, 'moving to the second key is free, once per sweep');
+    assert.ok(rotations.every((retry) => /trying the next key/.test(retry.reason)), 'and says so');
     assert.ok(retries.every((retry) => retry.maxRetries === 5 && retry.credentialCount === 2));
   } finally {
     delete process.env.DANAV_LLM_RETRY_BASE_MS;

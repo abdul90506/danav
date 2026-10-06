@@ -204,5 +204,5 @@ export function formatOutline(path, o) {
   }
   const width = String(o.total).length + 1;
   const body = o.symbols.map((s) => `L${String(s.line).padEnd(width)} ${'  '.repeat(s.depth)}${s.text}`).join('\n');
-  return `${head}\n${body}${o.truncated ? '\n… (more symbols not shown)' : ''}\n\nRead around any symbol with read_file start_line/end_line (several chunks at once: ranges: [[a,b],[c,d]]).`;
+  return `${head}\n${body}${o.truncated ? '\n… (more symbols not shown)' : ''}\n\nRead one of these with read_file symbol: "Name" -- it returns the whole definition, so there are no line numbers to guess. For anything else use start_line/end_line, or several chunks in one call with ranges: [[a,b],[c,d]].`;
 }

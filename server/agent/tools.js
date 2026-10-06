@@ -21,7 +21,7 @@ import { peekPartialArgs, salvageWrite, extractStringFields, repairJsonText } fr
 import { limits } from './config.js';
 import {
   cachedIndex, definitionOf, dependentsOf, findDefinitions, getIndex, isTestFile,
-  markIndexStale, patchCachedIndex, rankFiles, renderRelevantFiles, renderRepoMap, testsFor,
+  markIndexStale, patchCachedIndex, rankFiles, renderRelevantFiles, renderRepoMap, suggestNames, testsFor,
 } from './codeindex.js';
 import { WorkspaceError } from './workspaces/base.js';
 import { formatBytes, truncateMiddle } from './util.js';
@@ -473,13 +473,13 @@ export const TOOL_DEFINITIONS = [
   ),
   fn(
     'write_file',
-    'Create a new file, or completely replace an existing one, with `content` (parent folders are created for you). Best for NEW files. Before replacing an existing file that was not created in this run, read the complete contents with read_file (all ranges if clipped); file_outline, a symbol read, or a partial range is not enough, and an incomplete overwrite is refused. For changes to existing code prefer edit_file / multi_edit — they are faster and cannot accidentally drop code. Always put "path" FIRST in the arguments: a call cut off by the output limit is recoverable at that point, and a file longer than one call is written in parts (write_file, then append_file).',
+    'Create a new file, or completely replace an existing one, with `content` (parent folders are created for you). Best for NEW files. Before replacing an existing file that was not created in this run, read the complete contents with read_file (all ranges if clipped); file_outline, a symbol read, or a partial range is not enough, and an incomplete overwrite is refused. For changes to existing code prefer edit_file / multi_edit — they are faster and cannot accidentally drop code. Write the whole file in ONE call, however long it is; splitting a file across calls just resends the conversation each time. Always put "path" FIRST in the arguments, so a call cut off by the output limit is still recoverable at that point -- only then finish the file with append_file.',
     { path: P.path, content: { type: 'string', description: 'The complete file contents.' } },
     ['path', 'content']
   ),
   fn(
     'append_file',
-    'Add text to the END of a file (the file is created if it does not exist). Before appending to an existing file that was not created in this run, read the complete contents with read_file (all ranges if clipped); file_outline, a symbol read, or a partial range is not enough, and an incomplete append is refused. Use it to write a very large file in parts — write_file with the first part, then append_file with each next part (~150 lines each) — so that no single call has to be huge. Never repeat what is already in the file, and put "path" FIRST in the arguments.',
+    'Add text to the END of a file (the file is created if it does not exist). Before appending to an existing file that was not created in this run, read the complete contents with read_file (all ranges if clipped); file_outline, a symbol read, or a partial range is not enough, and an incomplete append is refused. Use it to FINISH a file whose write_file call was cut off at the output limit: continue from the line the result named. A file that fits in one call should be written in one call, not split up on purpose. Never repeat what is already in the file, and put "path" FIRST in the arguments.',
     { path: P.path, content: { type: 'string', description: 'The text to add at the end.' } },
     ['path', 'content']
   ),
@@ -2010,6 +2010,19 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         if (!known.exact && !known.results.length) return '';
         return `\n[Tip: \`${pattern}\` is a known name in this project — find_symbol("${pattern}") answers this from the code index with its definition, every use, and what depends on it, in one call.]`;
       })();
+      /**
+       * A search that found nothing is a dead end, and the usual cause is a name
+       * spelled slightly differently here. Offer the real ones so the next call
+       * lands, instead of the run guessing or falling back to reading whole files.
+       */
+      const missTip = () => {
+        if (!/^[A-Za-z_$][\w$.-]*$/.test(pattern)) return '';
+        const idx = cachedIndex(ws.id);
+        const near = idx ? suggestNames(idx, pattern, 4) : [];
+        if (!near.length) return '';
+        const list = near.map((n) => `\`${n.name}\` (${n.path}:${n.line})`).join(', ');
+        return `\n[Did you mean ${list}? find_symbol("${near[0].name}") gives the definition and every use in one call.]`;
+      };
       const found = page.length
         ? `${shown} in ${byFile.size} file${byFile.size === 1 ? '' : 's'}${summary ? `: ${summary}` : ''}\n` +
           lines.join('\n') +
@@ -2017,7 +2030,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
           (wordFiltered ? `\n(${wordFiltered} partial-word hits were dropped by word=true)` : '') +
           asLiteral +
           nameTip
-        : `No matches for ${literal ? 'the literal text' : 'the pattern'} \`${pattern}\` in ${rel(abs)}.${raw.truncated ? ' (the search hit its own limit before finishing — try a narrower path or glob)' : ''}${asLiteral}${nameTip}`;
+        : `No matches for ${literal ? 'the literal text' : 'the pattern'} \`${pattern}\` in ${rel(abs)}.${raw.truncated ? ' (the search hit its own limit before finishing — try a narrower path or glob)' : ''}${asLiteral}${nameTip}${missTip()}`;
       return { output: safe(found), ui: { kind: 'grep', pattern: clip(pattern, 120), count: page.length, files: byFile.size, truncated } };
     },
 
@@ -2121,7 +2134,13 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
               near.map((d) => `  ${d.path}:${d.line} — ${d.kind} ${d.name}`).join('\n')
           );
         }
-        sections.push(bits.length ? `No top-level definition of \`${name}\` in the index.\n\n${bits.join('\n\n')}` : `No definition of \`${name}\` was found anywhere in the workspace. Try relevant_files for the area, or grep_search for the text — the name may be spelled differently here.`);
+        // Nothing at all under this name: name the ones that nearly match, rather
+        // than telling the run that the spelling "may" differ and leaving it there.
+        const alike = index ? suggestNames(index, name, 4) : [];
+        const didYouMean = alike.length
+          ? ` Did you mean ${alike.map((n) => `\`${n.name}\` (${n.path}:${n.line})`).join(', ')}?`
+          : ' Try relevant_files for the area, or grep_search for the text — the name may be spelled differently here.';
+        sections.push(bits.length ? `No top-level definition of \`${name}\` in the index.\n\n${bits.join('\n\n')}` : `No definition of \`${name}\` was found anywhere in the workspace.${didYouMean}`);
       }
 
       let refCount = 0;
@@ -2149,10 +2168,27 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         refCount = [...byFile.values()].reduce((n, l) => n + l.length, 0);
         refFiles = byFile.size;
         if (refCount) {
+          // Show the call sites themselves. "Who uses this?" cannot be answered from
+          // bare line numbers, so listing them only bought another read of every
+          // file; the matching line is already in hand here.
+          const USES_PER_FILE = 6;
+          const useLine = (s) => {
+            const t = String(s ?? '').trim();
+            return t.length > 160 ? `${t.slice(0, 159)}…` : t;
+          };
           const rows = [...byFile.entries()]
             .sort((a, b) => b[1].length - a[1].length)
             .slice(0, max)
-            .map(([file, list]) => `  ${file} — ${list.length} use${list.length === 1 ? '' : 's'}: ${list.slice(0, 3).map((m) => `L${m.line}`).join(', ')}${list.length > 3 ? ', …' : ''}`);
+            .map(([file, list]) => {
+              const shown = list
+                .slice(0, USES_PER_FILE)
+                .map((m) => `      L${m.line}  ${useLine(m.text)}`)
+                .join('\n');
+              const rest = list.length > USES_PER_FILE
+                ? `\n      … ${list.length - USES_PER_FILE} more here: ${list.slice(USES_PER_FILE, USES_PER_FILE + 12).map((m) => `L${m.line}`).join(', ')}${list.length > USES_PER_FILE + 12 ? ', …' : ''}`
+                : '';
+              return `  ${file} — ${list.length} use${list.length === 1 ? '' : 's'}\n${shown}${rest}`;
+            });
           sections.push(`Used in ${refFiles} file${refFiles === 1 ? '' : 's'} (${refCount} place${refCount === 1 ? '' : 's'})${refs.truncated ? '+' : ''}:\n${rows.join('\n')}${byFile.size > max ? `\n  … ${byFile.size - max} more files` : ''}`);
         } else if (wantDefs && defs.results.length) {
           sections.push(`No other uses of \`${name}\` were found${scope ? ` under ${scope}` : ''} — it looks unused elsewhere.`);

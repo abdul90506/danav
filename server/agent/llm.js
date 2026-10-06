@@ -27,6 +27,12 @@ export class LlmError extends Error {
 
 const normalizeBaseUrl = (url) => String(url || '').trim().replace(/\/+$/, '');
 const MAX_PROVIDER_RETRIES = 5;
+/**
+ * Hard ceiling on requests for one round. Keys are swept without waiting, so a
+ * provider with many saved keys could otherwise keep a hopeless round alive for a
+ * very long time: 5 backoffs across 8 keys is 48 requests.
+ */
+const MAX_PROVIDER_ATTEMPTS = 24;
 const MAX_RETRY_WAIT_MS = 30_000;
 const credentialCursors = new Map();
 const sleep = (ms, signal) =>
@@ -131,8 +137,38 @@ export async function streamCompletion({
   let credentialIndex = apiKeys.length ? (credentialCursors.get(cursorKey) || 0) % apiKeys.length : 0;
   let requestCredentialIndex = credentialIndex;
   let retriesUsed = 0;
+  // Every key counts as tried once per sweep; the one in hand has just failed.
+  let keysTriedInSweep = 1;
+  let attemptsUsed = 0;
 
+  /**
+   * Move on after a failure worth retrying.
+   *
+   * Several saved keys exist precisely so that a bad minute on one of them costs
+   * nothing: the next key is tried IMMEDIATELY, with no wait at all. Only once EVERY
+   * key has failed is the provider itself busy — then the run backs off and sweeps
+   * all the keys again. Sleeping between keys spent the whole backoff once per key,
+   * so eight keys meant minutes of waiting before the second one was ever tried.
+   */
   const scheduleRetry = async ({ reason, retryAfter = 0, rotateCredential = true }) => {
+    if (attemptsUsed >= MAX_PROVIDER_ATTEMPTS) return false;
+    attemptsUsed += 1;
+    if (rotateCredential && apiKeys.length > 1 && keysTriedInSweep < apiKeys.length) {
+      credentialIndex = (credentialIndex + 1) % apiKeys.length;
+      credentialCursors.set(cursorKey, credentialIndex);
+      keysTriedInSweep += 1;
+      onRetry?.({
+        attempt: retriesUsed,
+        maxRetries: MAX_PROVIDER_RETRIES,
+        delayMs: 0,
+        reason: `${reason}; trying the next key`,
+        credentialIndex: credentialIndex + 1,
+        credentialCount: apiKeys.length,
+      });
+      return true; // straight on, no sleep
+    }
+    // Out of keys: the wait belongs to the provider, not to any one key.
+    keysTriedInSweep = 1;
     if (retriesUsed >= MAX_PROVIDER_RETRIES) return false;
     retriesUsed += 1;
     if (rotateCredential && apiKeys.length) {

@@ -788,3 +788,52 @@ export const CODE_INDEX_HELP =
   '- `relevant_files` is the index reading the request: the files it points at are where to start when nothing was named.\n' +
   '- `code_map` is the project\'s shape: folders, what defines the most, what is most depended on.\n' +
   '- The index is updated by your own writes, so it is never stale behind your edits.';
+
+/**
+ * Names in the index that look like a misspelling of `want`.
+ *
+ * A search that finds nothing is otherwise a dead end: the run guesses another
+ * spelling, or gives up and starts reading whole files. One typo costs several
+ * steps, so an empty result is worth more than "no matches".
+ */
+export function suggestNames(index, want, limit = 4) {
+  const target = String(want || '').toLowerCase();
+  if (!index?.files || target.length < 3) return [];
+  /** Bounded edit distance: anything past `max` is "not close" and stops early. */
+  const within = (a, b, max) => {
+    if (Math.abs(a.length - b.length) > max) return max + 1;
+    let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= a.length; i++) {
+      const row = [i];
+      let best = i;
+      for (let j = 1; j <= b.length; j++) {
+        row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        if (row[j] < best) best = row[j];
+      }
+      if (best > max) return max + 1; // no later row can recover
+      prev = row;
+    }
+    return prev[b.length];
+  };
+  const maxEdits = target.length > 6 ? 2 : 1;
+  const found = new Map();
+  for (const file of Object.values(index.files)) {
+    for (const sym of file.symbols || []) {
+      const name = sym.name;
+      if (!name || found.has(name)) continue;
+      const n = name.toLowerCase();
+      let score = -1;
+      if (n === target) score = 0;
+      else if (n.startsWith(target) || target.startsWith(n)) score = 1;
+      else if (target.length >= 4 && (n.includes(target) || target.includes(n))) score = 2;
+      else if (Math.abs(n.length - target.length) <= maxEdits) {
+        const d = within(n, target, maxEdits);
+        if (d <= maxEdits) score = 3 + d;
+      }
+      if (score >= 0) found.set(name, { name, score, path: file.path, line: sym.line, kind: sym.kind });
+    }
+  }
+  return [...found.values()]
+    .sort((a, b) => a.score - b.score || a.name.length - b.name.length || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
