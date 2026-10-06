@@ -274,6 +274,7 @@ export default function RunLog({ chatId, workspaceId }: RunLogProps) {
   const [notes, setNotes] = useState<MemoryNote[]>([]);
   const [memoryBlock, setMemoryBlock] = useState('');
   const [projectBlock, setProjectBlock] = useState('');
+  const [project, setProject] = useState<NonNullable<Awaited<ReturnType<typeof getMemory>>['project']> | null>(null);
   const [steps, setSteps] = useState<MemoryStep[]>([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<'all' | 'tool' | 'model' | 'routing' | 'problem'>('all');
@@ -323,9 +324,10 @@ export default function RunLog({ chatId, workspaceId }: RunLogProps) {
         setNotes(r.notes || []);
         setMemoryBlock(r.block || '');
         setProjectBlock(r.projectBlock || '');
+        setProject(r.project || null);
         setSteps(r.steps || []);
       })
-      .catch(() => { if (!cancelled) { setNotes([]); setMemoryBlock(''); setProjectBlock(''); setSteps([]); } });
+      .catch(() => { if (!cancelled) { setNotes([]); setMemoryBlock(''); setProjectBlock(''); setProject(null); setSteps([]); } });
     return () => { cancelled = true; };
   }, [workspaceId, activeChat, runs.length]);
 
@@ -456,12 +458,56 @@ export default function RunLog({ chatId, workspaceId }: RunLogProps) {
           <span className="font-normal text-zinc-400">— the text the agent is given about this project</span>
         </h3>
         <div className="space-y-1.5">
-          <Foldable title="What this chat is told when it continues — word for word" text={memoryBlock} />
-          <Foldable title="What a new chat in this workspace is told — word for word" text={projectBlock} tone="zinc" />
+          {project && (project.overview || project.done.length > 0) && (
+            <div className="rounded-lg border border-violet-200 bg-violet-50/40 px-3 py-2 dark:border-violet-900/50 dark:bg-violet-950/20">
+              {project.overview && (
+                <p className="text-[12.5px] text-zinc-800 dark:text-zinc-200">{project.overview}</p>
+              )}
+              {project.done.length > 0 && (
+                <>
+                  <p className="mt-1.5 text-[11px] font-semibold uppercase tracking-wide text-violet-600 dark:text-violet-300">Already done</p>
+                  <ul className="mt-0.5 space-y-0.5">
+                    {project.done.map((line, i) => (
+                      <li key={i} className="text-[12px] text-zinc-700 dark:text-zinc-300">· {line}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {project.decisions.length > 0 && (
+                <>
+                  <p className="mt-1.5 text-[11px] font-semibold uppercase tracking-wide text-violet-600 dark:text-violet-300">Established</p>
+                  <ul className="mt-0.5 space-y-0.5">
+                    {project.decisions.map((line, i) => (
+                      <li key={i} className="text-[12px] text-zinc-700 dark:text-zinc-300">· {line}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {project.gotchas.length > 0 && (
+                <>
+                  <p className="mt-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-300">Known to bite</p>
+                  <ul className="mt-0.5 space-y-0.5">
+                    {project.gotchas.map((line, i) => (
+                      <li key={i} className="text-[12px] text-zinc-700 dark:text-zinc-300">· {line}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {project.open && (
+                <p className="mt-1.5 text-[12px] text-sky-700 dark:text-sky-300">Left open last time: {project.open}</p>
+              )}
+              <p className="mt-1.5 text-[10.5px] text-zinc-400">
+                Rewritten after each run from that run's own evidence · {project.runs} run{project.runs === 1 ? '' : 's'} folded in
+                {project.updatedAt ? ` · ${fmtTime(project.updatedAt)}` : ''}
+              </p>
+            </div>
+          )}
+          <Foldable title="Project summary, exactly as the model receives it" text={projectBlock} />
+          <Foldable title="This chat's own step history, word for word" text={memoryBlock} tone="zinc" />
           {!memoryBlock && !projectBlock && (
             <p className="text-[12px] text-zinc-500">
-              No project summary yet. It is written from finished runs — once the agent has done work here, the exact
-              text it will be told appears above.
+              No project summary yet. One is written after the first run that changes something, from that run's own
+              evidence — no extra model call — and rewritten after every run since.
             </p>
           )}
 

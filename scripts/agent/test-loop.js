@@ -459,7 +459,10 @@ test('successful verification is journaled automatically and available in the ne
     l.requests.length = 0;
     const second = await run('fake-build', 'what was the test command?');
     assert.equal(second.result.stopReason, 'completed');
-    assert.match(l.requests[0].messages[0].content, /Recent workspace evidence/);
+    // A different chat in the same project gets the project's running summary
+    // — not the other chat's step history — and the verified command is part
+    // of what the project has taught the agent.
+    assert.match(l.requests[0].messages[0].content, /what this project has taught you/i);
     assert.match(l.requests[0].messages[0].content, /npm run test:agent passed/);
     const onDisk = fs.readFileSync(path.join(dataDir, 'agent-runs', `${ws.id}.json`), 'utf8');
     assert.doesNotMatch(onDisk, /what was the test command/i, 'journal never stores the user prompt');

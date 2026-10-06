@@ -26,6 +26,7 @@ import { resolveApproval } from './approvals.js';
 import { runAgent } from './loop.js';
 import { clearNotes, readNotes, removeNotes } from './memory.js';
 import { readRunJournal, recentRunsForPrompt, taskKeyFor } from './journal.js';
+import { clearProjectMemory, readProjectMemory, renderProjectMemory } from './projectMemory.js';
 import { noteRunFinished, touch } from './sandboxActivity.js';
 import {
   killSandboxById, listAccountSandboxes, pauseSandboxById, resumeSandboxById, workspaceSandboxStatus,
@@ -290,10 +291,12 @@ export function registerAgentRoutes(app, {
     // the block came back as a single headline line.
     const chatId = String(req.query.taskKey || '');
     const taskKey = chatId ? taskKeyFor(chatId) : '';
-    const block = recentRunsForPrompt(req.params.id, query, 8_000, 6, {
-      resume: Boolean(taskKey),
-      taskKey,
-    });
+    // This chat's own step history, and nothing from any other chat.
+    const block = taskKey
+      ? recentRunsForPrompt(req.params.id, query, 6_000, 6, { resume: true, taskKey, ownTaskOnly: true })
+      : '';
+    const project = readProjectMemory(req.params.id);
+    const projectText = renderProjectMemory(project);
 
     // One existence check per distinct path, not per mention.
     const paths = [...new Set(runs.flatMap((run) => (run.memories || []).flatMap((m) => m.files || [])))].slice(0, 120);
@@ -307,7 +310,9 @@ export function registerAgentRoutes(app, {
       }
     }));
 
-    const steps = runs.flatMap((run) => (run.memories || []).map((entry) => ({
+    // Only the open chat's steps. Another chat's checkpoints are its own.
+    const ownRuns = taskKey ? runs.filter((run) => run.taskKey === taskKey) : [];
+    const steps = ownRuns.flatMap((run) => (run.memories || []).map((entry) => ({
       ...entry,
       runId: run.id,
       taskKey: run.taskKey || '',
@@ -315,21 +320,24 @@ export function registerAgentRoutes(app, {
       files: (entry.files || []).map((file) => ({ path: file, missing: missing.has(file) })),
     }))).sort((a, b) => b.at - a.at);
 
-    // Two different texts, and conflating them is why this looked empty: a
-    // continued chat is handed its own task's history, while a brand new chat
-    // in the same workspace is handed only what the project as a whole has
-    // taught the agent. Both are real, and the reader wants to see both.
-    const projectBlock = recentRunsForPrompt(req.params.id, '', 8_000, 6, { resume: false, taskKey: '' });
-
     res.json({
       success: true,
       notes: readNotes(req.params.id),
       runs,
-      /** What THIS chat is told when it continues, verbatim. */
+      /** This chat's own step history, verbatim as the model receives it. */
       block,
       blockChars: block.length,
-      /** What a NEW chat in this workspace is told, verbatim. */
-      projectBlock,
+      /** The project's living summary — one document, every chat gets it. */
+      projectBlock: projectText,
+      project: {
+        overview: project.overview || '',
+        done: project.done || [],
+        decisions: project.decisions || [],
+        gotchas: project.gotchas || [],
+        open: project.open || '',
+        runs: project.runs || 0,
+        updatedAt: project.updatedAt || 0,
+      },
       steps,
     });
   }));
@@ -342,6 +350,7 @@ export function registerAgentRoutes(app, {
   router.delete('/workspaces/:id/memory', wrap(async (req, res) => {
     await openWorkspace(req.params.id);
     clearNotes(req.params.id);
+    clearProjectMemory(req.params.id);
     res.json({ success: true, notes: [] });
   }));
 

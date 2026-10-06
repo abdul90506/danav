@@ -278,7 +278,7 @@ const clipLine = (value, max = 180) => {
  * this backwards would delete true memory, which is far worse than keeping
  * stale memory.
  */
-export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, limit = 8, { resume = false, taskKey = '', live = null } = {}) {
+export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, limit = 8, { resume = false, taskKey = '', live = null, ownTaskOnly = false } = {}) {
   const liveFiles = live?.files instanceof Set ? live.files : null;
   const liveDirs = live?.dirs instanceof Set ? live.dirs : null;
   const gone = (file) => {
@@ -355,16 +355,23 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   }).sort((a, b) => b.relevance - a.relevance || b.run.at - a.run.at);
 
   const selected = new Map();
+  // Step history is the property of the chat that produced it. With
+  // `ownTaskOnly` nothing from another task is eligible, however well its
+  // words happen to match — a different chat's checklist read as instructions
+  // and sent runs off doing work nobody had asked for.
+  if (ownTaskOnly && !taskRuns.length) return '';
   // Every run of the task being continued is relevant by definition — the work
   // it did is the thing Continue has to not repeat. Ranking them against the
   // user's words would drop them, because "Continue." has no words to match.
   if (carryKnowledge) for (const run of taskRuns.slice(0, maxEntries)) selected.set(run.id, run);
   // Do not inject the newest workspace run into an unrelated task. If the user
   // supplied no searchable words, the latest entry is the only useful default.
-  else if (!words.size) selected.set(runs[0].id, runs[0]);
-  for (const item of ranked) {
-    if (selected.size >= maxEntries) break;
-    if (item.relevance > 0) selected.set(item.run.id, item.run);
+  else if (!words.size && !ownTaskOnly) selected.set(runs[0].id, runs[0]);
+  if (!ownTaskOnly) {
+    for (const item of ranked) {
+      if (selected.size >= maxEntries) break;
+      if (item.relevance > 0) selected.set(item.run.id, item.run);
+    }
   }
   const entries = [...selected.values()].sort((a, b) => b.at - a.at);
   const lines = [];

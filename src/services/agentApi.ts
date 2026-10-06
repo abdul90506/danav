@@ -294,8 +294,17 @@ export const getMemory = (workspaceId: string, taskKey?: string) =>
     /** What this chat is told when it continues, verbatim. */
     block?: string;
     blockChars?: number;
-    /** What a brand new chat in this workspace is told, verbatim. */
+    /** The project's living summary — one document, every chat gets it. */
     projectBlock?: string;
+    project?: {
+      overview: string;
+      done: string[];
+      decisions: string[];
+      gotchas: string[];
+      open: string;
+      runs: number;
+      updatedAt: number;
+    };
     steps?: MemoryStep[];
   }>(
     'GET',

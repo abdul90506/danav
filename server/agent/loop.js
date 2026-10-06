@@ -19,6 +19,7 @@ import { detectChecks, formatChecksHint } from './verify.js';
 import { formatRepoState, readRepoState } from './githistory.js';
 import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun, taskKeyFor } from './journal.js';
+import { readProjectMemory, renderProjectMemory, updateProjectMemory } from './projectMemory.js';
 import { createTaskMemory } from './taskMemory.js';
 import { buildToolset, pickFailureLines, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint, nearestTool } from './tools.js';
 import { checkAction, createRunState, observeOwned } from './policy.js';
@@ -858,6 +859,10 @@ export async function runAgent({
   send({ agent: { type: 'run_start', runId, workspace: workspace.info() } });
   send({ status: 'Working…' });
 
+  // Hoisted: the listing is taken inside the run but is still needed in the
+  // cleanup below, where the project's summary is rewritten and has to know
+  // which files actually exist.
+  let live = null;
   try {
     // ---- context ------------------------------------------------------------
     const priorMessages = cleanHistory(history);
@@ -965,7 +970,7 @@ export async function runAgent({
   // still exists. It is shallow, so it is handed over with the folders it
   // actually read: the journal may only call a file deleted inside one of
   // those. A truncated listing is not used as evidence at all.
-  const live = snapshotTruncated || !snapshotEntries.length ? null : (() => {
+  live = snapshotTruncated || !snapshotEntries.length ? null : (() => {
     const files = new Set();
     const dirs = new Set(['.']);
     for (const entry of snapshotEntries) {
@@ -978,7 +983,22 @@ export async function runAgent({
     }
     return { files, dirs };
   })();
-  const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, knowsThisTask ? 8_000 : 2_500, 6, { resume, taskKey, live }));
+  /**
+   * Two memories, kept apart on purpose.
+   *
+   * The project summary belongs to the workspace: what this is, what has been
+   * built, what was decided. Every chat gets it, and it is short.
+   *
+   * The step-by-step history belongs to the chat that produced it. Handing one
+   * chat's half-finished checklist to another chat was never useful — it read
+   * as instructions for work the new chat had not been asked to do — so a chat
+   * that is not continuing a known task gets none of it.
+   */
+  const projectMemory = redact(renderProjectMemory(readProjectMemory(workspace.id)));
+  const ownSteps = knowsThisTask
+    ? redact(recentRunsForPrompt(workspace.id, currentRequest, 6_000, 6, { resume, taskKey, live, ownTaskOnly: true }))
+    : '';
+  const recentRuns = [projectMemory, ownSteps].filter(Boolean).join('\n\n');
     // Memory is looked up against the request AND the files this workspace was
     // last working on: "continue with the retry work" has to find the note about
     // the module that was just being changed, even though the words do not match.
@@ -2044,7 +2064,7 @@ export async function runAgent({
     runActive = false;
     try { taskMemory.finish(state); } catch { /* task notes must never prevent run cleanup */ }
     try {
-      recordRun(workspace.id, {
+      const finishedRun = {
         runId,
         taskKey,
         stopReason,
@@ -2056,7 +2076,13 @@ export async function runAgent({
         toolErrors: state.toolErrors || [],
         explored: [...(state.explored?.values() || [])],
         interrupted: [...new Set(interrupted)].slice(0, 8),
-      });
+      };
+      recordRun(workspace.id, finishedRun);
+      // The project's own summary, rewritten from what this run proved. Costs
+      // no model call: everything it is made of was already recorded above.
+      // The listing is passed with it so a project whose files are gone stops
+      // being described as though they were there.
+      updateProjectMemory(workspace.id, { run: finishedRun, live });
     } catch {
       /* continuity data is best effort and must never turn a finished run into an error */
     }

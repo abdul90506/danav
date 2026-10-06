@@ -106,10 +106,10 @@ Every turn re-sends this entire conversation, so a turn is the most expensive th
     // history lesson: the model is mid-task, and a task it is in the middle of
     // does not need to be re-explored from the top.
     const heading = resume
-      ? '# What you already did on this task (exact-task checkpoint; compact task-step memories, findings, file changes and recognized checks; no user prompts or file bodies)\n' +
+      ? '# What you already did on this task (this chat only: your own checkpoints, findings, file changes and recognized checks; no user prompts or file bodies)\n' +
         'You are partway through this exact task. This checkpoint is your own work so far. Do not re-analyze or repeat completed items; continue from the first open step. Re-check mutable facts against the current workspace.\n'
-      : '# Recent workspace evidence (query-matched task-step memories, file changes, findings and recognized checks; no user prompts or file bodies)\n' +
-        'This is retrieval, not ground truth: findings may be stale and checks only describe the earlier state. Re-check mutable facts and run relevant checks before claiming the present task is verified.\n';
+      : '# Recent workspace evidence — what this project has taught you (one running summary, rewritten after each run)\n' +
+        'Not ground truth: it describes earlier state. Re-check anything mutable, and re-run the checks before claiming this task is verified.\n';
     sections.push(heading + recentRuns);
   }
   if (repoMap) {
