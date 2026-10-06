@@ -14,7 +14,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { applyAnyEdits, applyEdit, diffSummary, liveDiffStats, numberLines, splitLines, stripLineNumberPrefix } from './textops.js';
 import { formatOutline, languageOf, outline } from './outline.js';
-import { checkSyntax, syntaxWarning } from './check.js';
+import { bidiWarning, checkSyntax, syntaxWarning } from './check.js';
 import { addNote, looksLikeSecret, readNotes, removeNotes, searchNotes } from './memory.js';
 import { currentFileVersion, expectedFileVersion, fileVersion, hasInspectedContent, movingTargets, observeFile, observeFileRange, observeListing, observeOwned, observeShellMove, workspaceStatFingerprint } from './policy.js';
 import { peekPartialArgs, salvageWrite, extractStringFields, repairJsonText } from './partial.js';
@@ -65,7 +65,7 @@ const ALIASES = {
 function argumentHint(name, args, message) {
   const missing = /Missing required argument "([\w]+)"/.exec(String(message || ''));
   const keys = Object.keys(args && typeof args === 'object' ? args : {});
-  const def = TOOL_DEFINITIONS.find((d) => d.function.name === name);
+  const def = ALL_TOOL_DEFINITIONS.find((d) => d.function.name === name);
   const props = def?.function?.parameters?.properties || {};
   const params = Object.keys(props);
   if (!params.length) return '';
@@ -440,7 +440,7 @@ const P = {
   path: { type: 'string', description: 'Path relative to the workspace root (absolute paths are allowed where they stay inside it).' },
 };
 
-export const TOOL_DEFINITIONS = [
+export const ALL_TOOL_DEFINITIONS = [
   fn(
     'list_dir',
     'List files and folders (folders first). depth=1 lists one level, up to 4 gives a tree. Generated folders (node_modules, .git, dist, build…) are shown but not expanded.',
@@ -730,6 +730,38 @@ export const TOOL_DEFINITIONS = [
 ];
 
 /**
+ * Advertised to the model — which is not quite every tool there is.
+ *
+ * Each schema is re-sent on every single round, and each extra name is also one
+ * more thing to choose between, so a tool has to earn its place. These three do
+ * not, for a coding agent:
+ *   image_search   finding pictures on the web is not this agent's job, and
+ *                  web_search already surfaces the pages that hold them;
+ *   forget         deleting a saved note mid-run is vanishingly rare, and a note
+ *                  that turned out wrong is corrected by writing a better one;
+ *   repo_status    its own description admits the prompt already carries this,
+ *                  and repo_history view="diff" gives the uncommitted detail.
+ *
+ * They are hidden, NOT removed: every implementation is still there and still
+ * runs if something calls it, and DANAV_AGENT_TOOLS_EXTRA brings any of them back
+ * by name (or "all").
+ */
+const HIDDEN_FROM_AGENT = new Set(['image_search', 'forget', 'repo_status']);
+
+function advertisedToolDefinitions() {
+  const raw = String(process.env.DANAV_AGENT_TOOLS_EXTRA || '').trim().toLowerCase();
+  if (raw === 'all' || raw === '*') return ALL_TOOL_DEFINITIONS;
+  const wanted = new Set(raw ? raw.split(/[\s,]+/).filter(Boolean) : []);
+  return ALL_TOOL_DEFINITIONS.filter(
+    (d) => !HIDDEN_FROM_AGENT.has(d.function.name) || wanted.has(d.function.name)
+  );
+}
+
+/** The tools the model is told about. Everything else stays callable. */
+export const TOOL_DEFINITIONS = advertisedToolDefinitions();
+
+
+/**
  * Tools that were folded into others, kept only as a redirect.
  *
  * `create_dir` was a whole tool for an operation two existing paths already do
@@ -800,7 +832,7 @@ const HOUSEKEEPING_INTENT = [
 export function unknownToolHint(name) {
   if (typeof name !== 'string' || !name) return null;
   const bare = name.trim();
-  const names = TOOL_DEFINITIONS.map((d) => d.function.name);
+  const names = ALL_TOOL_DEFINITIONS.map((d) => d.function.name);
   if (names.includes(bare)) return null; // it exists; the caller asked the wrong question
   const intent = HOUSEKEEPING_INTENT.find((entry) => entry.re.test(bare));
   if (intent) {
@@ -1285,6 +1317,13 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
    */
   const verify = async (res, abs, text, { skip = false } = {}) => {
     if (skip) return res;
+    // Cheap, and nothing to do with whether the file parses: a file can be perfectly
+    // valid and still read as the opposite of what it does.
+    const bidi = bidiWarning(text, rel(abs));
+    if (bidi) {
+      res.output += bidi;
+      res.ui.bidi = true;
+    }
     const v = await checkSyntax(ws, abs, rel(abs), text).catch(() => null);
     if (!v) return res;
     res.ui.check = { lang: v.lang, ok: v.ok, ...(v.ok ? {} : { message: clip(v.message || '', 160), path: rel(abs) }) };

@@ -91,7 +91,14 @@ export class LocalWorkspace extends BaseWorkspace {
   // ---- paths --------------------------------------------------------------
 
   resolve(p = '.') {
-    const input = String(p ?? '.').replace(/\0/g, '').trim() || '.';
+    const raw = String(p ?? '.');
+    // A NUL can never be part of a real path. Stripping it silently answered a
+    // request for "a\\0b.txt" by creating "ab.txt" and reporting success under the
+    // rewritten name -- a different file from the one that was asked for.
+    if (raw.includes('\0')) {
+      throw new WorkspaceError(`Path "${raw.replace(/\0/g, '\\0')}" contains a NUL character, which no file name can hold.`, 'invalid_path');
+    }
+    const input = raw.trim() || '.';
     const abs = path.resolve(this.root, input);
     if (!isInside(this.root, abs)) {
       throw new WorkspaceError(

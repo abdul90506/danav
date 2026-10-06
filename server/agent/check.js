@@ -116,3 +116,35 @@ export async function checkSyntax(ws, abs, rel, text) {
 /** The sentence the model reads when a check fails. */
 export const syntaxWarning = (verdict, rel) =>
   `\n⚠ SYNTAX ERROR in ${rel} (${verdict.lang}): ${verdict.message}\nThe file was written, but it will not run as it is. Read the lines around the error and fix it now, before anything else.`;
+
+/**
+ * Characters that make a file read differently than it runs.
+ *
+ * The bidi overrides and isolates (CVE-2021-42574, "Trojan Source") reorder a
+ * line for the human eye while the compiler sees the original order, so a
+ * reviewer can read `if (isAdmin)` where the code says the opposite. They have
+ * essentially no legitimate use in source, and this agent reads untrusted web
+ * pages, so a file that gains one is worth saying out loud. Ordinary right-to-left
+ * text — Urdu, Arabic, Hebrew — uses none of these and is never flagged.
+ */
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/;
+const BIDI_NAMES = {
+  '\u202A': 'LRE', '\u202B': 'RLE', '\u202C': 'PDF', '\u202D': 'LRO', '\u202E': 'RLO',
+  '\u2066': 'LRI', '\u2067': 'RLI', '\u2068': 'FSI', '\u2069': 'PDI',
+};
+
+export function bidiWarning(text, rel) {
+  const s = String(text ?? '');
+  if (!BIDI_CONTROLS.test(s)) return '';
+  const hits = [];
+  const lines = s.split('\n');
+  for (let i = 0; i < lines.length && hits.length < 5; i++) {
+    const found = [...new Set((lines[i].match(/[\u202A-\u202E\u2066-\u2069]/g) || []))];
+    if (found.length) hits.push(`L${i + 1} (${found.map((c) => `U+${c.codePointAt(0).toString(16).toUpperCase()} ${BIDI_NAMES[c]}`).join(', ')})`);
+  }
+  return (
+    `\n⚠ ${rel} contains bidirectional control characters at ${hits.join(', ')}. ` +
+    'They reorder the line on screen without changing what runs, so the file can read as something it is not. ' +
+    'Unless this is deliberate, remove them and rewrite the line in plain characters.'
+  );
+}

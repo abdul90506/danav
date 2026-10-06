@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
-import { buildToolset, pickFailureLines, READ_ONLY_TOOLS, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
+import { ALL_TOOL_DEFINITIONS, buildToolset, pickFailureLines, READ_ONLY_TOOLS, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
 import { createRedactor } from '../../server/agent/util.js';
 import { formatRepoState, gitBlame, readRepoState } from '../../server/agent/githistory.js';
 import { detectChecks, formatChecksHint } from '../../server/agent/verify.js';
@@ -216,9 +216,14 @@ test('raw git through the shell is answered with the tool that shapes it — onc
 
 test('the history tools are read-only, in the toolset, and safe in parallel', async () => {
   const names = TOOL_DEFINITIONS.map((d) => d.function.name);
-  for (const tool of ['repo_status', 'repo_history', 'run_checks']) {
+  for (const tool of ['repo_history', 'run_checks']) {
     assert.ok(names.includes(tool), `${tool} is advertised to the model`);
   }
+  // repo_status is deliberately not advertised: the prompt already carries the
+  // branch, HEAD and recent commits, and repo_history view="diff" has the detail.
+  // It is hidden, not gone — still implemented, and still callable.
+  assert.ok(!names.includes('repo_status'), 'repo_status is not worth a schema every round');
+  assert.ok(ALL_TOOL_DEFINITIONS.some((d) => d.function.name === 'repo_status'), 'but it still exists');
   assert.ok(READ_ONLY_TOOLS.has('repo_status') && READ_ONLY_TOOLS.has('repo_history'), 'history reads may run in parallel');
   assert.ok(!READ_ONLY_TOOLS.has('run_checks'), 'running checks is a command, not a read');
 });

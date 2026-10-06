@@ -249,3 +249,20 @@ test('workspace deletion clears its notes, task journal, and cached code index',
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('a path carrying a NUL is refused, not quietly rewritten into another path', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-nul-'));
+  try {
+    const ws = new LocalWorkspace({ id: 'ws-nul', kind: 'local', name: 'n', root: dir, autoRun: true });
+    await ws.init();
+    // Stripping the NUL turned a request for "a\0b.txt" into "ab.txt" and reported
+    // success under the rewritten name: a different file from the one asked for.
+    assert.throws(() => ws.resolve('a\u0000b.txt'), /NUL character/);
+    await assert.rejects(() => ws.safePath('secret\u0000.png'), /NUL character/);
+    assert.equal(fs.existsSync(path.join(dir, 'ab.txt')), false, 'nothing was created under a rewritten name');
+    // Ordinary paths are unaffected.
+    assert.equal(ws.resolve('a/b.txt'), path.join(dir, 'a', 'b.txt'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

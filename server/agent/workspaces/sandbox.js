@@ -253,7 +253,12 @@ export class SandboxWorkspace extends BaseWorkspace {
 
   /** The sandbox is disposable and isolated, so absolute paths anywhere are allowed. */
   resolve(p = '.') {
-    const input = String(p ?? '.').replace(/\0/g, '').replace(/\\/g, '/').trim() || '.';
+    const raw = String(p ?? '.');
+    // See LocalWorkspace.resolve: a stripped NUL silently retargets the write.
+    if (raw.includes('\0')) {
+      throw new WorkspaceError(`Path "${raw.replace(/\0/g, '\\0')}" contains a NUL character, which no file name can hold.`, 'invalid_path');
+    }
+    const input = raw.replace(/\\/g, '/').trim() || '.';
     return posix.resolve(this.root, input);
   }
 

@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalWorkspace } from '../../server/agent/workspaces/local.js';
-import { assertPublicUrl, buildToolset, displayArgs, isPrivateAddress, peekPartialArgs, portsInCommand, READ_ONLY_TOOLS, resolveSafeUrl, RETIRED_TOOLS as retiredTools, TOOL_DEFINITIONS } from '../../server/agent/tools.js';
+import { ALL_TOOL_DEFINITIONS, assertPublicUrl, buildToolset, displayArgs, isPrivateAddress, peekPartialArgs, portsInCommand, READ_ONLY_TOOLS, resolveSafeUrl, RETIRED_TOOLS as retiredTools, TOOL_DEFINITIONS, unknownToolHint } from '../../server/agent/tools.js';
 import { createRedactor } from '../../server/agent/util.js';
 import { checkAction, fileVersion, observeFile } from '../../server/agent/policy.js';
 import { repairJsonText } from '../../server/agent/partial.js';
@@ -1627,4 +1627,64 @@ test('a repeated analysis call runs again once anything on disk may have moved',
 
   // read_file keeps its own finer, range-aware ledger and is not touched by this.
   assert.ok(ctx.state.analysisEpoch > 0, 'writes advanced the epoch');
+});
+
+test('a tool can be hidden from the model without being taken away', async () => {
+  const { tools, run } = await setup();
+  const advertised = TOOL_DEFINITIONS.map((d) => d.function.name);
+  const everything = ALL_TOOL_DEFINITIONS.map((d) => d.function.name);
+
+  // Every schema is re-sent each round, so a tool that is not worth that is not
+  // offered. It is still there: the point is the model's menu, not the codebase.
+  for (const hidden of ['image_search', 'forget', 'repo_status']) {
+    assert.ok(!advertised.includes(hidden), `${hidden} should not cost a schema every round`);
+    assert.ok(everything.includes(hidden), `${hidden} must still have its schema`);
+    assert.ok(tools.has(hidden), `${hidden} must still be implemented`);
+    assert.equal(unknownToolHint(hidden), null, `${hidden} must not be reported as an unknown tool`);
+  }
+  assert.ok(advertised.length < everything.length);
+  assert.ok(advertised.includes('web_search') && advertised.includes('remember'), 'the useful ones stay');
+
+  // Hidden does not mean broken: calling one still works.
+  const status = await run('repo_status', {});
+  assert.equal(status.ok, true, status.output);
+
+  // And nothing is lost for good — asking for it by name brings it back.
+  const before = process.env.DANAV_AGENT_TOOLS_EXTRA;
+  try {
+    process.env.DANAV_AGENT_TOOLS_EXTRA = 'repo_status';
+    const { advertisedToolDefinitions } = await import('../../server/agent/tools.js');
+    if (typeof advertisedToolDefinitions === 'function') {
+      assert.ok(advertisedToolDefinitions().some((d) => d.function.name === 'repo_status'));
+    }
+  } finally {
+    if (before === undefined) delete process.env.DANAV_AGENT_TOOLS_EXTRA;
+    else process.env.DANAV_AGENT_TOOLS_EXTRA = before;
+  }
+});
+
+test('a file written with bidi overrides is flagged; ordinary right-to-left text is not', async () => {
+  const { run } = await setup();
+  // CVE-2021-42574: the override reorders the line on screen, so a reviewer reads
+  // a comment where the code grants root.
+  const trojan = 'if (isAdmin) {\n  // \u202Ereturn 0; // safe\u202C\n  grantRoot();\n}\n';
+  const flagged = await run('write_file', { path: 'evil.js', content: trojan });
+  assert.equal(flagged.ok, true, flagged.output);
+  assert.equal(flagged.ui.bidi, true);
+  assert.match(flagged.output, /bidirectional control characters at L2/);
+  assert.match(flagged.output, /U\+202E RLO/);
+  assert.match(flagged.output, /reorder the line on screen/);
+
+  // Urdu, Arabic and Hebrew use no such controls and must never be flagged —
+  // warning on every translated string would make the check worthless.
+  const rtl = await run('write_file', { path: 'urdu.js', content: 'const msg = "خوش آمدید";\nconst he = "שלום";\nconst ar = "مرحبا";\n' });
+  assert.equal(rtl.ok, true, rtl.output);
+  assert.equal(rtl.ui.bidi, undefined, 'plain right-to-left text is not a Trojan Source');
+  assert.ok(!/bidirectional/.test(rtl.output));
+
+  // An edit that introduces one is caught the same way.
+  await run('write_file', { path: 'ok.js', content: 'export const n = 1;\n' });
+  const edited = await run('edit_file', { path: 'ok.js', old_string: 'const n = 1;', new_string: 'const n = 1; // \u2066hidden\u2069' });
+  assert.equal(edited.ok, true, edited.output);
+  assert.match(edited.output, /bidirectional control characters/);
 });
