@@ -64,6 +64,7 @@ import {
   getAgentConfig,
   getSandboxStatus,
   listWorkspaces,
+  listWorkspaceFiles,
   stopAgentRun,
   updateWorkspace as updateAgentWorkspace,
   wakeWorkspace,
@@ -1929,6 +1930,25 @@ export const App: React.FC = () => {
     setActiveMoviePlayer({ isOpen: true, mediaId: id, mediaType: type, title: title || 'Now Playing' })
   );
 
+  /**
+   * Workspace paths for the composer's @-mentions.
+   *
+   * Fetched once per workspace and re-fetched when the agent reports a changed
+   * file, so a file the agent just created can be mentioned in the next message.
+   * A failure is silent on purpose: @-mentions are a convenience, and a broken
+   * one must not put an error in front of someone who was only typing.
+   */
+  const [mentionFiles, setMentionFiles] = useState<string[]>([]);
+  useEffect(() => {
+    const id = agentOn ? activeConversation?.agentWorkspaceId : null;
+    if (!id) { setMentionFiles([]); return; }
+    let cancelled = false;
+    listWorkspaceFiles(id)
+      .then((r) => { if (!cancelled) setMentionFiles(r.files || []); })
+      .catch(() => { if (!cancelled) setMentionFiles([]); });
+    return () => { cancelled = true; };
+  }, [agentOn, activeConversation?.agentWorkspaceId, filesRefresh]);
+
   // ---- Command palette -------------------------------------------------------
 
   /** ⌘ on a Mac, Ctrl everywhere else — shown in the UI, not just bound. */
@@ -2130,6 +2150,7 @@ export const App: React.FC = () => {
             <ChatInput
               isCentered={true}
               draftResetKey={composerReset}
+                  mentionFiles={agentOn ? mentionFiles : undefined}
               onSend={onSendFromComposer}
               isLoading={isLoading}
               onStop={onStopStable}
@@ -2169,6 +2190,7 @@ export const App: React.FC = () => {
                 <ChatInput
                   isCentered={false}
                   draftResetKey={composerReset}
+                  mentionFiles={agentOn ? mentionFiles : undefined}
                   onSend={onSendFromComposer}
                   isLoading={isLoading}
                   onStop={onStopStable}

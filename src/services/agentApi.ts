@@ -138,6 +138,17 @@ export const getTree = (id: string, path = '.') =>
     `/workspaces/${encodeURIComponent(id)}/tree?path=${encodeURIComponent(path)}`
   );
 
+/**
+ * Every file in the workspace, flat, for the composer's @-mention picker.
+ * Ranking happens in the browser as the user types, so this is fetched once per
+ * workspace rather than per keystroke.
+ */
+export const listWorkspaceFiles = (id: string, limit = 2000) =>
+  call<{ files: string[]; truncated: boolean }>(
+    'GET',
+    `/workspaces/${encodeURIComponent(id)}/files?limit=${limit}`
+  );
+
 export const getFile = (id: string, path: string) =>
   call<{ path: string; size: number; binary: boolean; truncated: boolean; text: string }>(
     'GET',

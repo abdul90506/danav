@@ -3508,15 +3508,24 @@ app.use(
  * forever — the client gets a normal JSON error it can show instead.
  */
 app.use((err, req, res, next) => {
-  console.error('Unhandled route error:', err);
-  if (res.headersSent) return next(err);
   // body-parser tags its own errors with a 4xx status (malformed JSON, payload
   // too large). Honour it instead of reporting a server fault for a bad request.
-  const status = Number(err?.status || err?.statusCode) || 500;
-  return res.status(status >= 400 && status < 600 ? status : 500).json({
-    success: false,
-    error: err?.message || 'Internal server error',
-  });
+  const raw = Number(err?.status || err?.statusCode) || 500;
+  const status = raw >= 400 && raw < 600 ? raw : 500;
+
+  // A client sending a broken body is not an unhandled error, and printing a
+  // ten-line stack for one is how a real 500 gets lost in the scroll. Client
+  // faults get one line; server faults keep the whole stack.
+  if (status >= 500) console.error('Unhandled route error:', err);
+  else console.warn(`[${status}] ${req.method} ${req.originalUrl}: ${err?.message || err?.type || 'bad request'}`);
+
+  if (res.headersSent) return next(err);
+  const message = err?.type === 'entity.parse.failed'
+    ? 'The request body was not valid JSON.'
+    : err?.type === 'entity.too.large'
+      ? 'The request body is too large.'
+      : err?.message || 'Internal server error';
+  return res.status(status).json({ success: false, error: message });
 });
 
 /**

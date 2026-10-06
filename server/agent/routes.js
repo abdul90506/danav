@@ -152,6 +152,28 @@ export function registerAgentRoutes(app, {
     });
   }));
 
+  /**
+   * A flat list of the workspace's files, for the composer's @-mention picker.
+   *
+   * The tree endpoint is one folder deep on purpose — it backs a browsable
+   * panel. Mentioning a file is the opposite interaction: you know roughly what
+   * it is called and do not want to walk there, so the whole list is ranked
+   * client-side as you type. An empty pattern means "everything", which is what
+   * the picker opens with.
+   */
+  router.get('/workspaces/:id/files', wrap(async (req, res) => {
+    const ws = await openWorkspace(req.params.id);
+    await ws.init();
+    const abs = ws.resolve('.');
+    const limit = Math.min(Math.max(Number(req.query.limit) || 2000, 1), 5000);
+    const { files, truncated } = await ws.findFiles({
+      pattern: String(req.query.pattern || ''),
+      path: abs,
+      maxResults: limit,
+    });
+    res.json({ success: true, files, truncated });
+  }));
+
   router.get('/workspaces/:id/file', wrap(async (req, res) => {
     const ws = await openWorkspace(req.params.id);
     await ws.init();

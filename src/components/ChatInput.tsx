@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 import { Attachment, Provider, ThinkingLevel, Model } from '../types';
+import { applyMention, mentionQueryAt, rankMentions } from './MentionPicker';
 import {
   ATTACHMENT_BUDGET_BYTES,
   MAX_ATTACHMENT_BYTES,
@@ -101,6 +102,11 @@ interface ChatInputProps {
   onSelectThinkingLevel: (level: ThinkingLevel) => void;
   /** Agent switch + workspace picker, shown in a row above the message box. */
   agentControls?: React.ReactNode;
+  /**
+   * Workspace file paths for @-mentions. Agent mode only: in chat mode there is
+   * no workspace, so there is nothing to point at.
+   */
+  mentionFiles?: string[];
 }
 
 // Compact, responsive Model Selector Popup with Provider Tabs and Search Filter
@@ -350,8 +356,43 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   onSelectModel,
   onSelectThinkingLevel,
   agentControls,
+  mentionFiles,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // ---- @-mentions ------------------------------------------------------------
+  const [mentionCursor, setMentionCursor] = useState(0);
+  const [mention, setMention] = useState<{ query: string; start: number; end: number } | null>(null);
+  const mentionHits = useMemo(
+    () => (mention && mentionFiles?.length ? rankMentions(mention.query, mentionFiles) : []),
+    [mention, mentionFiles]
+  );
+  const mentionOpen = !!mention && mentionHits.length > 0;
+
+  /** Re-read the caret after any edit or move, so the picker tracks it. */
+  const syncMention = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el || !mentionFiles?.length) { setMention(null); return; }
+    const caret = el.selectionStart ?? 0;
+    const found = el.selectionStart === el.selectionEnd ? mentionQueryAt(el.value, caret) : null;
+    setMention(found ? { query: found.query, start: found.start, end: caret } : null);
+    setMentionCursor(0);
+  }, [mentionFiles]);
+
+  const acceptMention = useCallback((path: string) => {
+    const el = textareaRef.current;
+    if (!el || !mention) return;
+    const next = applyMention(el.value, mention.start, mention.end, path);
+    setDraft(next.text);
+    setMention(null);
+    // The value lands on the next render; move the caret after that so it is not
+    // dragged to the end of the box.
+    requestAnimationFrame(() => {
+      const node = textareaRef.current;
+      if (!node) return;
+      node.focus();
+      node.setSelectionRange(next.caret, next.caret);
+    });
+  }, [mention]);
   const composerRootRef = useRef<HTMLDivElement>(null);
   const attachTriggerRef = useRef<HTMLButtonElement>(null);
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
@@ -701,6 +742,19 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // The mention picker owns the arrows and Enter while it is up: Enter there
+    // means "take this file", not "send the half-written message".
+    if (mentionOpen) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionCursor((c) => (c + 1) % mentionHits.length); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionCursor((c) => (c - 1 + mentionHits.length) % mentionHits.length); return; }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        if (e.nativeEvent?.isComposing) return;
+        e.preventDefault();
+        acceptMention(mentionHits[mentionCursor].path);
+        return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); setMention(null); return; }
+    }
     // Enter sends, Shift+Enter makes a new line — except while an input method is
     // composing (Urdu, Arabic, Chinese, Japanese keyboards use Enter to accept a
     // candidate). Sending there would cut the word the user is still choosing, so
@@ -732,12 +786,54 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   // Never label Auto as Medium: Gemini Flash-Lite has its own Auto default.
   const currentDisplayThinking = thinkingLevel === 'Medium' ? 'Med' : thinkingLevel;
 
+  /**
+   * The @-mention list. Sits above the composer rather than below it: the
+   * composer is already at the bottom of the window, so a dropdown would open
+   * off-screen.
+   */
+  const mentionPanel = mentionOpen ? (
+    <div
+      role="listbox"
+      aria-label="Workspace files"
+      className="absolute bottom-full left-0 right-0 z-30 mb-2 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-xl"
+    >
+      <div className="max-h-60 overflow-y-auto py-1">
+        {mentionHits.map((hit, i) => {
+          const slash = hit.path.lastIndexOf('/');
+          const dir = slash === -1 ? '' : hit.path.slice(0, slash + 1);
+          const base = hit.path.slice(slash + 1);
+          return (
+            <div
+              key={hit.path}
+              role="option"
+              aria-selected={i === mentionCursor}
+              // Pointer-down, not click: the textarea's blur would close the
+              // list before a click ever landed.
+              onPointerDown={(e) => { e.preventDefault(); acceptMention(hit.path); }}
+              onPointerMove={() => setMentionCursor(i)}
+              className={`mx-1 flex cursor-pointer items-baseline gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] ${
+                i === mentionCursor ? 'bg-zinc-100 dark:bg-zinc-800' : ''
+              }`}
+            >
+              {dir && <span className="shrink-0 truncate text-[11.5px] text-zinc-400 dark:text-zinc-500">{dir}</span>}
+              <span className="truncate text-zinc-800 dark:text-zinc-200">{base}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="border-t border-zinc-200 dark:border-zinc-800 px-2.5 py-1 text-[10.5px] text-zinc-400 dark:text-zinc-500">
+        ↑↓ pick · ↵ insert · esc dismiss
+      </div>
+    </div>
+  ) : null;
+
   // --------------------------------------------------------------------------
   // CENTERED MODE: Clean Card in Center of Screen (Welcome Screen)
   // --------------------------------------------------------------------------
   if (isCentered) {
     return (
       <div className="relative w-full max-w-2xl sm:max-w-3xl mx-auto px-4 select-none">
+        {mentionPanel}
         {agentControls && <div className="px-1 pb-2">{agentControls}</div>}
         {/* Hidden File and Folder Inputs */}
         <input
@@ -803,8 +899,11 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
             <textarea
               ref={textareaRef}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => { setDraft(e.target.value); syncMention(e.target); }}
               onKeyDown={handleKeyDown}
+              onKeyUp={(e) => syncMention(e.currentTarget)}
+              onClick={(e) => syncMention(e.currentTarget)}
+              onBlur={() => setMention(null)}
               placeholder={placeholder}
               disabled={disabled}
               rows={1}
@@ -1184,8 +1283,11 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     <textarea
       ref={textareaRef}
       value={draft}
-      onChange={(e) => setDraft(e.target.value)}
+      onChange={(e) => { setDraft(e.target.value); syncMention(e.target); }}
       onKeyDown={handleKeyDown}
+      onKeyUp={(e) => syncMention(e.currentTarget)}
+      onClick={(e) => syncMention(e.currentTarget)}
+      onBlur={() => setMention(null)}
       placeholder={placeholder}
       disabled={disabled}
       rows={1}
@@ -1196,6 +1298,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
 
   return (
     <div ref={composerRootRef} className="relative w-full max-w-3xl mx-auto select-none">
+        {mentionPanel}
       {/* Hidden File and Folder Inputs */}
       <input
         ref={fileInputRef}

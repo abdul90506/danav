@@ -1756,3 +1756,49 @@ test('a render crash shows an explanation instead of a white page', async () => 
   assert.ok(!inline.includes('Reload the page'), 'and does not suggest throwing the session away');
   assert.ok(inline.includes('Try again'), 'it can still recover on its own');
 });
+
+test('typing @ in agent mode offers workspace files, and only where a mention can start', async () => {
+  const m = await load('src/components/MentionPicker.ts');
+
+  const at = (text, caret = text.length) => m.mentionQueryAt(text, caret);
+
+  // Where a mention can begin.
+  assert.deepEqual(at('@'), { query: '', start: 0 }, 'an @ on its own opens the picker');
+  assert.deepEqual(at('fix @src'), { query: 'src', start: 4 });
+  assert.deepEqual(at('@src/App'), { query: 'src/App', start: 0 }, 'slashes are part of a path');
+  assert.deepEqual(at('line one\n@rea'), { query: 'rea', start: 9 }, 'a new line starts a word too');
+
+  // Where it cannot. An address is the case that matters: people paste them.
+  assert.equal(at('mail me@you.com'), null);
+  assert.equal(at('a@b'), null);
+  assert.equal(at('no mention here'), null);
+  assert.equal(at('@src and then more'), null, 'the mention ended at the space');
+
+  // The caret is what decides, not the end of the text.
+  assert.deepEqual(at('@src more', 4), { query: 'src', start: 0 }, 'caret inside the mention');
+  assert.equal(at('@src more', 9), null, 'caret past it');
+
+  const files = [
+    'src/components/ChatInput.tsx', 'src/services/inputHelpers/index.ts',
+    'README.md', 'src/App.tsx', 'server/agent/loop.js', 'package.json',
+  ];
+  const top = (q) => m.rankMentions(q, files, 3).map((r) => r.path);
+
+  // A file's own name is what people type, so a basename hit beats a folder hit.
+  assert.equal(top('input')[0], 'src/components/ChatInput.tsx');
+  assert.equal(top('loop')[0], 'server/agent/loop.js');
+  assert.equal(top('app')[0], 'src/App.tsx');
+  assert.deepEqual(top('zzzz'), [], 'no match means no list, not every file');
+
+  // With nothing typed yet, show the shallow files rather than whatever came
+  // back first — those are the ones someone means at the top of a request.
+  const empty = m.rankMentions('', files, 3).map((r) => r.path);
+  assert.deepEqual(empty, ['package.json', 'README.md', 'src/App.tsx'],
+    'root files first, then alphabetically, case ignored');
+
+  // Accepting a file must not leave stray whitespace behind.
+  assert.equal(m.applyMention('look at @src and fix', 8, 12, 'src/App.tsx').text, 'look at @src/App.tsx and fix');
+  assert.equal(m.applyMention('look at @src', 8, 12, 'src/App.tsx').text, 'look at @src/App.tsx ');
+  const placed = m.applyMention('@sr', 0, 3, 'README.md');
+  assert.equal(placed.text.slice(0, placed.caret), '@README.md ', 'the caret lands after the inserted path');
+});

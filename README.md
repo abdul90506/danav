@@ -304,6 +304,13 @@ actions: switching chat, model, workspace or theme is ranked in the same list.
 Typing initials works the way you would expect — `nc` finds New chat, `ms` finds
 Manage sandboxes.
 
+#### Pointing the agent at a file
+
+In agent mode, typing `@` in the composer offers the workspace's files and
+inserts the path you pick. It is worth using: a path in the request is a search
+the agent does not have to run, and every search it skips is a round of the
+whole conversation it does not have to resend.
+
 `DANAV_AGENT_TOOLS_EXTRA` re-advertises a tool that is hidden by default
 (`image_search`, `forget`, `repo_status`) — by name, comma-separated, or `all`.
 They stay implemented either way; the default just keeps them out of the schema
