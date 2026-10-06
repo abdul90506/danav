@@ -529,7 +529,7 @@ export const TOOL_DEFINITIONS = [
   ),
   fn(
     'grep_search',
-    'Search file CONTENTS with a regular expression. Results are grouped by file with a count per file. Skips node_modules, .git, build output and binary files. For a bare name use find_symbol instead — it is exact and cheap. Use this for text, strings, error messages, patterns, and comments.',
+    'Search file CONTENTS with a regular expression. Results are grouped by file with a count per file. Skips node_modules, .git, build output and binary files. For a bare name use find_symbol instead — it is exact and cheap. Use this for text, strings, error messages, patterns, and comments. Looking for several things at once? Put them in ONE call as alternation — "TODO|FIXME|HACK" — instead of one search per term.',
     {
       pattern: { type: 'string', description: 'Regular expression.' },
       path: { ...P.path, description: 'File or folder to search. Default: workspace root.' },
@@ -2651,11 +2651,18 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
         }
       }
       const body = truncateMiddle(output.trimEnd(), limits.maxOutputChars, 'output');
+      // The shell's own conventions, spelled out: these two are read as "my command
+      // is broken" and answered by rewriting a command that was never the problem.
+      const exitNote = r.exitCode === 127
+        ? ' — the shell could not find that program. It is not installed or not on PATH here; check with "command -v <name>", install it, or run it through npx/pipx/the project\'s own scripts'
+        : r.exitCode === 126
+          ? ' — the file was found but is not executable. Use "bash <file>" / "sh <file>", or chmod +x it first'
+          : '';
       const status = r.aborted
         ? '[stopped by the user]'
         : r.timedOut
           ? `[timed out after ${seconds}s and was killed — if this is a server use background=true; otherwise raise timeout_seconds]`
-          : `[exit code ${r.exitCode}]`;
+          : `[exit code ${r.exitCode}${exitNote}]`;
       return {
         ok: r.exitCode === 0 && !r.timedOut && !r.aborted,
         output: `$ ${command}\n${body || '(no output)'}\n${status}`,
