@@ -1802,3 +1802,29 @@ test('typing @ in agent mode offers workspace files, and only where a mention ca
   const placed = m.applyMention('@sr', 0, 3, 'README.md');
   assert.equal(placed.text.slice(0, placed.caret), '@README.md ', 'the caret lands after the inserted path');
 });
+
+test('a finished run says which files it changed', async () => {
+  const fmt = await load('src/agent/format.ts');
+
+  // A read-only run must stay silent rather than announcing "0 files changed".
+  assert.equal(fmt.changedTotals(undefined), undefined);
+  assert.equal(fmt.changedTotals([]), undefined);
+
+  const one = fmt.changedTotals([{ path: 'src/App.tsx', added: 12, removed: 3 }]);
+  assert.equal(one.label, '1 file changed', 'singular, not "1 files"');
+  assert.equal(one.added, 12);
+  assert.equal(one.removed, 3);
+
+  const many = fmt.changedTotals([
+    { path: 'src/App.tsx', added: 12, removed: 3 },
+    { path: 'README.md', added: 8, removed: 0 },
+    { path: 'server/index.js', added: 0, removed: 5 },
+  ]);
+  assert.equal(many.label, '3 files changed');
+  assert.equal(many.added, 20, 'the totals are summed across files');
+  assert.equal(many.removed, 8);
+
+  // A created file reports additions and no removals; neither count is faked.
+  const created = fmt.changedTotals([{ path: 'new.ts', added: 40, removed: 0 }]);
+  assert.equal(created.removed, 0);
+});

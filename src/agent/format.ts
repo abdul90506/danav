@@ -531,6 +531,31 @@ export function workedSummary(run?: {
   return withCost(time ? `Worked for ${time}` : 'Work complete');
 }
 
+/**
+ * The totals for a run's changed files.
+ *
+ * The run already carried this and nothing in the chat ever showed it, so after
+ * a run finished the one question it did not answer was the obvious one: which
+ * of my files did you touch? Returns undefined when nothing changed, so a
+ * read-only run stays silent rather than announcing "0 files".
+ */
+export function changedTotals(changed?: Array<{ path: string; added: number; removed: number }>):
+  { files: number; added: number; removed: number; label: string } | undefined {
+  if (!changed?.length) return undefined;
+  let added = 0;
+  let removed = 0;
+  for (const f of changed) {
+    added += f.added || 0;
+    removed += f.removed || 0;
+  }
+  return {
+    files: changed.length,
+    added,
+    removed,
+    label: `${changed.length} file${changed.length === 1 ? '' : 's'} changed`,
+  };
+}
+
 export function stopNotice(reason?: string): string | undefined {
   switch (reason) {
     case 'aborted':

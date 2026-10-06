@@ -11,7 +11,7 @@ import { normalizeMessageContent } from '../utils/markdownNormalize';
 import { isPreviewUrl, previewHost } from '../utils/previewUrl';
 import { AgentActionRow } from './AgentActionRow';
 import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from './thinkingAccordion';
-import { stopNotice, usageDetail, workedSummary } from '../agent/format';
+import { changedTotals, stopNotice, usageDetail, workedSummary } from '../agent/format';
 import { useDismissOnOutside, useEscapeToClose } from '../utils/useDismissOnOutside';
 import { createPanelStore, usePanelOpen } from './panels';
 import { AgentTrail } from './AgentTrailGroup';
@@ -1096,15 +1096,45 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
     Boolean(message.agent) &&
     resumableReasons.includes(String(message.agentRun?.stopReason || ''));
   const notice = !message.isGenerating ? stopNotice(message.agentRun?.stopReason) : undefined;
+  /**
+   * What the run did to the user's files. The run has always carried this and
+   * the chat never showed it, so the question a finished run left unanswered was
+   * the first one anybody asks.
+   */
+  const changed = !message.isGenerating ? message.agentRun?.changed : undefined;
+  const totals = changedTotals(changed);
   const runFooter =
-    runLine || notice ? (
+    runLine || notice || totals ? (
       <div
         className="mt-2.5 text-[12px] leading-5 text-zinc-400 dark:text-zinc-500 select-none"
         data-testid="agent-run-footer"
       >
-        {runLine ? <span title={runCost}>{runLine}</span> : null}
-        {runLine && notice ? <span className="text-zinc-300 dark:text-zinc-600"> · </span> : null}
-        {notice ? <span>{notice}</span> : null}
+        <div>
+          {runLine ? <span title={runCost}>{runLine}</span> : null}
+          {runLine && notice ? <span className="text-zinc-300 dark:text-zinc-600"> · </span> : null}
+          {notice ? <span>{notice}</span> : null}
+        </div>
+        {totals ? (
+          <details className="mt-1 group/changed" data-testid="agent-run-changed">
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 hover:text-zinc-600 dark:hover:text-zinc-300">
+              <ChevronRight size={12} className="shrink-0 transition-transform group-open/changed:rotate-90" aria-hidden="true" />
+              <span>{totals.label}</span>
+              {totals.added > 0 && <span className="text-emerald-600/80 dark:text-emerald-500/80 tabular-nums">+{totals.added}</span>}
+              {totals.removed > 0 && <span className="text-rose-600/80 dark:text-rose-500/80 tabular-nums">−{totals.removed}</span>}
+            </summary>
+            <ul className="mt-1 space-y-0.5 pl-[18px]">
+              {changed!.map((f) => (
+                <li key={f.path} className="flex items-baseline gap-2">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-zinc-500 dark:text-zinc-400" title={f.path}>
+                    {f.path}
+                  </span>
+                  {f.added > 0 && <span className="shrink-0 text-emerald-600/80 dark:text-emerald-500/80 tabular-nums">+{f.added}</span>}
+                  {f.removed > 0 && <span className="shrink-0 text-rose-600/80 dark:text-rose-500/80 tabular-nums">−{f.removed}</span>}
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
       </div>
     ) : null;
 
