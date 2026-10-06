@@ -313,6 +313,11 @@ export async function streamCompletion({
   let currentAttempt = null;
   const abortCurrentAttempt = () => currentAttempt?.abort();
   signal?.addEventListener('abort', abortCurrentAttempt, { once: true });
+  // The run's signal outlives this call by many rounds, so the forwarder has to
+  // come off again when the call ends. Leaving it on added one listener per
+  // round to the same signal — eighty rounds, eighty dead callbacks, and Node's
+  // leak warning.
+  const detachAbortForwarder = () => signal?.removeEventListener('abort', abortCurrentAttempt);
 
   const openUpstream = async () => {
     const rejectedCredentials = new Set();
@@ -525,7 +530,13 @@ export async function streamCompletion({
       throw new LlmError(errorMessageFrom(res.status, text, model), { status: res.status });
     }
   };
-  let upstream = await openUpstream();
+  let upstream;
+  try {
+    upstream = await openUpstream();
+  } catch (err) {
+    detachAbortForwarder();
+    throw err;
+  }
 
   // ---- read it, and pick it back up if the connection dies ------------------
   //
@@ -648,6 +659,8 @@ export async function streamCompletion({
       onText?.(freshText);
     }
     round = { ...retried, text: emitted.text, thinking: emitted.thinking };
+  } finally {
+    detachAbortForwarder();
   }
 
   return round;

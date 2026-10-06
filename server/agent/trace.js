@@ -312,6 +312,24 @@ export function readRun(chatId, runId) {
   }
 }
 
+/** Every run of a chat, with its full events, for analysis. */
+export function readAllRuns(chatId, max = 40) {
+  try {
+    const dir = path.join(tracesRoot(), chatFolder(chatId));
+    return fs.readdirSync(dir)
+      .filter((name) => name.endsWith('.jsonl'))
+      .map((name) => ({ name, at: fs.statSync(path.join(dir, name)).mtimeMs }))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, max)
+      .map(({ name }) => ({
+        runId: name.replace(/\.jsonl$/, ''),
+        events: readEvents(path.join(dir, name)),
+      }));
+  } catch {
+    return [];
+  }
+}
+
 /** Remove every trace of one chat. The only deletion a user can ask for. */
 export function deleteChatTraces(chatId) {
   try {

@@ -17,6 +17,7 @@
 const MAX_FILES = 14;
 const MAX_LANDMARKS = 4;
 const MAX_SEARCHES = 6;
+const MAX_LISTINGS = 6;
 const MAX_BLOCK_CHARS = 2000;
 
 const normalize = (value) => String(value || '').replace(/\\/g, '/');
@@ -85,6 +86,29 @@ function fileLines(state, { displayPath, index }) {
   return rows.slice(0, MAX_FILES);
 }
 
+/**
+ * Folders this run already listed.
+ *
+ * A trace of real runs showed `list_dir` called twice with identical arguments
+ * inside one run: the first listing had scrolled out of the context window, and
+ * re-listing cost a whole round to learn nothing new. The block carries the
+ * folder and how many entries it held, which is enough for the model to know
+ * the question has been asked and answered.
+ */
+function listingLines(state, displayPath) {
+  const roots = state?.ledger?.listedRoots;
+  if (!(roots instanceof Map) || roots.size === 0) return [];
+  return [...roots.entries()]
+    .slice(-MAX_LISTINGS)
+    .map(([abs, record]) => {
+      const path = displayPath(abs) || '.';
+      const count = Number(record?.count) || 0;
+      const plural = count === 1 && !record?.truncated ? 'entry' : 'entries';
+      return `${path === '.' ? '.' : `${path}/`} — listed, ${count}${record?.truncated ? '+' : ''} ${plural}`;
+    })
+    .filter(Boolean);
+}
+
 /** What the searches turned up, as `pattern -> path:line` pointers. */
 function searchLines(state) {
   const hits = state?.searchHits;
@@ -105,13 +129,15 @@ export function buildKnowledgeBlock(state, { displayPath, index = null } = {}) {
   if (!state || typeof displayPath !== 'function') return '';
   const files = fileLines(state, { displayPath, index });
   const searches = searchLines(state);
-  if (!files.length && !searches.length) return '';
+  const listings = listingLines(state, displayPath);
+  if (!files.length && !searches.length && !listings.length) return '';
 
   const parts = [
     '',
     '# Already examined in this run',
     'This survives model switches and context trimming. Do not re-read or re-search anything below unless you need a range it does not cover, or you have changed the file since.',
     ...files,
+    ...listings,
   ];
   if (searches.length) {
     parts.push('Searches already run:', ...searches.map((line) => `- ${line}`));

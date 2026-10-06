@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Brain,
+  Check,
   ChevronRight,
+  Copy,
   FileText,
   Hammer,
   RefreshCw,
@@ -13,11 +15,13 @@ import {
 import {
   clearTraces,
   getMemory,
+  getTraceAnalysis,
   getTraceRun,
   listTraceRuns,
   type MemoryNote,
   type MemoryRun,
   type TraceEvent,
+  type TraceFinding,
   type TraceRunSummary,
 } from '../services/agentApi';
 
@@ -168,6 +172,8 @@ export default function RunLog({ chatId, workspaceId }: RunLogProps) {
   const [memoryRuns, setMemoryRuns] = useState<MemoryRun[]>([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<'all' | 'tool' | 'model' | 'routing' | 'problem'>('all');
+  const [findings, setFindings] = useState<TraceFinding[]>([]);
+  const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
@@ -177,6 +183,10 @@ export default function RunLog({ chatId, workspaceId }: RunLogProps) {
     try {
       const r = await listTraceRuns(chatId);
       setRuns(r.runs || []);
+      // The faults are computed from the same traces; a failure to read them
+      // must not hide the runs themselves.
+      const a = await getTraceAnalysis(chatId).catch(() => null);
+      setFindings(a?.findings || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not read the run log');
     } finally {
@@ -215,6 +225,29 @@ export default function RunLog({ chatId, workspaceId }: RunLogProps) {
     if (filter === 'routing') return events.filter((e) => e.type === 'routing');
     return events.filter((e) => e.type === 'error' || (e.type === 'tool' && e.ok === false));
   }, [events, filter]);
+
+  /** The open run as one plain-text document: every event, top to bottom. */
+  const asPlainText = useCallback(() => {
+    const lines = [`# Run ${selected}`, ''];
+    for (const event of events) {
+      lines.push(`## +${fmtDur(event.ms)}  ${(EVENT_STYLE[event.type] || EVENT_STYLE.note).label}  —  ${headline(event)}`);
+      const body = details(event).trim();
+      if (body) lines.push(body, '');
+    }
+    return lines.join('\n');
+  }, [events, selected]);
+
+  const copyRun = useCallback(async () => {
+    const text = asPlainText();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // A sandboxed frame refuses the clipboard. Say so instead of pretending.
+      setError('Copying is blocked in this frame — select the text in an expanded event and press Ctrl+C.');
+    }
+  }, [asPlainText]);
 
   const totals = useMemo(() => {
     const t = { runs: runs.length, toolCalls: 0, failures: 0, switches: 0, input: 0, output: 0 };
@@ -262,6 +295,50 @@ export default function RunLog({ chatId, workspaceId }: RunLogProps) {
           </div>
         )}
       </section>
+
+      {/* ---- what went wrong ------------------------------------------------- */}
+      {findings.length > 0 && (
+        <section>
+          <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+            <AlertTriangle className="h-3.5 w-3.5 text-red-500" /> What went wrong
+            <span className="font-normal text-zinc-400">— found by reading every run of this chat</span>
+          </h3>
+          <div className="space-y-1.5">
+            {findings.slice(0, 12).map((finding) => (
+              <div
+                key={finding.id}
+                className={`rounded-lg border px-2.5 py-1.5 ${
+                  finding.severity === 'high'
+                    ? 'border-red-200 bg-red-50/40 dark:border-red-900/50 dark:bg-red-950/20'
+                    : finding.severity === 'medium'
+                      ? 'border-amber-200 bg-amber-50/40 dark:border-amber-900/50 dark:bg-amber-950/20'
+                      : 'border-zinc-200 dark:border-zinc-800'
+                }`}
+              >
+                <div className="flex items-baseline gap-2">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
+                    finding.severity === 'high'
+                      ? 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300'
+                      : finding.severity === 'medium'
+                        ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300'
+                        : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
+                  }`}>
+                    {finding.severity}
+                  </span>
+                  <span className="text-[12.5px] font-medium text-zinc-800 dark:text-zinc-200">{finding.title}</span>
+                  {(finding.runs?.length || 0) > 1 && (
+                    <span className="text-[11px] text-zinc-500">in {finding.runs?.length} runs</span>
+                  )}
+                </div>
+                {finding.detail && (
+                  <p className="mt-0.5 break-words font-mono text-[11px] text-zinc-600 dark:text-zinc-400">{finding.detail}</p>
+                )}
+                <p className="mt-0.5 text-[11px] text-zinc-500">{finding.hint}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ---- the runs -------------------------------------------------------- */}
       <section>
@@ -365,6 +442,16 @@ export default function RunLog({ chatId, workspaceId }: RunLogProps) {
                         <span className="ml-auto self-center text-[11px] text-zinc-400">
                           {shown.length} of {events.length} events
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => void copyRun()}
+                          disabled={events.length === 0}
+                          className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 disabled:opacity-40 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                          title="Copy this whole run as plain text"
+                        >
+                          {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                          {copied ? 'Copied' : 'Copy all'}
+                        </button>
                       </div>
                       <div className="space-y-1">
                         {events.length === 0 ? (

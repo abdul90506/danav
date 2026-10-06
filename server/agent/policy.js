@@ -90,6 +90,13 @@ export function createLedger() {
     ownedVersions: new Map(),
     /** Directories whose contents were really read: abs -> the depth that was read. */
     listed: new Map(),
+    /**
+     * Folders the run asked for by name, and how many entries came back.
+     * `listed` also fills with every subfolder a deep listing descended into,
+     * which is the right answer for the delete gate and the wrong one for the
+     * pinned block — this keeps the handful the agent actually requested.
+     */
+    listedRoots: new Map(),
     /** Files this run created or rewrote: the agent knows these by construction. */
     owned: new Set(),
   };
@@ -182,6 +189,9 @@ export function observeListing(ws, state, abs, entries, { truncated = false, dep
   const led = ledgerOf(state);
   if (!led || !abs || !ws) return;
   led.listed.set(abs, Math.max(led.listed.get(abs) || 0, depth));
+  led.listedRoots ||= new Map();
+  led.listedRoots.delete(abs);
+  led.listedRoots.set(abs, { count: entries.length, truncated });
   for (const e of entries) {
     const childAbs = ws.pathApi.join(abs, e.path);
     led.seen.add(childAbs);

@@ -202,6 +202,26 @@ export const listTraceRuns = (chatId: string) =>
 export const getTraceRun = (chatId: string, runId: string) =>
   call<{ events: TraceEvent[] }>('GET', `/traces/${encodeURIComponent(chatId)}/${encodeURIComponent(runId)}`);
 
+/** One fault the recorder found, with the evidence that proves it. */
+export interface TraceFinding {
+  id: string;
+  severity: 'high' | 'medium' | 'low';
+  title: string;
+  detail: string;
+  count: number;
+  hint: string;
+  runId?: string;
+  runs?: string[];
+  occurrences?: number;
+  seqs?: number[];
+}
+
+export const getTraceAnalysis = (chatId: string) =>
+  call<{ findings: TraceFinding[]; runsAnalysed: number }>(
+    'GET',
+    `/traces/${encodeURIComponent(chatId)}/analysis`
+  );
+
 export const clearTraces = (chatId: string) =>
   call<{ success: boolean }>('DELETE', `/traces/${encodeURIComponent(chatId)}`);
 

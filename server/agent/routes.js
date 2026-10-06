@@ -32,7 +32,8 @@ import {
 } from './sandboxAdmin.js';
 import { TOOL_DEFINITIONS } from './tools.js';
 import { createSkillRegistry } from './skills.js';
-import { deleteChatTraces, listRuns, listTracedChats, readRun } from './trace.js';
+import { deleteChatTraces, listRuns, listTracedChats, readAllRuns, readRun } from './trace.js';
+import { analyzeChat, analyzeRun } from './traceAnalysis.js';
 import { createRedactor, genId } from './util.js';
 import { WorkspaceError } from './workspaces/base.js';
 import {
@@ -226,6 +227,28 @@ export function registerAgentRoutes(app, {
     const chatId = String(req.query.chatId || '').trim();
     if (!chatId) return res.json({ success: true, chats: listTracedChats() });
     return res.json({ success: true, chatId, runs: listRuns(chatId) });
+  }));
+
+  /**
+   * The same traces, read as a list of faults.
+   *
+   * What actually leads to a fix is not the timeline but "this tool failed the
+   * same way four times" and "this file was read five times in one run".
+   */
+  router.get('/traces/:chatId/analysis', wrap(async (req, res) => {
+    const runs = readAllRuns(req.params.chatId);
+    return res.json({
+      success: true,
+      chatId: req.params.chatId,
+      runsAnalysed: runs.length,
+      findings: analyzeChat(runs),
+    });
+  }));
+
+  router.get('/traces/:chatId/:runId/analysis', wrap(async (req, res) => {
+    const run = readRun(req.params.chatId, req.params.runId);
+    if (!run) return res.status(404).json({ success: false, error: 'No trace for that run' });
+    return res.json({ success: true, findings: analyzeRun(run) });
   }));
 
   router.get('/traces/:chatId/:runId', wrap(async (req, res) => {
