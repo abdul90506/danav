@@ -123,6 +123,7 @@ test('outline: vue files run both the HTML and the JS scanners; unknown types gi
   assert.equal(many.symbols.length, 50);
   assert.equal(many.truncated, true);
   const text = formatOutline('src/cart.js', outline('class A {\n  m() {\n  }\n}\n', 'cart.js'));
-  assert.match(text, /^src\/cart\.js — 4 lines, js, 2 symbols\nL1 +class A\nL2 +  m\(\)/);
+  // Each symbol carries the span it occupies, so a read can ask for exactly it.
+  assert.match(text, /^src\/cart\.js — 4 lines, js, 2 symbols\nL1-4 +class A\nL2-4 +  m\(\)/);
   assert.match(formatOutline('x.txt', outline('x', 'x.txt')), /No structure could be detected/);
 });

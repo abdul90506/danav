@@ -148,6 +148,18 @@ export const scenarios = {
     dropAfterChars: 'Only this much'.length,
   }),
 
+  /**
+   * Reads part of a file, then part of another, then answers. Used to prove the
+   * run pins what it examined into the system prompt, where a model switch and
+   * context trimming cannot lose it.
+   */
+  examined: ({ roundIdx }) =>
+    roundIdx === 0
+      ? { text: 'Looking at the file.', toolCalls: [{ name: 'read_file', args: { path: 'notes.txt', start_line: 1, end_line: 3 } }] }
+      : roundIdx === 1
+        ? { text: 'Searching for the handler.', toolCalls: [{ name: 'grep_search', args: { pattern: 'handler' } }] }
+        : { text: 'I read the top of notes.txt and found the handler.' },
+
   /** No text and no tools on the first try, then a real answer. */
   emptyFirst: ({ requestIdx }) => (requestIdx === 0 ? { text: '' } : { text: 'Here is the answer you asked for.' }),
 
@@ -528,6 +540,7 @@ const byModel = {
   'fake-skill': scenarios.skill,
   'fake-delegate': scenarios.delegate,
   'fake-gate': scenarios.gate,
+  'fake-examined': scenarios.examined,
   'fake-drop': scenarios.drop,
   'fake-drop-always': scenarios.dropAlways,
   'fake-empty-first': scenarios.emptyFirst,

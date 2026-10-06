@@ -199,6 +199,34 @@ function assertConsistentTranscript(messages) {
   }
 }
 
+test('what the run examined is pinned to the system prompt, where a model switch cannot lose it', async () => {
+  const dir = tmp('danav-examined-');
+  fs.writeFileSync(path.join(dir, 'notes.txt'), ['one', 'two', 'three', 'four', 'five', 'six'].join('\n'));
+  fs.writeFileSync(path.join(dir, 'app.js'), 'function handler() {\n  return 1;\n}\n');
+  const ws = new LocalWorkspace({ id: 'ws-examined', kind: 'local', name: 'examined', root: dir, autoRun: true });
+  const { requests } = await agentRun({ model: 'fake-examined', workspace: ws });
+
+  assert.ok(requests.length >= 3, 'the scenario runs three rounds');
+  const systemOf = (i) => String(requests[i].messages.find((m) => m.role === 'system')?.content || '');
+
+  // Nothing had been looked at yet, so nothing is claimed.
+  assert.ok(!systemOf(0).includes('Already examined in this run'), 'the first request carries no ledger');
+
+  const second = systemOf(1);
+  assert.match(second, /# Already examined in this run/, 'the ledger is pinned once the run has read something');
+  assert.match(second, /notes\.txt \(6 lines\) — read L1-L3/, 'it names the exact ranges that were read');
+
+  const third = systemOf(2);
+  assert.match(third, /notes\.txt \(6 lines\) — read L1-L3/, 'the ledger persists into later rounds');
+  assert.match(third, /Searches already run:/, 'a search is remembered as a pointer, not as its output');
+  assert.match(third, /"handler" → app\.js:1/, 'the pointer says where the hit was');
+
+  // The point of the block: it lives in the system message, which pruning never
+  // touches and every model in a fallback chain receives identically.
+  assert.equal(requests[2].messages[0].role, 'system', 'the ledger rides on the system message');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('successful tool work is saved as an automatic task checkpoint and appears in the next model context', async () => {
   const dataDir = tmp('danav-task-memory-loop-');
   const taskId = 'assistant-message-task-memory-test';

@@ -202,7 +202,23 @@ export function formatOutline(path, o) {
   if (o.symbols.length === 0) {
     return `${head}\nNo structure could be detected in this file. Read it in chunks: read_file with start_line/end_line, or ranges: [[1,150],[151,300]].`;
   }
-  const width = String(o.total).length + 1;
-  const body = o.symbols.map((s) => `L${String(s.line).padEnd(width)} ${'  '.repeat(s.depth)}${s.text}`).join('\n');
-  return `${head}\n${body}${o.truncated ? '\n… (more symbols not shown)' : ''}\n\nRead one of these with read_file symbol: "Name" -- it returns the whole definition, so there are no line numbers to guess. For anything else use start_line/end_line, or several chunks in one call with ranges: [[a,b],[c,d]].`;
+  /**
+   * Each symbol's span, not just where it starts.
+   *
+   * A start line alone makes the model guess how far a definition runs, and the
+   * guess is what turns one read into three. A definition ends where the next
+   * one at the same or shallower depth begins — close enough to ask for exactly
+   * the right lines, and computed from the outline that was already built.
+   */
+  const spans = o.symbols.map((s, i) => {
+    for (let j = i + 1; j < o.symbols.length; j++) {
+      if (o.symbols[j].depth <= s.depth) return Math.max(s.line, o.symbols[j].line - 1);
+    }
+    return o.total;
+  });
+  const width = String(o.total).length * 2 + 3;
+  const body = o.symbols
+    .map((s, i) => `${(spans[i] > s.line ? `L${s.line}-${spans[i]}` : `L${s.line}`).padEnd(width)} ${'  '.repeat(s.depth)}${s.text}`)
+    .join('\n');
+  return `${head}\n${body}${o.truncated ? '\n… (more symbols not shown)' : ''}\n\nEvery line above is a range you can ask for exactly: read_file with start_line/end_line, or several at once with ranges: [[a,b],[c,d]]. read_file symbol: "Name" returns one whole definition without any line numbers at all.`;
 }

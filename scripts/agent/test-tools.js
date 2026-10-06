@@ -1151,10 +1151,10 @@ test('file_outline: structure with line numbers, then targeted reads', async () 
   const r = await run('file_outline', { path: 'src/app.js' });
   assert.equal(r.ok, true, r.output);
   assert.match(r.output, /src\/app\.js — 13 lines, js, 4 symbols/);
-  assert.match(r.output, /L3\s+export function render\(a\)/);
-  assert.match(r.output, /L7\s+class Store/);
-  assert.match(r.output, /L8\s+\s*load\(\)/);
-  assert.match(r.output, /L13\s+const add = \(a, b\) => a \+ b;/);
+  assert.match(r.output, /L3-6\s+export function render\(a\)/);
+  assert.match(r.output, /L7-12\s+class Store/);
+  assert.match(r.output, /L8-12\s+\s*load\(\)/);
+  assert.match(r.output, /L13\s+const add = \(a, b\) => a \+ b;/); // a one-line symbol keeps one number
   assert.match(r.output, /ranges: \[\[a,b\],\[c,d\]\]/);
   assert.deepEqual([r.ui.kind, r.ui.count, r.ui.totalLines, r.ui.language], ['outline', 4, 13, 'js']);
   fs.writeFileSync(path.join((await setup()).dir, 'x.bin'), Buffer.from([0, 1, 2]));

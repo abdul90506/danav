@@ -12,7 +12,8 @@ import { requestApproval, cancelApprovalsFor } from './approvals.js';
 import { limits } from './config.js';
 import { LlmError, streamCompletion } from './llm.js';
 import { buildSystemPrompt, formatSnapshot } from './prompt.js';
-import { getIndex, primeIndex, renderRelevantFiles, renderRepoMap } from './codeindex.js';
+import { cachedIndex, getIndex, primeIndex, renderRelevantFiles, renderRepoMap } from './codeindex.js';
+import { buildKnowledgeBlock } from './knowledge.js';
 import { detectChecks, formatChecksHint } from './verify.js';
 import { formatRepoState, readRepoState } from './githistory.js';
 import { collectProjectGuidance } from './context.js';
@@ -966,8 +967,15 @@ export async function runAgent({
     } catch {
       /* no history is a normal state, not a failure */
     }
+    /**
+     * Kept apart from the message so the run's own findings can be re-pinned to
+     * it every round. The system message is the only part of a request that
+     * compaction never trims and that every model in a fallback chain receives
+     * unchanged — which makes it the one safe home for "what I already know".
+     */
+    const baseSystemPrompt = buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, repo: repoBlock, activity, skills, repoMap, relevantFiles, indexSummary, resume: Boolean(resume && priorTaskRun), budget: { maxSteps, maxRunMs: limits.maxRunMs() } });
     messages = [
-      { role: 'system', content: buildSystemPrompt({ workspace, snapshot, guidance, memory, recentRuns, checks: checksHint, repo: repoBlock, activity, skills, repoMap, relevantFiles, indexSummary, resume: Boolean(resume && priorTaskRun), budget: { maxSteps, maxRunMs: limits.maxRunMs() } }) },
+      { role: 'system', content: baseSystemPrompt },
       ...priorMessages,
     ];
 
@@ -1051,6 +1059,16 @@ export async function runAgent({
           notice('time_half', `Half of this run's time allowance is used. Keep the remaining work focused on the user's actual request.`);
         }
       }
+
+      /**
+       * Re-pin what the run has examined. Rebuilt rather than appended: ranges
+       * merge and files get read further, and a stale list would send the model
+       * back to a range it has since outgrown.
+       */
+      messages[0].content = baseSystemPrompt + buildKnowledgeBlock(state, {
+        displayPath: (abs) => workspace.displayPath(abs),
+        index: cachedIndex(workspace.id),
+      });
 
       const prune = pruneMessages(messages, limits.contextChars());
       if (prune.pruned) send({ status: 'Trimming old context…' });

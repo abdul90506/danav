@@ -28,6 +28,7 @@ import { formatBytes, truncateMiddle } from './util.js';
 import { formatBlameBlock, forgetRepo, gitBlame, gitDiff, gitLog, gitShow, readRepoState } from './githistory.js';
 import { detectChecks } from './verify.js';
 import { createSkillRegistry } from './skills.js';
+import { enclosingSymbol, noteSearchHits } from './knowledge.js';
 import { summarizeSearchSources } from '../webSearch.js';
 
 class ToolError extends Error {}
@@ -2023,7 +2024,7 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       return res;
     },
 
-    async grep_search(args) {
+    async grep_search(args, ctx) {
       const pattern = reqStr(args, 'pattern');
       const abs = await target(optStr(args, 'path') || '.');
       const max = clampInt(args.max_results, 1, 300, 100);
@@ -2071,17 +2072,35 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
           }
         }
       }
+      /**
+       * A hit is a line number; what the model actually needs is the block it
+       * belongs to. The index knows every definition, so each hit can say
+       * "in handleSubmit (L120)" — and the next call is then one exact
+       * `read_file symbol:"handleSubmit"` or `edit_file symbol:` instead of
+       * reading the file to work out what it just found.
+       *
+       * Only while the page is small enough for the annotation to stay readable.
+       */
+      const siteIndex = page.length <= 40 ? cachedIndex(ws.id) : null;
+      const siteOf = (match) => {
+        if (!siteIndex) return '';
+        const where = enclosingSymbol(siteIndex, match.path, match.line);
+        if (!where) return '';
+        return `   ← in ${where.name} (L${where.start})`;
+      };
       const lines = [];
       for (const m of page) {
         const body = bodies?.get(m.path);
         if (body) {
           for (let i = Math.max(1, m.line - context); i < m.line; i++) lines.push(`${m.path}:${i}| ${body[i - 1] ?? ''}`);
         }
-        lines.push(`${m.path}:${m.line}: ${m.text}`);
+        lines.push(`${m.path}:${m.line}: ${m.text}${siteOf(m)}`);
         if (body) {
           for (let i = m.line + 1; i <= Math.min(body.length, m.line + context); i++) lines.push(`${m.path}:${i}| ${body[i - 1] ?? ''}`);
         }
       }
+      // Pointers back into the code, pinned where a model switch cannot lose them.
+      noteSearchHits(ctx?.state, pattern, page);
       const asLiteral = literal
         ? `\n(the pattern is not a valid regular expression, so its characters were matched literally — escape the special ones to search as a regex)`
         : '';
