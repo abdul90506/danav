@@ -497,7 +497,10 @@ export const scenarios = {
   },
 };
 
+scenarios.noUsage = () => ({ text: 'Done, and this endpoint never reports usage.', usage: null });
+
 const byModel = {
+  'fake-no-usage': scenarios.noUsage,
   'fake-build': scenarios.build,
   'fake-slow': scenarios.slow,
   'fake-fail': scenarios.fail,
@@ -630,7 +633,15 @@ export function startFakeLlm({ port = 0, chunkDelayMs = 0 } = {}) {
       }
       i++;
     }
-    write(chunk({}, round.finishReason ?? (round.toolCalls?.length ? 'tool_calls' : 'stop')));
+    // Real endpoints report what the round cost on the final frame, and the loop
+    // adds those up across the run. Deterministic here so tests can assert on it.
+    // `usage: null` means this endpoint reports nothing — distinct from not saying,
+    // so `??` would be wrong here: null is exactly the case being asked for.
+    const used = 'usage' in round ? round.usage : { prompt_tokens: 1000 + roundIdx * 500, completion_tokens: 120 };
+    write({
+      ...chunk({}, round.finishReason ?? (round.toolCalls?.length ? 'tool_calls' : 'stop')),
+      ...(used ? { usage: used } : {}),
+    });
     res.write('data: [DONE]\n\n');
     res.end();
   });

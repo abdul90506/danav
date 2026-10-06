@@ -1922,3 +1922,27 @@ test('a run that would end without a word is asked for the closing summary', asy
   const spoken = events.filter((e) => typeof e.content === 'string').map((e) => e.content).join('');
   assert.match(spoken, /one\.txt is written/, 'and the run ends with words, not silence');
 });
+
+test('a run adds up what each round cost and reports it once, at the end', async () => {
+  const { events, result } = await agentRun({ model: 'fake-multi-edit' });
+  assert.equal(result.stopReason, 'completed');
+  const end = agentEvents(events, 'run_end')[0];
+  assert.ok(end.usage, 'run_end carries what the run cost');
+
+  const { inputTokens, outputTokens, rounds } = end.usage;
+  assert.ok(rounds >= 2, `expected several rounds, got ${rounds}`);
+  // The fake reports a flat 120 out per round, so this pins that the run SUMS the
+  // rounds rather than keeping only the last one.
+  assert.equal(outputTokens, 120 * rounds, 'output is summed across rounds');
+  // Input grows every round because each one resends the whole conversation — which
+  // is exactly why it is the number worth showing.
+  assert.ok(inputTokens >= 1000 * rounds, `input ${inputTokens} should be at least the per-round base`);
+  assert.ok(inputTokens > outputTokens, 'input dominates, as it does in a real run');
+  assert.equal(agentEvents(events, 'run_end').length, 1, 'reported once, at the end');
+});
+
+test('a provider that reports nothing shows as unknown, not as a free run', async () => {
+  const { events } = await agentRun({ model: 'fake-no-usage' });
+  const end = agentEvents(events, 'run_end')[0];
+  assert.equal(end.usage, undefined, 'no usage key at all, rather than a misleading zero');
+});

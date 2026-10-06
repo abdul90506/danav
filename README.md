@@ -290,6 +290,20 @@ the next run can see rather than a claim.
 
 On **Windows**, local commands run in PowerShell (set `DANAV_SHELL=cmd` for `cmd.exe`).
 
+`DANAV_AGENT_TOOLS_EXTRA` re-advertises a tool that is hidden by default
+(`image_search`, `forget`, `repo_status`) — by name, comma-separated, or `all`.
+They stay implemented either way; the default just keeps them out of the schema
+that is re-sent on every round.
+
+#### What a run cost
+
+When the provider reports usage, the finished work row says so — *Worked for 32s ·
+48.3k tokens* — and its tooltip splits it: `48,000 in · 320 out · 6 rounds`. Input
+is almost always the larger number, because **every round resends the whole
+conversation**: that is where a long run's cost actually goes, and a run that is
+nearly all input is one that took more rounds than it needed. A provider that
+reports nothing shows no figure at all, rather than claiming the run was free.
+
 #### Watching a file being written
 
 Only some endpoints stream a tool call's *arguments*. Gemini does once Danav sends

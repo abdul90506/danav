@@ -11,7 +11,7 @@ import { normalizeMessageContent } from '../utils/markdownNormalize';
 import { isPreviewUrl, previewHost } from '../utils/previewUrl';
 import { AgentActionRow } from './AgentActionRow';
 import { getOpenThinkingId, setOpenThinkingId, subscribeThinkingAccordion } from './thinkingAccordion';
-import { stopNotice, workedSummary } from '../agent/format';
+import { stopNotice, usageDetail, workedSummary } from '../agent/format';
 import { useDismissOnOutside, useEscapeToClose } from '../utils/useDismissOnOutside';
 import { createPanelStore, usePanelOpen } from './panels';
 import { AgentTrail } from './AgentTrailGroup';
@@ -1081,6 +1081,9 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
         : 'Working…';
 
   const runLine = !message.isGenerating ? workedSummary(message.agentRun) : undefined;
+  // The split is the interesting part: a run that is nearly all input re-sent its
+  // conversation too many times. It stays in the tooltip rather than the row.
+  const runCost = !message.isGenerating ? usageDetail(message.agentRun?.usage) : undefined;
   /**
    * A run that stopped short of the end is a pause, and the way to carry on is one
    * press: the button continues THIS turn in place (see App.handleContinueResponse),
@@ -1099,7 +1102,7 @@ const ChatMessageInner: React.FC<ChatMessageProps> = ({
         className="mt-2.5 text-[12px] leading-5 text-zinc-400 dark:text-zinc-500 select-none"
         data-testid="agent-run-footer"
       >
-        {runLine ? <span>{runLine}</span> : null}
+        {runLine ? <span title={runCost}>{runLine}</span> : null}
         {runLine && notice ? <span className="text-zinc-300 dark:text-zinc-600"> · </span> : null}
         {notice ? <span>{notice}</span> : null}
       </div>

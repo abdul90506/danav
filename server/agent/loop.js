@@ -789,6 +789,25 @@ export async function runAgent({
   const deadline = startedAt + limits.maxRunMs();
   const maxSteps = limits.maxSteps();
   const stats = { steps: 0, toolCalls: 0, contextRetries: 0 };
+  /**
+   * What this run actually cost, added up from what each provider reported.
+   *
+   * Every round resends the whole conversation, so the input number grows with the
+   * run and is the one worth watching — it is where a long run's cost really goes.
+   * `rounds` counts the rounds that reported anything, so a provider that reports
+   * nothing shows as unknown instead of as zero.
+   */
+  const usage = { inputTokens: 0, outputTokens: 0, rounds: 0 };
+  const addUsage = (u) => {
+    if (!u || typeof u !== 'object') return;
+    // OpenAI-compatible endpoints use prompt/completion; a few use input/output.
+    const inTok = Number(u.prompt_tokens ?? u.input_tokens);
+    const outTok = Number(u.completion_tokens ?? u.output_tokens);
+    if (!Number.isFinite(inTok) && !Number.isFinite(outTok)) return;
+    if (Number.isFinite(inTok)) usage.inputTokens += inTok;
+    if (Number.isFinite(outTok)) usage.outputTokens += outTok;
+    usage.rounds += 1;
+  };
   let stopReason = 'completed';
 
   workspace.notify = (message) => send({ agent: { type: 'notice', message } });
@@ -1181,6 +1200,7 @@ export async function runAgent({
             },
           });
           roundText = typeof round.text === 'string' ? round.text : attemptText;
+          addUsage(round.usage);
           break;
         } catch (err) {
           if (!isContextLimitError(err) || contextAttempts >= 3) throw err;
@@ -1875,6 +1895,9 @@ export async function runAgent({
         toolCalls: stats.toolCalls,
         durationMs: Date.now() - startedAt,
         changed: [...state.changed].map(([path, v]) => ({ path, ...v })),
+        // Omitted entirely when no provider reported anything, so the UI can tell
+        // "this run was free" apart from "this provider does not say".
+        ...(usage.rounds ? { usage: { ...usage } } : {}),
       },
     });
     send({ status: '' });

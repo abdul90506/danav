@@ -1614,3 +1614,35 @@ test('copying falls back when the Clipboard API is refused (sandboxed preview)',
     if (realDocument === undefined) delete globalThis.document; else globalThis.document = realDocument;
   }
 });
+
+test('the work row says what the run cost, and says nothing when the provider did not', async () => {
+  const fmt = await load('src/agent/format.ts');
+
+  assert.equal(fmt.formatTokens(0), '0');
+  assert.equal(fmt.formatTokens(900), '900', 'under a thousand reads better exact');
+  assert.equal(fmt.formatTokens(1000), '1k');
+  assert.equal(fmt.formatTokens(48_320), '48.3k');
+  assert.equal(fmt.formatTokens(120_000), '120k');
+  assert.equal(fmt.formatTokens(2_400_000), '2.4M');
+
+  // A run with no usage is unchanged — a provider that says nothing must not make
+  // the row claim the run was free.
+  assert.equal(fmt.workedSummary({ durationMs: 32_000, toolCalls: 8 }), 'Worked for 32s');
+  assert.equal(fmt.usageSummary(undefined), undefined);
+  assert.equal(fmt.usageSummary({ inputTokens: 0, outputTokens: 0 }), undefined);
+
+  const withCost = fmt.workedSummary({
+    durationMs: 32_000, toolCalls: 8, usage: { inputTokens: 48_000, outputTokens: 320 },
+  });
+  assert.equal(withCost, 'Worked for 32s · 48.3k tokens');
+
+  // A stopped run still reports what it spent getting there.
+  assert.equal(
+    fmt.workedSummary({ durationMs: 5000, toolCalls: 2, stopReason: 'aborted', usage: { inputTokens: 1200, outputTokens: 300 } }),
+    'Stopped after 5s · 1.5k tokens'
+  );
+
+  // The split belongs in the tooltip: mostly-input means the conversation was resent too often.
+  assert.equal(fmt.usageDetail({ inputTokens: 48_000, outputTokens: 320, rounds: 6 }), '48,000 in · 320 out · 6 rounds');
+  assert.equal(fmt.usageDetail(undefined), undefined);
+});

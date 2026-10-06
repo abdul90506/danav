@@ -326,6 +326,8 @@ export interface AgentRunSummary {
   toolCalls?: number;
   durationMs?: number;
   changed?: Array<{ path: string; added: number; removed: number }>;
+  /** What the run cost, as the provider reported it. Absent when it reported nothing. */
+  usage?: { inputTokens: number; outputTokens: number; rounds: number };
 }
 
 export type MessageBlock =

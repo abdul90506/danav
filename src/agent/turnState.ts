@@ -196,6 +196,7 @@ export class AgentTurnState {
           steps: ev.steps,
           toolCalls: ev.toolCalls,
           durationMs: ev.durationMs,
+          ...(ev.usage ? { usage: ev.usage } : {}),
           changed: Array.isArray(ev.changed) ? ev.changed : [],
         };
         this.settle(ev.stopReason);

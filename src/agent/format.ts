@@ -472,22 +472,63 @@ function workedDuration(ms?: number): string | undefined {
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`;
 }
 
+/** 48320 -> "48.3k". Exact below 1000, because "900 tokens" reads better than "0.9k". */
+export function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return `${k < 100 ? k.toFixed(1).replace(/\.0$/, '') : Math.round(k)}k`;
+  }
+  const m = n / 1_000_000;
+  return `${m < 10 ? m.toFixed(1).replace(/\.0$/, '') : Math.round(m)}M`;
+}
+
+/**
+ * What a run cost, for the work row: "48.3k tokens".
+ *
+ * Input and output are added together because that is the number that answers
+ * "was that expensive?". The split is worth keeping for the tooltip — a run that
+ * is nearly all input is a run that re-sent its conversation too many times.
+ */
+export function usageSummary(usage?: { inputTokens?: number; outputTokens?: number }): string | undefined {
+  const input = Number(usage?.inputTokens) || 0;
+  const output = Number(usage?.outputTokens) || 0;
+  const total = input + output;
+  if (!total) return undefined;
+  return `${formatTokens(total)} tokens`;
+}
+
+/** The same thing spelled out, for a title attribute. */
+export function usageDetail(usage?: { inputTokens?: number; outputTokens?: number; rounds?: number }): string | undefined {
+  const input = Number(usage?.inputTokens) || 0;
+  const output = Number(usage?.outputTokens) || 0;
+  if (!input && !output) return undefined;
+  const rounds = Number(usage?.rounds) || 0;
+  const parts = [`${input.toLocaleString()} in`, `${output.toLocaleString()} out`];
+  if (rounds) parts.push(`${rounds} round${rounds === 1 ? '' : 's'}`);
+  return parts.join(' · ');
+}
+
 /** A restrained, human status for the work row; file-level details stay in the trail. */
 export function workedSummary(run?: {
   durationMs?: number;
   toolCalls?: number;
   changed?: Array<{ path: string; added: number; removed: number }>;
   stopReason?: string;
+  usage?: { inputTokens?: number; outputTokens?: number };
 }): string | undefined {
   if (!run || (!run.toolCalls && !(run.changed || []).length)) return undefined;
   const time = workedDuration(run.durationMs);
+  const spent = usageSummary(run.usage);
+  const withCost = (head: string) => (spent ? `${head} · ${spent}` : head);
   if (run.stopReason === 'aborted' || run.stopReason === 'error') {
-    return time ? `Stopped after ${time}` : 'Work stopped';
+    return withCost(time ? `Stopped after ${time}` : 'Work stopped');
   }
   if (run.stopReason && run.stopReason !== 'completed') {
-    return time ? `Paused after ${time}` : 'Work paused';
+    return withCost(time ? `Paused after ${time}` : 'Work paused');
   }
-  return time ? `Worked for ${time}` : 'Work complete';
+  return withCost(time ? `Worked for ${time}` : 'Work complete');
 }
 
 export function stopNotice(reason?: string): string | undefined {
