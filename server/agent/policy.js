@@ -40,6 +40,40 @@ export function workspaceStatFingerprint(stat) {
   return `${stat.type}:${stat.size ?? ''}:${stamp}`;
 }
 
+/**
+ * The per-run state every tool reads through ctx.state.
+ *
+ * It lived inline in the loop, which made the toolset unusable without
+ * hand-rebuilding the exact same object — tools reach into readFiles, ledger,
+ * changed and the rest directly, so a missing field is a crash deep inside a
+ * tool rather than an obvious mistake at the call site. Defining the shape once
+ * means the loop and the toolset's own fallback cannot drift apart.
+ */
+export function createRunState(overrides = {}) {
+  return {
+    readFiles: new Set(),
+    plan: [],
+    findings: [],
+    toolErrors: [],
+    changed: new Map(),
+    singleEdits: new Map(),
+    checks: [],
+    toolFailures: 0,
+    parkedBodies: new Set(),
+    subagentCalls: 0,
+    /** Files being written straight to disk while the model writes them (see tools.liveWrite). */
+    liveWriters: [],
+    committedWrites: new Set(),
+    /**
+     * What the agent has actually looked at this run. Filled in by the tools,
+     * read by the policy gate before a mutating call is allowed to run.
+     * "Look before you leap" as an invariant, not as advice.
+     */
+    ledger: createLedger(),
+    ...overrides,
+  };
+}
+
 export function createLedger() {
   return {
     /** Files the agent has opened, or seen named in a listing. */

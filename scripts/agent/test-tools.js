@@ -1688,3 +1688,34 @@ test('a file written with bidi overrides is flagged; ordinary right-to-left text
   assert.equal(edited.ok, true, edited.output);
   assert.match(edited.output, /bidirectional control characters/);
 });
+
+test('a tool call survives a caller that did not build the whole context', async () => {
+  // autoRun off, so running a command genuinely needs an approver to say yes.
+  const { ws, dir } = await setup({ autoRun: false });
+  // The real loop passes a fully-populated ctx. Nothing enforced that, and the
+  // tools read ctx.state directly in three dozen places, so any other caller —
+  // a script, a test, a second entry point — crashed somewhere deep inside a
+  // tool instead of simply working.
+  const bare = buildToolset({ workspace: ws, redact: (s) => s, runSearchTool: async () => ({}) });
+
+  fs.writeFileSync(path.join(dir, 'note.md'), '# Title\n\nsome words here\n');
+
+  for (const [name, args] of [
+    ['list_dir', { path: '.' }],
+    ['read_file', { path: 'note.md' }],
+    ['file_outline', { path: 'note.md' }],
+    ['grep_search', { query: 'words' }],
+    ['write_file', { path: 'fresh.txt', content: 'hello\n' }],
+  ]) {
+    const res = await bare.execute(name, args); // no third argument at all
+    assert.notEqual(res.ok, false, `${name} failed with a bare context: ${res.output}`);
+    assert.ok(!/cannot read properties|is not a function/i.test(res.output || ''),
+      `${name} leaked an internal TypeError: ${res.output}`);
+  }
+  assert.equal(fs.readFileSync(path.join(dir, 'fresh.txt'), 'utf8'), 'hello\n');
+
+  // approve has no safe default: a missing approver must read as "no", never as
+  // a silent yes.
+  const blocked = await bare.execute('run_command', { command: 'echo nope' });
+  assert.equal(blocked.ok, false, 'a command cannot self-approve when no approver was supplied');
+});

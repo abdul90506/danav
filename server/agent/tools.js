@@ -16,7 +16,7 @@ import { applyAnyEdits, applyEdit, diffSummary, liveDiffStats, numberLines, spli
 import { formatOutline, languageOf, outline } from './outline.js';
 import { bidiWarning, checkSyntax, syntaxWarning } from './check.js';
 import { addNote, looksLikeSecret, readNotes, removeNotes, searchNotes } from './memory.js';
-import { currentFileVersion, expectedFileVersion, fileVersion, hasInspectedContent, movingTargets, observeFile, observeFileRange, observeListing, observeOwned, observeShellMove, workspaceStatFingerprint } from './policy.js';
+import { createRunState, currentFileVersion, expectedFileVersion, fileVersion, hasInspectedContent, movingTargets, observeFile, observeFileRange, observeListing, observeOwned, observeShellMove, workspaceStatFingerprint } from './policy.js';
 import { peekPartialArgs, salvageWrite, extractStringFields, repairJsonText } from './partial.js';
 import { limits } from './config.js';
 import {
@@ -3332,11 +3332,32 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
      * Run one tool. Never throws: a failure comes back as { ok:false, output }
      * so the model sees what went wrong and can adapt.
      */
-    async execute(name, rawArgs, ctx) {
+    async execute(name, rawCtxArgs, rawCtx) {
+      const rawArgs = rawCtxArgs;
+      /**
+       * Normalise the context once, here, instead of guarding it 35 times below.
+       *
+       * The tools read ctx.state directly in three dozen places and ctx.emit /
+       * ctx.approve in a few more, while this function guarded ctx itself — so a
+       * caller that passed a partial context (a script, a test, a future second
+       * caller) got "cannot read properties of undefined" from somewhere deep in
+       * a tool rather than a working call. Filling in the no-op defaults makes
+       * every tool safe without a single extra `?.`: a run with no state simply
+       * does not accumulate repeat-suppression, which is exactly right.
+       *
+       * approve has no safe default — silently granting an approval nobody asked
+       * for would be the worst possible guess — so its absence stays a refusal.
+       */
+      const ctx = {
+        ...rawCtx,
+        state: rawCtx?.state || createRunState(),
+        emit: rawCtx?.emit || (() => {}),
+        approve: rawCtx?.approve || (async () => false),
+      };
       const kindByTool = { list_dir: 'list', read_file: 'read', write_file: 'write', edit_file: 'edit', multi_edit: 'edit' };
       try {
         const args = normalizeArgs(rawArgs);
-        const state = ctx?.state;
+        const state = ctx.state;
         // Anything that is not a pure read may have changed the workspace — a shell
         // command as much as a write — so it retires every cached analysis answer.
         if (state && !READ_ONLY_TOOLS.has(name)) state.analysisEpoch = (state.analysisEpoch || 0) + 1;

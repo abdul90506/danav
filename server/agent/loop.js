@@ -19,7 +19,7 @@ import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun, taskKeyFor } from './journal.js';
 import { createTaskMemory } from './taskMemory.js';
 import { buildToolset, pickFailureLines, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint } from './tools.js';
-import { checkAction, createLedger, observeOwned } from './policy.js';
+import { checkAction, createRunState, observeOwned } from './policy.js';
 import { splitLines } from './textops.js';
 import { looksLikeSecret, memoryForPrompt } from './memory.js';
 import { createSkillRegistry } from './skills.js';
@@ -692,19 +692,13 @@ export async function runAgent({
   const priorTaskRun = resume && taskKey
     ? readRunJournal(workspace.id, 30).find((run) => run.taskKey === taskKey) || null
     : null;
-  const state = {
-    readFiles: new Set(), plan: priorTaskRun?.plan || [], findings: priorTaskRun?.findings || [], toolErrors: priorTaskRun?.toolErrors || [], changed: new Map(), singleEdits: new Map(), checks: [], toolFailures: 0,
-    parkedBodies: new Set(),
-    subagentCalls: 0,
-    /** Files being written straight to disk while the model writes them (see tools.liveWrite). */
-    liveWriters: [], committedWrites: new Set(),
-    /**
-     * What the agent has actually looked at this run. Filled in by the tools,
-     * read by the policy gate before a mutating call is allowed to run — see
-     * policy.js. "Look before you leap" as an invariant, not as advice.
-     */
-    ledger: createLedger(),
-  };
+  // Shape lives in policy.js so the toolset's own fallback cannot drift from it.
+  // A resumed task carries its plan and findings forward; everything else is new.
+  const state = createRunState({
+    plan: priorTaskRun?.plan || [],
+    findings: priorTaskRun?.findings || [],
+    toolErrors: priorTaskRun?.toolErrors || [],
+  });
   let messages = null;
   let runActive = true;
   const taskMemory = createTaskMemory({
