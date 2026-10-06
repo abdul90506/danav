@@ -1836,7 +1836,7 @@ test('an answer cut off by the output limit is continued, not shipped half-writt
   assert.match(notices, /answer hit the output limit/, 'the user is told why the answer paused');
 });
 
-test('a run that goes quiet is asked to narrate, and a talkative one is left alone', async () => {
+test('a run that works quietly is left alone, and the prompt carries the contract', async () => {
   // The system prompt carries the contract...
   const silent = await agentRun({ model: 'fake-quiet', history: [{ role: 'user', content: 'write the two files' }] });
   const system = String(silent.requests[0].messages[0].content);
@@ -1854,22 +1854,22 @@ test('a run that goes quiet is asked to narrate, and a talkative one is left alo
   assert.ok(!/500 characters is plenty/.test(system), 'the flat length cap is gone');
   assert.match(system, /never describe work you did not do/i, 'the prompt forbids claiming work that never happened');
 
-  // ...and a run that ignores it is asked, exactly once. The notices stay in the
-  // transcript, so the last request shows every one this run got.
-  const asked = silent.requests.at(-1).messages.filter((m) => /without a word to the user/.test(String(m.content)));
-  assert.equal(asked.length, 1, `one request for a spoken line, not a stream of them (${asked.length})`);
-  assert.match(String(asked[0].content), /ONE short, plain sentence/, 'the ask is specific');
-  assert.match(String(asked[0].content), /not an announcement of the tool call/, 'and asks for progress, not filler');
+  // A quiet run is NOT interrupted. The loop used to push a "say something"
+  // notice after three wordless turns, which contradicted the prompt above and
+  // bought the running commentary the user asked to stop seeing — at the price
+  // of output tokens and a longer context on every remaining round. Every tool
+  // call is already a row on screen, so there is no gap to fill.
+  const nagged = silent.requests.at(-1).messages.filter((m) => /without a word to the user/.test(String(m.content)));
+  assert.equal(nagged.length, 0, `a working run is never nagged mid-task (${nagged.length})`);
 
-  // The reminder is for the model: the user never sees it as a message.
+  // What replaces it costs nothing: the run still has to end with a summary.
   const spoken = silent.events.filter((e) => typeof e.content === 'string').map((e) => e.content).join('');
-  assert.ok(!spoken.includes('without a word to the user'), 'the reminder is not shown to the user');
   assert.match(spoken, /Both files are written/, 'the run still ends with the summary');
 
-  // A run that narrates every step never hears about it.
+  // And a run that narrates every step is likewise left alone.
   const chatty = await agentRun({ model: 'fake-batch', history: [{ role: 'user', content: 'set the project up' }] });
   const chattyView = chatty.requests.map((r) => JSON.stringify(r.messages)).join('\n');
-  assert.ok(!/without a word to the user/.test(chattyView), 'no nagging when the model already explains itself');
+  assert.ok(!/without a word to the user/.test(chattyView), 'no nagging, either way');
 });
 
 test('the prompt arrives already knowing the project, and the request it has to answer', async () => {
@@ -1992,4 +1992,49 @@ test('the system prompt stays lean, and says each rule once', () => {
   const ids = [...prompt.matchAll(/^(\d+[a-z]?)\. \*\*/gm)].map((m) => m[1]);
   assert.deepEqual(ids, [...ids].sort((a, b) => (parseInt(a, 10) - parseInt(b, 10)) || a.localeCompare(b)),
     `the How-to-work rules are out of order: ${ids.join(', ')}`);
+});
+
+test('a stopped run remembers what it explored, and a misspelt tool name still runs', async () => {
+  const { nearestTool } = await import('../../server/agent/tools.js');
+  const { recordRun, readRunJournal, recentRunsForPrompt, taskKeyFor } = await import('../../server/agent/journal.js');
+
+  // The name the model actually produced in the wild. Three edits away from the
+  // real tool, which the old fixed budget of 3 rejected outright — so the run
+  // spent a whole round being handed a list of every tool instead.
+  assert.equal(nearestTool('run_process_output'), 'read_process_output');
+  assert.equal(nearestTool('writefile'), 'write_file');
+  assert.equal(nearestTool('web_serch'), 'web_search');
+  // Too vague to resolve: guessing is worse than saying so.
+  assert.equal(nearestTool('grep'), null);
+  assert.equal(nearestTool('xyzzy'), null);
+
+  // A run the user stopped before it changed anything is the one most likely to
+  // be continued, so it must survive in the journal with its reading trail.
+  const workspaceId = `explored-${Date.now()}`;
+  const taskId = 'msg-ai-explored-1';
+  const taskKey = taskKeyFor(taskId);
+  recordRun(workspaceId, {
+    runId: 'run-explored-1',
+    taskKey,
+    stopReason: 'aborted',
+    changed: [],
+    checks: [],
+    failures: 0,
+    plan: [{ content: 'Trace the streaming path', status: 'in_progress' }],
+    findings: [],
+    toolErrors: [],
+    interrupted: [],
+    explored: ['Read server/agent/loop.js', 'Looked up symbol runAgent', 'Read server/agent/loop.js'],
+  });
+
+  const [run] = readRunJournal(workspaceId, 5);
+  assert.ok(run, 'a stopped run that only explored is still worth keeping');
+  assert.deepEqual(run.explored, ['Read server/agent/loop.js', 'Looked up symbol runAgent'], 'and it is deduplicated');
+
+  // "Continue." has no words to match on, so this has to arrive without ranking.
+  const carried = recentRunsForPrompt(workspaceId, 'Continue.', 8000, 6, { resume: true, taskKey });
+  assert.match(carried, /Already looked at on this task/, 'the continued run is told what was covered');
+  assert.match(carried, /Read server\/agent\/loop\.js/, 'including the files');
+  assert.match(carried, /Looked up symbol runAgent/, 'and the searches');
+  assert.match(carried, /Trace the streaming path/, 'the open checklist comes too');
 });

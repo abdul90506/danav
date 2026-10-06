@@ -18,7 +18,7 @@ import { formatRepoState, readRepoState } from './githistory.js';
 import { collectProjectGuidance } from './context.js';
 import { readRunJournal, recentRunsForPrompt, recordRun, taskKeyFor } from './journal.js';
 import { createTaskMemory } from './taskMemory.js';
-import { buildToolset, pickFailureLines, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint } from './tools.js';
+import { buildToolset, pickFailureLines, READ_ONLY_TOOLS, RETIRED_TOOLS, unknownToolHint, nearestTool } from './tools.js';
 import { checkAction, createRunState, observeOwned } from './policy.js';
 import { splitLines } from './textops.js';
 import { looksLikeSecret, memoryForPrompt } from './memory.js';
@@ -672,6 +672,30 @@ const POLLING_TOOLS = new Set(['read_process_output', 'list_processes', 'get_pre
  * @param {string} o.runId
  * @param {string} [o.taskId] stable assistant-turn id for exact-task checkpoints
  */
+/**
+ * Remember that the run looked at something, in one short human line.
+ *
+ * Only the fact and the target are kept — never the content. "Read loop.js" is
+ * enough to stop a continued run from reading it a second time; the bytes are
+ * what the context window is for, and they are exactly what must not be
+ * persisted. Keyed so a file read three ways is remembered once.
+ */
+function noteExploration(state, name, args, result) {
+  if (!state?.explored || !result || result.ok === false || result.denied) return;
+  const path = typeof args.path === 'string' ? args.path : '';
+  const line =
+    name === 'read_file' ? (args.outline ? `Outlined ${path}` : args.symbol ? `Read ${path} (${args.symbol})` : `Read ${path}`)
+    : name === 'grep_search' ? `Searched for "${String(args.pattern || '').slice(0, 60)}"${path ? ` in ${path}` : ''}`
+    : name === 'find_symbol' ? `Looked up symbol ${String(args.name || '').slice(0, 60)}`
+    : name === 'code_map' ? `Mapped code for "${String(args.task || args.query || '').slice(0, 60)}"`
+    : name === 'list_dir' ? `Listed ${path || '.'}`
+    : name === 'repo_history' ? `Checked history of ${path || 'the repo'}`
+    : '';
+  if (!line) return;
+  const key = line.toLowerCase();
+  if (!state.explored.has(key)) state.explored.set(key, line);
+}
+
 export async function runAgent({
   provider, model, thinkingLevel, history, activity, workspace, runSearchTool, send, signal, runId,
   /** Stable assistant-message id; Continue reuses it so only that task state is restored. */
@@ -953,7 +977,6 @@ export async function runAgent({
     /** Model turns that ran tools without a single word to the user, in a row. */
     let silentSteps = 0;
     /** How many times this run has asked for a spoken line (never more than two). */
-    let narrationNotices = 0;
     /** Times this run has asked the model to finish the checklist it set itself. */
     let planFinishNudges = 0;
     /** Tool-bearing rounds used AFTER the step limit was reached (to land work in flight). */
@@ -1342,7 +1365,8 @@ export async function runAgent({
 
       // Did this turn actually say anything to the user? A turn that only fires
       // tool calls is silent, and a run of silent turns is a run the user cannot
-      // follow — see the narration nudge at the end of this round.
+      // follow. Tracked only so the closing-summary check can tell a run that
+      // never said anything from one that did.
       silentSteps = roundText.trim() ? 0 : silentSteps + 1;
 
       messages.push({
@@ -1642,6 +1666,15 @@ export async function runAgent({
           } else {
             res = saved;
           }
+        } else if (!tools.has(name) && !RETIRED_TOOLS.has(name) && nearestTool(name) && tools.has(nearestTool(name))) {
+          // An unmistakable misspelling is the same request, so run it. Answering
+          // "unknown tool, here are all of them" costs a whole round — the model
+          // re-sends the entire conversation to make the identical call with one
+          // letter changed. The correction is still stated, so the next call is
+          // spelt right.
+          const resolved = nearestTool(name);
+          const ran = await executeChecked(resolved, execArgs);
+          res = { ...ran, output: `[Ran \`${resolved}\`; "${name}" is not a tool name. Use \`${resolved}\`.]\n${ran.output}` };
         } else if (!tools.has(name)) {
           const retired = RETIRED_TOOLS.get(name);
           // A name that never existed is answered with the tool that does the job
@@ -1762,6 +1795,7 @@ export async function runAgent({
           }
         }
         taskMemory.capture({ name, args: args || {}, result: res, state });
+        noteExploration(state, name, args || {}, res);
         const answeredIds = Array.isArray(modelIds) && modelIds.length ? modelIds : [modelId];
         if (answeredIds.length > 1) {
           messages.push({
@@ -1813,23 +1847,11 @@ export async function runAgent({
         if (!answered.has(modelId)) messages.push({ role: 'tool', tool_call_id: modelId, content: 'Skipped.' });
       }
 
-      // The chat belongs to the user, so a run that works quietly is left alone for a
-      // long stretch — three whole turns with no words at all — and then asked, once,
-      // for a line about where the work stands. The line has to be progress or a
-      // result, never an announcement of the next tool call: that is the noise the
-      // prompt bans and the user asked to stop seeing.
-      const wantsNarration =
-        (silentSteps >= 3 && narrationNotices === 0) || (silentSteps >= 8 && narrationNotices === 1);
-      if (!wrapUp && wantsNarration && Date.now() < deadline) {
-        narrationNotices++;
-        messages.push({
-          role: 'user',
-          content:
-            `[system notice] ${silentSteps} turns have gone by without a word to the user. ` +
-            'Say where the work stands in ONE short, plain sentence — what has changed so far, or what you found — ' +
-            'not an announcement of the tool call you are about to make. Then carry straight on with the task.',
-        });
-      }
+      // A run that works quietly is left alone. Every tool call is already a row
+      // on screen, so silence is not a gap in the story — and nudging for a
+      // sentence mid-task bought exactly the running commentary the prompt bans,
+      // at the price of output tokens and a longer context every time. The
+      // closing summary is still required; that check lives at the end of the run.
 
       stopReason = wrapUp || stopReason;
     }
@@ -1889,6 +1911,7 @@ export async function runAgent({
         plan: state.plan || [],
         findings: state.findings || [],
         toolErrors: state.toolErrors || [],
+        explored: [...(state.explored?.values() || [])],
         interrupted: [...new Set(interrupted)].slice(0, 8),
       });
     } catch {

@@ -833,16 +833,39 @@ export function unknownToolHint(name) {
     return `"${bare}" is not a tool, but ${intent.why}: use \`${intent.tool}\`${how}.`;
   }
   // Not a housekeeping name: maybe it is a typo of one that does exist.
+  const near = nearestTool(bare);
+  return near ? `"${bare}" is not a tool. Did you mean \`${near}\`?` : null;
+}
+
+/**
+ * The real tool a misspelt name almost certainly meant, or null.
+ *
+ * A fixed distance of 3 was wrong for names this long: `run_process_output`
+ * against `read_process_output` is three edits, which is obviously the same
+ * tool, while three edits on a short name is a different tool entirely. The
+ * budget scales with length instead, and a tie returns nothing — guessing
+ * between two equally close tools is worse than saying so.
+ */
+export function nearestTool(name) {
+  const bare = String(name || '').trim().toLowerCase();
+  if (!bare) return null;
+  const names = ALL_TOOL_DEFINITIONS.map((d) => d.function.name);
+  if (names.includes(bare)) return bare;
+  const budget = Math.max(2, Math.min(4, Math.round(bare.length / 5)));
   let best = null;
-  let bestDistance = 3;
+  let bestDistance = budget + 1;
+  let tied = false;
   for (const candidate of names) {
-    const distance = editDistance(bare.toLowerCase(), candidate.toLowerCase());
+    const distance = editDistance(bare, candidate.toLowerCase());
     if (distance < bestDistance) {
       bestDistance = distance;
       best = candidate;
+      tied = false;
+    } else if (distance === bestDistance) {
+      tied = true;
     }
   }
-  return best ? `"${bare}" is not a tool. Did you mean \`${best}\`?` : null;
+  return best && !tied ? best : null;
 }
 
 /** Small Levenshtein, used only to point at a likely typo in a tool name. */

@@ -16,7 +16,16 @@ const DISCOVERY_TOOLS = new Set([
   'relevant_files', 'repo_status', 'repo_history',
 ]);
 const MAX_BATCH_EVENTS = 5;
-const MAX_MODEL_SUMMARIES = 6;
+/**
+ * Background summaries are real provider requests, charged against the same
+ * rate limit as the run itself — six of them could cost more calls than the
+ * task. The local checkpoint is written first and already carries the files,
+ * the steps and the plan, and the run journal now records the exploration
+ * trail too, so the model pass is a quality improvement on memory that already
+ * exists rather than the thing memory depends on. Two is enough to catch the
+ * shape of a long task.
+ */
+const MAX_MODEL_SUMMARIES = 2;
 const MAX_LIVE_MEMORIES = 6;
 const SUMMARY_TIMEOUT_MS = 120_000;
 

@@ -12,6 +12,8 @@ const MAX_CHECKS = 12;
 const MAX_PLAN_ITEMS = 25;
 const MAX_FINDINGS = 8;
 const MAX_TOOL_ERRORS = 8;
+/** Files read and searches run, kept so a continued run does not repeat them. */
+const MAX_EXPLORED = 24;
 const MAX_TASK_MEMORIES = 12;
 const dir = () => path.join(dataDir(), 'agent-runs');
 
@@ -127,6 +129,20 @@ function cleanRun(raw) {
         return [{ tool, message }];
       }).slice(-MAX_TOOL_ERRORS)
     : [];
+  // What the run looked at. Changed files were already remembered; the reading
+  // and searching that led to them was not, so a continued run had no way to
+  // know the ground had been covered and simply covered it again.
+  const seenExplored = new Set();
+  const explored = Array.isArray(raw.explored)
+    ? raw.explored.flatMap((value) => {
+        if (typeof value !== 'string' || looksLikeSecret(value)) return [];
+        const text = value.replace(/\s+/g, ' ').trim().slice(0, 200);
+        const key = text.normalize('NFKC').toLowerCase();
+        if (!text || seenExplored.has(key)) return [];
+        seenExplored.add(key);
+        return [text];
+      }).slice(-MAX_EXPLORED)
+    : [];
   const taskKey = typeof raw.taskKey === 'string' && /^task-[a-f0-9]{24}$/.test(raw.taskKey) ? raw.taskKey : '';
   const runId = typeof raw.runId === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(raw.runId) ? raw.runId : '';
   const memories = Array.isArray(raw.memories)
@@ -146,6 +162,7 @@ function cleanRun(raw) {
     failures: Number.isFinite(raw.failures) ? Math.max(0, Math.min(100, Math.floor(raw.failures))) : 0,
     plan,
     interrupted,
+    explored,
   };
 }
 
@@ -197,11 +214,18 @@ export function recordRun(workspaceId, raw) {
     id: existing?.id || genId('jr'),
     runId: requestedRunId || existing?.runId || '',
     memories: Array.isArray(raw.memories) && raw.memories.length ? raw.memories : (existing?.memories || []),
+    explored: Array.isArray(raw.explored) && raw.explored.length ? raw.explored : (existing?.explored || []),
     at: Date.now(),
   });
   if (!run) return null;
-  const unfinished = run.stopReason !== 'completed' && run.stopReason !== 'aborted';
-  if (!run.changed.length && !run.checks.length && !run.failures && !unfinished && !run.plan.length && !run.interrupted.length && !run.findings.length && !run.toolErrors.length && !run.memories.length) return null;
+  // A run the user stopped is the one they are most likely to continue, so it is
+  // never dropped for having produced no artefacts: "I explored these files and
+  // was cut off" is exactly the memory Continue needs. Only a completed run that
+  // genuinely did nothing is discarded.
+  const unfinished = run.stopReason !== 'completed';
+  if (!run.changed.length && !run.checks.length && !run.failures && !unfinished && !run.plan.length
+    && !run.interrupted.length && !run.findings.length && !run.toolErrors.length && !run.memories.length
+    && !run.explored.length) return null;
   return saveRunUpdate(workspaceId, run, previousRuns);
 }
 
@@ -336,6 +360,11 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
         if (memory.next) parts.push(`next: ${clipLine(memory.next, 100)}`);
         if (!addLine(`  - ${clipLine(parts.join(' · '), 900)}`)) break;
       }
+    }
+    const exploredAll = [...new Set(taskRuns.flatMap((run) => run.explored))];
+    if (exploredAll.length && used < cap) {
+      addLine('- Already looked at on this task (do not re-read or re-search these unless the file changed since):');
+      for (const item of exploredAll.slice(-MAX_EXPLORED)) if (!addLine(`  - ${item}`)) break;
     }
     if (handoff.toolErrors.length && used < cap) {
       addLine('- Earlier tool failures (do not repeat the same call unchanged; adapt to this result):');

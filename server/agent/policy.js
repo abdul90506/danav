@@ -56,6 +56,8 @@ export function createRunState(overrides = {}) {
     findings: [],
     toolErrors: [],
     changed: new Map(),
+    /** What this run read or searched, so a continued run need not repeat it. */
+    explored: new Map(),
     singleEdits: new Map(),
     checks: [],
     toolFailures: 0,
