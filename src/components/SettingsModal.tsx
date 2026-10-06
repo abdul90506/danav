@@ -20,6 +20,7 @@ import {
   Check,
   Search,
   Database,
+  Copy,
   Download,
   Upload,
   RotateCcw,
@@ -82,6 +83,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   /** Result of the last import or export, shown under the key list. */
   const [keyFileNotice, setKeyFileNotice] = useState('');
   const keyFileInput = useRef<HTMLInputElement>(null);
+  /** The exported list, held on screen so it can be copied even if a download is blocked. */
+  const [exportedKeys, setExportedKeys] = useState<{ text: string; count: number; name: string; url: string } | null>(null);
+  const [copiedKeys, setCopiedKeys] = useState(false);
+  const exportedKeysField = useRef<HTMLTextAreaElement>(null);
   const [formSavedApiKeyCount, setFormSavedApiKeyCount] = useState(0);
   const [clearSavedApiKeys, setClearSavedApiKeys] = useState(false);
   const [savingProvider, setSavingProvider] = useState(false);
@@ -234,6 +239,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     : '';
 
   const startAddNewProvider = () => {
+    // Never carry one provider's exported keys into another provider's form.
+    setExportedKeys(null);
+    setKeyFileNotice('');
     setIsAddingNew(true);
     setEditingProviderId(null);
     setFormName('');
@@ -257,6 +265,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const startEditProvider = (p: Provider) => {
+    setExportedKeys(null);
+    setKeyFileNotice('');
     setEditingProviderId(p.id);
     setIsAddingNew(false);
     setFormName(p.name);
@@ -284,6 +294,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const cancelProviderForm = () => {
+    setExportedKeys(null);
     setIsAddingNew(false);
     setEditingProviderId(null);
     setIsModelPickerOpen(false);
@@ -317,7 +328,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  /** Download this provider's saved keys, one per line. */
+  /**
+   * Fetch this provider's saved keys and offer them every way that can work.
+   *
+   * A generated download is the obvious route and it is the one that silently
+   * fails: inside a sandboxed preview frame the browser drops the click with
+   * no event and no error, so the only sign of life was the "Exported 8 keys"
+   * notice and no file. So the keys are also put on screen, where copying
+   * them always works, and the download link is a real anchor the user clicks
+   * themselves rather than a synthetic click that can be ignored.
+   */
   const handleExportKeys = async () => {
     if (!editingProviderId) return;
     setKeyFileNotice('');
@@ -329,19 +349,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         return;
       }
       const text = await res.text();
-      const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${(formName || 'provider').replace(/[^a-z0-9._-]+/gi, '-')}-api-keys.txt`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
+      if (exportedKeys?.url) URL.revokeObjectURL(exportedKeys.url);
       const count = text.split('\n').filter((line) => line.trim()).length;
-      setKeyFileNotice(`Exported ${count} key${count === 1 ? '' : 's'}.`);
+      setExportedKeys({
+        text,
+        count,
+        name: `${(formName || 'provider').replace(/[^a-z0-9._-]+/gi, '-')}-api-keys.txt`,
+        url: URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' })),
+      });
+      setKeyFileNotice('');
+      setCopiedKeys(false);
     } catch {
       setKeyFileNotice('Could not export the keys.');
     }
+  };
+
+  /** Copy the exported list, with the old command as a fallback for locked-down frames. */
+  const handleCopyExportedKeys = async () => {
+    if (!exportedKeys) return;
+    try {
+      await navigator.clipboard.writeText(exportedKeys.text);
+      setCopiedKeys(true);
+      return;
+    } catch {
+      /* Clipboard access is refused in some embedded frames; select instead. */
+    }
+    const field = exportedKeysField.current;
+    if (!field) return;
+    field.focus();
+    field.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch { copied = false; }
+    setCopiedKeys(copied);
+    if (!copied) setKeyFileNotice('Copying is blocked here — the keys are selected, press Ctrl+C.');
   };
 
   const handleTestConnection = async () => {
@@ -967,6 +1007,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                     {keyFileNotice && (
                       <p className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400">{keyFileNotice}</p>
+                    )}
+                    {exportedKeys && (
+                      <div className="mt-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-800 dark:bg-zinc-900/60">
+                        <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="text-[10px] font-medium text-zinc-600 dark:text-zinc-300">
+                            {exportedKeys.count} key{exportedKeys.count === 1 ? '' : 's'}, one per line
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleCopyExportedKeys}
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-1.5 py-0.5 text-[10px] text-zinc-700 hover:bg-white dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            {copiedKeys ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                            {copiedKeys ? 'Copied' : 'Copy all'}
+                          </button>
+                          {/* A real link the user clicks: a synthetic click is what the preview frame refuses. */}
+                          <a
+                            href={exportedKeys.url}
+                            download={exportedKeys.name}
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-1.5 py-0.5 text-[10px] text-zinc-700 hover:bg-white dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            <Download className="h-3 w-3" /> Save {exportedKeys.name}
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              URL.revokeObjectURL(exportedKeys.url);
+                              setExportedKeys(null);
+                              setCopiedKeys(false);
+                            }}
+                            className="ml-auto text-[10px] text-zinc-400 underline hover:text-zinc-700 dark:hover:text-zinc-200"
+                          >
+                            Hide
+                          </button>
+                        </div>
+                        <textarea
+                          ref={exportedKeysField}
+                          readOnly
+                          value={exportedKeys.text}
+                          onFocus={(e) => e.currentTarget.select()}
+                          rows={Math.min(8, Math.max(2, exportedKeys.count))}
+                          spellCheck={false}
+                          aria-label="Exported API keys"
+                          className="w-full resize-y rounded-md border border-zinc-200 bg-white p-1.5 font-mono text-[10px] leading-5 text-zinc-800 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200"
+                        />
+                        <p className="mt-1 text-[10px] text-zinc-400">
+                          If the Save link does nothing, this view is embedded in a frame that blocks downloads — copy
+                          the list and paste it into a .txt file. Importing reads exactly this format back.
+                        </p>
+                      </div>
                     )}
                   </div>
 
