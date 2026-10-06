@@ -7,6 +7,16 @@ export function buildEditedProvider(provider, fields) {
     apiType: fields.apiType,
     models: (Array.isArray(fields.models) ? fields.models : []).map((model) => ({ ...model, providerId: provider.id })),
   };
+  if (fields.quota && fields.quota.enabled) {
+    const rpm = Math.floor(Number(fields.quota.rpm));
+    const rpd = Math.floor(Number(fields.quota.rpd));
+    const limit = {};
+    if (Number.isFinite(rpm) && rpm > 0) limit.rpm = rpm;
+    if (Number.isFinite(rpd) && rpd > 0) limit.rpd = rpd;
+    next.quota = { enabled: true, limits: { '*': limit } };
+  } else {
+    next.quota = { enabled: false };
+  }
   delete next.apiKey;
   delete next.apiKeys;
   delete next.apiKeyAdditions;

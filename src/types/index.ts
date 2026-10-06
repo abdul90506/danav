@@ -35,6 +35,8 @@ export interface Provider {
   clearApiKey?: boolean;
   clearApiKeys?: boolean;
   apiType: ApiType;
+  /** Per-key, per-model request budget. Off unless the provider publishes hard limits. */
+  quota?: { enabled?: boolean; limits?: Record<string, { rpm?: number; rpd?: number }> };
   models: Model[];
   isCustom?: boolean;
   enabled?: boolean;

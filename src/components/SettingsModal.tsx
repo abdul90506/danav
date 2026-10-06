@@ -24,6 +24,7 @@ import {
   RotateCcw,
   Loader2,
 } from 'lucide-react';
+import { QuotaPanel } from './QuotaPanel';
 import { AgentSummaryModelSelection, ApiType, Conversation, Model, Provider, Theme } from '../types';
 import {
   fetchConversationsBackup,
@@ -60,7 +61,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   conversations,
   onConversationsRestored,
 }) => {
-  const [activeTab, setActiveTab] = useState<'appearance' | 'providers' | 'agent' | 'data'>('appearance');
+  const [activeTab, setActiveTab] = useState<'appearance' | 'providers' | 'limits' | 'agent' | 'data'>('appearance');
   const dialogRef = useRef<HTMLDivElement>(null);
   useFocusTrap(dialogRef, isOpen);
 
@@ -82,6 +83,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [savingProvider, setSavingProvider] = useState(false);
   const [providerSaveError, setProviderSaveError] = useState('');
   const [formApiType, setFormApiType] = useState<ApiType>('openai');
+  const [formQuotaEnabled, setFormQuotaEnabled] = useState(false);
+  const [formQuotaRpm, setFormQuotaRpm] = useState('5');
+  const [formQuotaRpd, setFormQuotaRpd] = useState('20');
   const [formModels, setFormModels] = useState<Model[]>([]);
 
   // Fetched models selection state (checkbox picker)
@@ -235,6 +239,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setClearSavedApiKeys(false);
     setShowApiKey(false);
     setFormApiType('openai');
+    setFormQuotaEnabled(false);
+    setFormQuotaRpm('5');
+    setFormQuotaRpd('20');
     setFormModels([]);
     setFetchedCandidateModels([]);
     setSelectedCandidateModelIds(new Set());
@@ -256,6 +263,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setClearSavedApiKeys(false);
     setShowApiKey(false);
     setFormApiType(p.apiType);
+    setFormQuotaEnabled(p.quota?.enabled === true);
+    setFormQuotaRpm(String(p.quota?.limits?.['*']?.rpm ?? 5));
+    setFormQuotaRpd(String(p.quota?.limits?.['*']?.rpd ?? 20));
     setFormModels(p.models || []);
     setFetchedCandidateModels(p.models || []);
     setSelectedCandidateModelIds(new Set((p.models || []).map((m) => m.id)));
@@ -379,6 +389,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         baseUrl: formBaseUrl.trim(),
         apiKeyAdditions: enteredApiKeys(),
         apiType: formApiType,
+        quota: formQuotaEnabled
+          ? { enabled: true, limits: { '*': { rpm: Number(formQuotaRpm) || 5, rpd: Number(formQuotaRpd) || 20 } } }
+          : { enabled: false },
         isCustom: true,
         enabled: true,
         models:
@@ -397,6 +410,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               apiType: formApiType,
               models: formModels,
               clearSavedApiKeys,
+              quota: { enabled: formQuotaEnabled, rpm: formQuotaRpm, rpd: formQuotaRpd },
             })
           : p
       );
@@ -508,6 +522,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             Providers & Models
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab('limits');
+              cancelProviderForm();
+            }}
+            className={`pb-2.5 transition-colors border-b-2 ${
+              activeTab === 'limits'
+                ? 'border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100 font-semibold'
+                : 'border-transparent text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300'
+            }`}
+          >
+            Limits
           </button>
           <button
             onClick={() => {
@@ -717,6 +744,59 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <option value="mock">Demo / Mock Provider</option>
                       </select>
                     </div>
+                  </div>
+
+                  <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 p-2.5">
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={formQuotaEnabled}
+                        onChange={(e) => setFormQuotaEnabled(e.target.checked)}
+                        className="mt-0.5 w-3.5 h-3.5 accent-zinc-900 dark:accent-zinc-100"
+                      />
+                      <span>
+                        <span className="block text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                          Spread requests across keys and models
+                        </span>
+                        <span className="block text-[10px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+                          For providers with a published free tier, such as Gemini. Danav counts
+                          requests per key and per model, moves to the next pair before a limit is
+                          reached, and keeps a refused pair out of rotation.
+                        </span>
+                      </span>
+                    </label>
+                    {formQuotaEnabled && (
+                      <div className="grid grid-cols-2 gap-2 mt-2.5 pl-[22px]">
+                        <div>
+                          <label className="block text-[10px] font-medium text-zinc-600 dark:text-zinc-400 mb-1">
+                            Requests per minute
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={formQuotaRpm}
+                            onChange={(e) => setFormQuotaRpm(e.target.value)}
+                            className="w-full h-7 px-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-1 focus:ring-zinc-400 text-zinc-900 dark:text-zinc-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-medium text-zinc-600 dark:text-zinc-400 mb-1">
+                            Requests per day
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={formQuotaRpd}
+                            onChange={(e) => setFormQuotaRpd(e.target.value)}
+                            className="w-full h-7 px-2 text-xs bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-1 focus:ring-zinc-400 text-zinc-900 dark:text-zinc-100"
+                          />
+                        </div>
+                        <p className="col-span-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+                          Per key, per model &mdash; the shape every free tier uses. Live usage is in
+                          the Limits tab.
+                        </p>
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -1047,6 +1127,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
           {/* TAB 3: AGENT MEMORY */}
+          {activeTab === 'limits' && (
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">Request limits</h3>
+                <p className="mt-1 text-[13px] text-zinc-500 dark:text-zinc-400">
+                  Keys are budgeted per model, not per key, so Danav picks the key and model that still have room
+                  before it sends anything — and moves on the moment one is refused.
+                </p>
+              </div>
+              <QuotaPanel />
+            </div>
+          )}
+
           {activeTab === 'agent' && (
             <div className="space-y-5">
               <div>

@@ -13,6 +13,7 @@ import { assertPublicResultUrl, fetchPublicUrl, isCloudMetadataUrl, UrlRefusedEr
 import { registerAgentRoutes, _activeRuns } from './agent/routes.js';
 import { startIdlePauseSweeper } from './agent/idlePause.js';
 import { normalizeAgentBlockForDisk } from './agent/persist.js';
+import { snapshot as quotaSnapshot } from './agent/quota.js';
 import { modelForProvider, normalizeThinkingLevel, thinkingParams } from './agent/thinking.js';
 import { mergeSettingsPatch, providerApiKeys, publicSettings, resolveAgentSummaryModel, resolveConfiguredProvider } from './settings.js';
 import {
@@ -721,6 +722,24 @@ app.get('/api/preview-auth/check', (req, res) => {
   const required = Boolean(previewToken());
   const authenticated = !required || previewTokenMatches(req);
   return res.status(authenticated ? 200 : 401).json({ required, authenticated });
+});
+
+/**
+ * What is left of today's request budget, per model and per key.
+ *
+ * Read-only and credential-free: the browser is told how many keys a provider
+ * has and how much room each one has, never which key or what it is.
+ */
+app.get('/api/quota', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const settings = readSettingsFromDisk();
+  const providers = (settings.providers || []).map((provider) => ({
+    ...provider,
+    apiKeyCount: Array.isArray(provider.apiKeys) ? provider.apiKeys.length : (provider.apiKey ? 1 : 0),
+    apiKey: undefined,
+    apiKeys: undefined,
+  }));
+  return res.json({ success: true, providers: quotaSnapshot(providers) });
 });
 
 // Settings API Endpoints. Provider keys stay on disk and are never reflected to the browser.

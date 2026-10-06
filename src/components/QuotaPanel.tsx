@@ -1,0 +1,195 @@
+import { useCallback, useEffect, useState } from 'react';
+import { Gauge, Loader2, RefreshCw } from 'lucide-react';
+
+/**
+ * What is left of today's request budget.
+ *
+ * A Gemini key is budgeted per MODEL, so eight keys across four models is
+ * thirty-two separate allowances, not one. That is impossible to hold in your
+ * head and it is the number that decides whether the next message works, so it
+ * is shown: the totals big, and the per-model breakdown under them.
+ */
+
+export interface QuotaKey {
+  credentialIndex: number;
+  minuteUsed: number;
+  dayUsed: number;
+  minuteLeft: number;
+  dayLeft: number;
+  cooling: boolean;
+  available: boolean;
+}
+
+export interface QuotaModel {
+  model: string;
+  rpm: number;
+  rpd: number;
+  minuteUsed: number;
+  minuteLimit: number;
+  dayUsed: number;
+  dayLimit: number;
+  keysAvailable: number;
+  keys: QuotaKey[];
+}
+
+export interface QuotaProvider {
+  providerId: string;
+  name: string;
+  credentialCount: number;
+  day: string;
+  resetsAt: string;
+  minuteUsed: number;
+  minuteLimit: number;
+  dayUsed: number;
+  dayLimit: number;
+  models: QuotaModel[];
+}
+
+/** Green while there is room, amber when it is nearly gone, red when it is. */
+export function barTone(used: number, limit: number): string {
+  if (limit <= 0) return 'bg-zinc-300 dark:bg-zinc-700';
+  const left = (limit - used) / limit;
+  if (left <= 0) return 'bg-rose-500';
+  if (left < 0.25) return 'bg-amber-500';
+  return 'bg-emerald-500';
+}
+
+const pct = (used: number, limit: number) =>
+  limit <= 0 ? 0 : Math.max(0, Math.min(100, Math.round((used / limit) * 100)));
+
+function Bar({ used, limit }: { used: number; limit: number }) {
+  return (
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+      <div
+        className={`h-full rounded-full transition-[width] duration-500 ${barTone(used, limit)}`}
+        style={{ width: `${pct(used, limit)}%` }}
+      />
+    </div>
+  );
+}
+
+function Totals({ label, used, limit }: { label: string; used: number; limit: number }) {
+  return (
+    <div className="flex-1">
+      <div className="mb-1 flex items-baseline justify-between gap-2">
+        <span className="text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{label}</span>
+        <span className="font-mono text-[13px] tabular-nums text-zinc-800 dark:text-zinc-100">
+          {used.toLocaleString()} <span className="text-zinc-400">/ {limit.toLocaleString()}</span>
+        </span>
+      </div>
+      <Bar used={used} limit={limit} />
+    </div>
+  );
+}
+
+export function QuotaPanel() {
+  const [providers, setProviders] = useState<QuotaProvider[] | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    try {
+      const res = await fetch('/api/quota', { headers: { Accept: 'application/json' } });
+      const body = await res.json();
+      if (!res.ok || !body?.success) throw new Error(body?.error || `HTTP ${res.status}`);
+      setProviders(body.providers || []);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not read the quota ledger.');
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    // The per-minute window is the fast-moving half, so a ten-second refresh is
+    // enough to watch it recover without polling for the sake of it.
+    const timer = setInterval(() => { void load(); }, 10_000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  if (error) {
+    return <p className="text-[13px] text-rose-600 dark:text-rose-400">{error}</p>;
+  }
+  if (!providers) {
+    return (
+      <p className="flex items-center gap-2 text-[13px] text-zinc-500">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Reading the request ledger…
+      </p>
+    );
+  }
+  if (!providers.length) {
+    return (
+      <p className="text-[13px] text-zinc-500 dark:text-zinc-400">
+        No provider has request limits turned on yet. Switch on <strong>Track request limits</strong> for a provider in
+        Providers &amp; Models, and its per-key, per-model budget appears here.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      {providers.map((provider) => (
+        <div key={provider.providerId} className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Gauge className="h-4 w-4 text-zinc-500" />
+              <span className="font-semibold text-zinc-900 dark:text-zinc-100">{provider.name}</span>
+              <span className="text-[12px] text-zinc-500">
+                {provider.credentialCount} key{provider.credentialCount === 1 ? '' : 's'} ·{' '}
+                {provider.models.length} model{provider.models.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => { void load(); }}
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+            >
+              <RefreshCw className={`h-3 w-3 ${busy ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
+
+          <div className="mb-4 flex gap-5">
+            <Totals label="Requests this minute" used={provider.minuteUsed} limit={provider.minuteLimit} />
+            <Totals label="Requests today" used={provider.dayUsed} limit={provider.dayLimit} />
+          </div>
+
+          <div className="space-y-2.5">
+            {provider.models.map((model) => (
+              <div key={model.model} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1">
+                <div className="min-w-0">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="truncate text-[13px] text-zinc-700 dark:text-zinc-300" title={model.model}>
+                      {model.model.replace(/^models\//, '')}
+                    </span>
+                    <span className="shrink-0 font-mono text-[11.5px] tabular-nums text-zinc-500">
+                      {model.dayUsed}/{model.dayLimit} today · {model.minuteUsed}/{model.minuteLimit} now
+                    </span>
+                  </div>
+                  <Bar used={model.dayUsed} limit={model.dayLimit} />
+                </div>
+                <span
+                  className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] tabular-nums ${
+                    model.keysAvailable > 0
+                      ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400'
+                      : 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-400'
+                  }`}
+                  title={`${model.keysAvailable} of ${provider.credentialCount} keys can take a request right now (${model.rpm}/min, ${model.rpd}/day each)`}
+                >
+                  {model.keysAvailable}/{provider.credentialCount} free
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <p className="mt-3 text-[11.5px] text-zinc-400 dark:text-zinc-500">
+            Each key gets its own allowance per model, so the totals above are every key and model added together. The
+            daily count resets at {provider.resetsAt}, which is when the provider resets it.
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}

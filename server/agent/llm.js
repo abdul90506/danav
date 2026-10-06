@@ -15,6 +15,7 @@
 import { createStreamSplitter } from '../streamSplitter.js';
 import { isCloudMetadataUrl } from '../publicFetch.js';
 import { isGoogleGenerativeLanguageUrl, modelForProvider, normalizeThinkingLevel, thinkingParams } from './thinking.js';
+import { planAttempts, recordBusy, recordRequest, recordSuccess } from './quota.js';
 
 export class LlmError extends Error {
   constructor(message, { status, code } = {}) {
@@ -64,6 +65,12 @@ function retryAfterMs(value) {
   return Number.isNaN(date) ? 0 : Math.max(0, date - Date.now());
 }
 
+/**
+ * Longest we will sit waiting for a per-minute window to roll over. A sliding
+ * 60s window can never need more than this; anything longer means the day is
+ * gone, and that is reported rather than slept through.
+ */
+const MINUTE_WAIT_CAP_MS = 62_000;
 const retryDelayMs = (retry, retryAfter = 0) =>
   Math.min(MAX_RETRY_WAIT_MS, Math.max(retryBaseMs() * (2 ** Math.max(0, retry - 1)), retryAfter));
 const retryableStatus = (status) => status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599);
@@ -119,8 +126,30 @@ export async function streamCompletion({
     );
   }
   const endpoint = `${baseUrl}/chat/completions`;
-  const requestModel = modelForProvider(baseUrl, model);
   const normalizedLevel = normalizeThinkingLevel(thinkingLevel);
+
+  /**
+   * Quota-aware routing, when the provider has been given limits.
+   *
+   * A Gemini key is budgeted per model, so the useful unit is the (key, model)
+   * pair, not the key. The planner orders every pair by what is still free and
+   * hands back the best one BEFORE the request goes out — the alternative is
+   * discovering a full minute by being refused, which on a limit of five costs
+   * one wasted call per key per minute, forever.
+   *
+   * A model switch is a fallback and never an optimisation: the planner only
+   * leaves the requested model once no key has room for it.
+   */
+  const quotaOn = provider?.quota?.enabled === true;
+  const fallbackModels = quotaOn ? (provider.models || []).map((m) => m?.id).filter(Boolean) : [];
+  let activeModel = model;
+  const nextFromPlan = (at = Date.now()) => {
+    if (!quotaOn) return null;
+    const [best] = planAttempts(provider, model, { credentialCount: apiKeys.length || 1, models: fallbackModels, at });
+    return best || null;
+  };
+
+  let requestModel = modelForProvider(baseUrl, model);
   const configuredThinking = thinkingParams({ model: requestModel, baseUrl, level: normalizedLevel });
   const hasThinkingConfig = Object.keys(configuredThinking).length > 0;
   // Gemini's OpenAI-compatible API streams text by default, but tool-call arguments
@@ -221,8 +250,46 @@ export async function streamCompletion({
     const rejectedCredentials = new Set();
     for (;;) {
       if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+      // Choose the key AND the model together, from what still has room.
+      let planned = nextFromPlan();
+      if (planned && !planned.available && Number.isFinite(planned.readyAt)) {
+        // Everything is busy, but a sliding minute window empties on its own.
+        // Waiting the few seconds for a slot beats spending a request to be
+        // told "429" and then waiting anyway.
+        const waitMs = Math.min(MINUTE_WAIT_CAP_MS, Math.max(0, planned.readyAt - Date.now()));
+        if (waitMs > 0) {
+          onRetry?.({
+            attempt: retriesUsed,
+            maxRetries: MAX_PROVIDER_RETRIES,
+            delayMs: waitMs,
+            reason: `every key is at its per-minute limit; a slot frees in ${Math.ceil(waitMs / 1000)}s`,
+            credentialIndex: planned.credentialIndex + 1,
+            credentialCount: apiKeys.length,
+            model: planned.model,
+          });
+          await sleep(waitMs, signal);
+          planned = nextFromPlan() || planned;
+        }
+      }
+      if (planned) {
+        credentialIndex = planned.credentialIndex;
+        if (planned.model !== activeModel) {
+          onRetry?.({
+            attempt: retriesUsed,
+            maxRetries: MAX_PROVIDER_RETRIES,
+            delayMs: 0,
+            reason: `${activeModel} is out of quota; switching to ${planned.model}`,
+            credentialIndex: planned.credentialIndex + 1,
+            credentialCount: apiKeys.length,
+            model: planned.model,
+          });
+          activeModel = planned.model;
+        }
+        requestModel = modelForProvider(baseUrl, activeModel);
+      }
       requestCredentialIndex = credentialIndex;
       const credential = apiKeys.length ? apiKeys[requestCredentialIndex] : '';
+      if (quotaOn) recordRequest(provider.id, requestCredentialIndex, activeModel);
       let res;
       try {
         res = await fetch(endpoint, {
@@ -240,7 +307,10 @@ export async function streamCompletion({
         }
         throw new LlmError(`Could not reach the provider: ${err?.cause?.code || err?.message || 'network error'}`);
       }
-      if (res.ok) return res;
+      if (res.ok) {
+        if (quotaOn) recordSuccess(provider.id, requestCredentialIndex, activeModel);
+        return res;
+      }
 
       const text = await res.text().catch(() => '');
       if (
@@ -289,6 +359,15 @@ export async function streamCompletion({
       }
 
       const retryable = retryableStatus(res.status) || retryableMessage(text);
+      if (retryable && quotaOn) {
+        // Park this exact (key, model) pair. Without it the planner would hand
+        // back the same pair on the next pass and the retry would be guaranteed
+        // to fail the same way.
+        recordBusy(provider.id, requestCredentialIndex, activeModel, {
+          status: res.status,
+          retryAfterMs: retryAfterMs(res.headers.get('retry-after')),
+        });
+      }
       if (retryable) {
         const reason = res.status === 429
           ? 'rate limited'

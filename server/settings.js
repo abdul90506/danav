@@ -112,6 +112,10 @@ export function mergeSettingsPatch(current, patch) {
           name: typeof model.name === 'string' ? model.name : String(model.name ?? model.id),
           providerId: String(model.providerId || next.id),
         }));
+      // Request budgeting. A patch that says nothing about quota keeps what was
+      // saved — a client that predates the feature must not silently disable it.
+      next.quota = Object.hasOwn(provider, 'quota') ? normalizeQuota(provider.quota) : (previous?.quota || undefined);
+      if (!next.quota) delete next.quota;
       return next;
     });
   }
@@ -121,6 +125,29 @@ export function mergeSettingsPatch(current, patch) {
     updated.providers
   );
   return updated;
+}
+
+/**
+ * Per-model request limits, cleaned.
+ *
+ * Limits are whole positive numbers or they are not limits. A zero or a string
+ * would make the planner think a model is permanently exhausted, so anything
+ * that is not a usable number is dropped and the documented default applies.
+ */
+function normalizeQuota(raw) {
+  if (!isObject(raw)) return undefined;
+  const limits = {};
+  for (const [model, value] of Object.entries(isObject(raw.limits) ? raw.limits : {})) {
+    const key = String(model || '').trim();
+    if (!key || !isObject(value)) continue;
+    const entry = {};
+    for (const field of ['rpm', 'rpd']) {
+      const n = Math.floor(Number(value[field]));
+      if (Number.isFinite(n) && n > 0) entry[field] = n;
+    }
+    if (Object.keys(entry).length) limits[key] = entry;
+  }
+  return { enabled: raw.enabled === true, ...(Object.keys(limits).length ? { limits } : {}) };
 }
 
 /** The only settings shape safe to return to the browser. */
@@ -136,6 +163,7 @@ export function publicSettings(settings) {
         enabled: provider.enabled !== false,
         apiKeyConfigured: providerApiKeys(provider).length > 0,
         apiKeyCount: providerApiKeys(provider).length,
+        ...(isObject(provider.quota) ? { quota: normalizeQuota(provider.quota) } : {}),
         models: Array.isArray(provider.models) ? provider.models.filter(isObject).map((model) => ({
           id: String(model.id || ''),
           name: String(model.name || model.id || ''),

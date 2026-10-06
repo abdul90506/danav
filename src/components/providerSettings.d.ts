@@ -9,5 +9,6 @@ export function buildEditedProvider(
     apiKeys: string[];
     models: Model[];
     clearSavedApiKeys?: boolean;
+    quota?: { enabled: boolean; rpm: number | string; rpd: number | string };
   },
 ): Provider;
