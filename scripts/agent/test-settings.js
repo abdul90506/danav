@@ -321,3 +321,81 @@ test('settings HTTP routes redact keys, preserve blank edits, and resolve creden
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test('saved API keys can be exported as plain text, and read back in', async () => {
+  const { parseKeyFile } = await import('../../src/components/providerSettings.js');
+
+  // The file people keep is never tidy, and re-typing eight keys because of a
+  // stray comma is exactly the chore this is meant to remove.
+  const messy = [
+    '# gemini keys, exported 2026-10-06',
+    'key-one',
+    '',
+    '   key-two   ,',
+    '"key-three"',
+    'key-one',
+    '// retired:',
+    '',
+  ].join('\n');
+  assert.deepEqual(parseKeyFile(messy), ['key-one', 'key-two', 'key-three']);
+  assert.deepEqual(parseKeyFile(''), []);
+  assert.deepEqual(parseKeyFile('solo-key'), ['solo-key'], 'a file with no trailing newline still works');
+
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'danav-keyfile-'));
+  const keys = ['k-alpha', 'k-beta', 'k-gamma'];
+  fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({
+    providers: [
+      { id: 'p-keys', name: 'My Gemini', baseUrl: 'https://example.test/v1', apiType: 'openai', apiKeys: keys, models: [{ id: 'm' }] },
+      { id: 'p-bare', name: 'No Keys', baseUrl: 'https://example.test/v1', apiType: 'openai', apiKeys: [], models: [{ id: 'm' }] },
+    ],
+  }));
+
+  const backendPort = await reservePort();
+  const child = spawn(process.execPath, ['server/index.js'], {
+    cwd: process.cwd(),
+    env: { ...process.env, DANAV_DATA_DIR: dataDir, PORT: String(backendPort), GEMINI_API_KEY: '', VYCE_API_KEY: '' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let logs = '';
+  const ready = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Backend did not start: ${logs}`)), 12_000);
+    const check = (chunk) => {
+      logs += chunk.toString();
+      if (logs.includes(`Backend server running on http://localhost:${backendPort}`)) {
+        clearTimeout(timer);
+        resolve();
+      }
+    };
+    child.stdout.on('data', check);
+    child.stderr.on('data', check);
+    child.once('exit', (code) => { clearTimeout(timer); reject(new Error(`Backend exited (${code}): ${logs}`)); });
+  });
+
+  const url = `http://127.0.0.1:${backendPort}`;
+  try {
+    await ready;
+
+    // Settings still never carry the key values themselves.
+    const settings = await (await fetch(`${url}/api/settings`)).json();
+    assert.ok(!JSON.stringify(settings).includes('k-alpha'), 'settings stay free of credentials');
+
+    const exported = await fetch(`${url}/api/settings/providers/p-keys/keys.txt`);
+    assert.equal(exported.status, 200);
+    assert.match(exported.headers.get('content-type') || '', /^text\/plain/);
+    assert.match(exported.headers.get('content-disposition') || '', /attachment; filename="My-Gemini-api-keys\.txt"/);
+    const text = await exported.text();
+    assert.equal(text, 'k-alpha\nk-beta\nk-gamma\n', 'one key per line, in the order they are tried');
+    assert.deepEqual(parseKeyFile(text), keys, 'and the importer reads back exactly what was written');
+
+    // Handing out credentials is same-origin only, like every other key route.
+    const crossOrigin = await fetch(`${url}/api/settings/providers/p-keys/keys.txt`, { headers: { Origin: 'https://untrusted.example' } });
+    assert.equal(crossOrigin.headers.get('access-control-allow-origin'), null);
+
+    assert.equal((await fetch(`${url}/api/settings/providers/nope/keys.txt`)).status, 404, 'an unknown provider is not a blank file');
+    assert.equal((await fetch(`${url}/api/settings/providers/p-bare/keys.txt`)).status, 404, 'nor is a provider with nothing saved');
+  } finally {
+    child.kill('SIGTERM');
+    await Promise.race([new Promise((resolve) => child.once('exit', resolve)), sleep(1500)]);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

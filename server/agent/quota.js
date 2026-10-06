@@ -28,14 +28,15 @@ import path from 'node:path';
 import { dataDir } from './config.js';
 
 /**
- * The documented free-tier shape for the Flash models, per key, per model.
+ * The free-tier allowance of ONE key on ONE model.
  *
- * Google publishes roughly 10 requests a minute and 250 a day for Flash on the
- * free tier, with the day resetting at midnight Pacific. These are a starting
- * point only: `learnLimits` replaces them with whatever the provider states in
- * its first refusal, and nothing is ever refused on these numbers alone.
+ * Five requests a minute and twenty a day, which is what these keys actually
+ * get; published tables disagree with each other and with the endpoint, so the
+ * observed figure wins. A starting point only: `learnLimits` replaces it with
+ * whatever the provider states in a refusal, and nothing is ever refused on
+ * these numbers alone.
  */
-export const DEFAULT_LIMITS = { rpm: 10, rpd: 250 };
+export const DEFAULT_LIMITS = { rpm: 5, rpd: 20 };
 
 /**
  * The model id that means "you choose".

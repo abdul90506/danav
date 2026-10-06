@@ -1,4 +1,30 @@
 /** Provider edit helpers shared with the server settings regression tests. */
+
+/**
+ * Read a plain-text list of API keys.
+ *
+ * Deliberately forgiving about the file, because the lists people actually
+ * keep have blank lines, a trailing newline, commas, quotes and `#` comments
+ * in them — and none of those is a reason to make someone re-type eight keys.
+ * Duplicates are dropped, order is kept, because keys are tried in order.
+ */
+export function parseKeyFile(text) {
+  const seen = new Set();
+  const keys = [];
+  // Lines first, THEN commas: a comment is a whole line, and "# keys, exported
+  // today" must not leave "exported today" behind as if it were a credential.
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) continue;
+    for (const part of trimmed.split(',')) {
+      const key = part.trim().replace(/^["']+|["']+$/g, '').trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      keys.push(key);
+    }
+  }
+  return keys;
+}
 export function buildEditedProvider(provider, fields) {
   const next = {
     ...provider,

@@ -1,5 +1,7 @@
 import type { ApiType, Model, Provider } from '../types';
 
+export function parseKeyFile(text: string): string[];
+
 export function buildEditedProvider(
   provider: Provider,
   fields: {

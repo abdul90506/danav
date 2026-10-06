@@ -87,7 +87,11 @@ const credentialRoutes = new Set([
 ]);
 app.use((req, res, next) => {
   const normalizedPath = req.path.replace(/\/+$/, '').toLowerCase() || '/';
-  const protectedRoute = req.path.toLowerCase().startsWith('/api/agent') || credentialRoutes.has(normalizedPath);
+  const protectedRoute = req.path.toLowerCase().startsWith('/api/agent')
+    // Key export lives under a path with an id in it, so it cannot be listed
+    // above. It hands out credentials, so it is same-origin only.
+    || /^\/api\/settings\/providers\/[^/]+\/keys\b/.test(req.path.toLowerCase())
+    || credentialRoutes.has(normalizedPath);
   // The public preview uses Vite on a single origin and an access token for API
   // calls, so don't add permissive CORS headers to ANY API in that mode.
   if (previewToken() && normalizedPath.startsWith('/api/')) return next();
@@ -748,6 +752,28 @@ app.get('/api/quota', (req, res) => {
     apiKeys: undefined,
   }));
   return res.json({ success: true, providers: quotaSnapshot(providers) });
+});
+
+/**
+ * Hand back one provider's saved API keys as a plain text file.
+ *
+ * Keys are otherwise never sent to the browser, and that rule is worth keeping
+ * — but it must not mean a user cannot get their own keys out of their own
+ * machine. Eight keys typed into a box are eight keys lost when the settings
+ * file is. One key per line, nothing else: the same shape the importer reads,
+ * and the same shape every other tool expects.
+ */
+app.get('/api/settings/providers/:id/keys.txt', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const settings = readSettingsFromDisk();
+  const provider = (settings.providers || []).find((item) => String(item?.id || '') === String(req.params.id));
+  if (!provider) return res.status(404).json({ success: false, error: 'No such provider.' });
+  const keys = providerApiKeys(provider);
+  if (!keys.length) return res.status(404).json({ success: false, error: 'This provider has no saved API keys.' });
+  const name = String(provider.name || provider.id).replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'provider';
+  res.set('Content-Type', 'text/plain; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="${name}-api-keys.txt"`);
+  return res.send(`${keys.join('\n')}\n`);
 });
 
 // Settings API Endpoints. Provider keys stay on disk and are never reflected to the browser.

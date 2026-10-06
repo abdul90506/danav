@@ -21,6 +21,7 @@ import {
   Search,
   Database,
   Download,
+  Upload,
   RotateCcw,
   Loader2,
 } from 'lucide-react';
@@ -32,7 +33,7 @@ import {
   restoreConversationsBackup,
   testProviderConnection,
 } from '../services/api';
-import { buildEditedProvider } from './providerSettings.js';
+import { buildEditedProvider, parseKeyFile } from './providerSettings.js';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -78,6 +79,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [formName, setFormName] = useState('');
   const [formBaseUrl, setFormBaseUrl] = useState('');
   const [formApiKeys, setFormApiKeys] = useState<string[]>(['']);
+  /** Result of the last import or export, shown under the key list. */
+  const [keyFileNotice, setKeyFileNotice] = useState('');
+  const keyFileInput = useRef<HTMLInputElement>(null);
   const [formSavedApiKeyCount, setFormSavedApiKeyCount] = useState(0);
   const [clearSavedApiKeys, setClearSavedApiKeys] = useState(false);
   const [savingProvider, setSavingProvider] = useState(false);
@@ -289,6 +293,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const enteredApiKeys = () => [...new Set(formApiKeys.map((key) => key.trim()).filter(Boolean))];
+
+  /** Read a .txt of keys into the form; anything already listed is not added twice. */
+  const handleImportKeys = async (file: File | null | undefined) => {
+    if (!file) return;
+    setKeyFileNotice('');
+    try {
+      const found = parseKeyFile(await file.text());
+      if (!found.length) {
+        setKeyFileNotice(`${file.name} has no keys in it.`);
+        return;
+      }
+      const existing = new Set(enteredApiKeys());
+      const added = found.filter((key) => !existing.has(key));
+      setFormApiKeys((prev) => [...prev.filter((key) => key.trim()), ...added]);
+      setKeyFileNotice(
+        added.length === found.length
+          ? `Added ${added.length} key${added.length === 1 ? '' : 's'} from ${file.name}. Save to keep them.`
+          : `Added ${added.length} of ${found.length} from ${file.name}; the rest were already in the list.`
+      );
+    } catch {
+      setKeyFileNotice(`Could not read ${file.name}.`);
+    }
+  };
+
+  /** Download this provider's saved keys, one per line. */
+  const handleExportKeys = async () => {
+    if (!editingProviderId) return;
+    setKeyFileNotice('');
+    try {
+      const res = await fetch(`/api/settings/providers/${encodeURIComponent(editingProviderId)}/keys.txt`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setKeyFileNotice(body?.error || `Could not export the keys (HTTP ${res.status}).`);
+        return;
+      }
+      const text = await res.text();
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${(formName || 'provider').replace(/[^a-z0-9._-]+/gi, '-')}-api-keys.txt`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      const count = text.split('\n').filter((line) => line.trim()).length;
+      setKeyFileNotice(`Exported ${count} key${count === 1 ? '' : 's'}.`);
+    } catch {
+      setKeyFileNotice('Could not export the keys.');
+    }
+  };
 
   const handleTestConnection = async () => {
     setTestingStatus({ loading: true });
@@ -876,7 +930,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         </div>
                       ))}
                     </div>
-                    <div className="mt-1 flex items-center justify-between gap-2">
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
                       <button
                         type="button"
                         onClick={() => setFormApiKeys((prev) => [...prev, ''])}
@@ -884,8 +938,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       >
                         <Plus className="w-3 h-3" /> Add another key
                       </button>
-                      <span className="text-[10px] text-zinc-400">Keys stay private and are tried in order.</span>
+                      <button
+                        type="button"
+                        onClick={() => keyFileInput.current?.click()}
+                        className="inline-flex items-center gap-1 text-[10px] text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                        title="Read a .txt file with one API key per line"
+                      >
+                        <Upload className="w-3 h-3" /> Import .txt
+                      </button>
+                      {editingProviderId && formSavedApiKeyCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleExportKeys}
+                          className="inline-flex items-center gap-1 text-[10px] text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                          title="Download the saved keys, one per line"
+                        >
+                          <Download className="w-3 h-3" /> Export .txt
+                        </button>
+                      )}
+                      <span className="ml-auto text-[10px] text-zinc-400">Keys stay private and are tried in order.</span>
+                      <input
+                        ref={keyFileInput}
+                        type="file"
+                        accept=".txt,text/plain"
+                        className="hidden"
+                        onChange={(e) => { void handleImportKeys(e.target.files?.[0]); e.target.value = ''; }}
+                      />
                     </div>
+                    {keyFileNotice && (
+                      <p className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400">{keyFileNotice}</p>
+                    )}
                   </div>
 
                   {/* Actions: Test Connection & Fetch Models */}

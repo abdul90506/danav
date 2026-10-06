@@ -65,6 +65,10 @@ export function barTone(used: number, limit: number): string {
   return 'bg-emerald-500';
 }
 
+/** The allowance of a single key, recovered from the per-model totals. */
+const perKeyRpm = (provider: QuotaProvider) => provider.models[0]?.rpm ?? 0;
+const perKeyRpd = (provider: QuotaProvider) => provider.models[0]?.rpd ?? 0;
+
 const pct = (used: number, limit: number) =>
   limit <= 0 ? 0 : Math.max(0, Math.min(100, Math.round((used / limit) * 100)));
 
@@ -90,7 +94,7 @@ function Bar({ used, limit }: { used: number; limit: number }) {
   );
 }
 
-function Totals({ label, used, limit }: { label: string; used: number; limit: number }) {
+function Totals({ label, used, limit, sum }: { label: string; used: number; limit: number; sum: string }) {
   return (
     <div className="flex-1">
       <div className="mb-1 flex items-baseline justify-between gap-2">
@@ -100,6 +104,8 @@ function Totals({ label, used, limit }: { label: string; used: number; limit: nu
         </span>
       </div>
       <Bar used={used} limit={limit} />
+      {/* Where the big number comes from. Without this it reads as nonsense. */}
+      <p className="mt-1 text-[10.5px] text-zinc-400 dark:text-zinc-500">{sum}</p>
     </div>
   );
 }
@@ -214,8 +220,18 @@ export function QuotaPanel() {
           </div>
 
           <div className="mb-4 flex gap-5">
-            <Totals label="Requests this minute" used={provider.minuteUsed} limit={provider.minuteLimit} />
-            <Totals label="Requests today" used={provider.dayUsed} limit={provider.dayLimit} />
+            <Totals
+              label="Requests this minute"
+              used={provider.minuteUsed}
+              limit={provider.minuteLimit}
+              sum={`${provider.models.length} models × ${provider.credentialCount} keys × ${perKeyRpm(provider)} a minute`}
+            />
+            <Totals
+              label="Requests today"
+              used={provider.dayUsed}
+              limit={provider.dayLimit}
+              sum={`${provider.models.length} models × ${provider.credentialCount} keys × ${perKeyRpd(provider)} a day`}
+            />
           </div>
 
           <div className="space-y-1">
@@ -240,7 +256,10 @@ export function QuotaPanel() {
                           {model.model.replace(/^models\//, '')}
                         </span>
                         <span className="shrink-0 font-mono text-[11.5px] tabular-nums text-zinc-500">
-                          {model.dayUsed}/{model.dayLimit} today · {model.minuteUsed}/{model.minuteLimit} now
+                          {model.dayUsed}/{model.dayLimit} today{' '}
+                          <span className="text-zinc-400">({provider.credentialCount}×{model.rpd})</span>
+                          {' · '}
+                          {model.minuteUsed}/{model.minuteLimit} this minute
                         </span>
                       </div>
                       <Bar used={model.dayUsed} limit={model.dayLimit} />
@@ -282,9 +301,12 @@ export function QuotaPanel() {
           </div>
 
           <p className="mt-3 text-[11.5px] text-zinc-400 dark:text-zinc-500">
-            Every key has its own allowance on every model, so the totals are all of them added together. Pick{' '}
-            <strong>Auto</strong> in the model menu to let Danav choose a pair that still has room. Today&apos;s counts
-            reset in {waitLabel(provider.resetsAtMs - Date.now())}, at {provider.resetsAt}.
+            One key gets {perKeyRpd(provider)} requests a day <em>on each model</em>, so {provider.credentialCount} keys
+            give {provider.credentialCount}&nbsp;×&nbsp;{perKeyRpd(provider)} ={' '}
+            {provider.credentialCount * perKeyRpd(provider)} per model, and{' '}
+            {provider.dayLimit.toLocaleString()} across all {provider.models.length}. Pick <strong>Auto</strong> in the
+            model menu to let Danav spend them in whatever order still has room. Today&apos;s counts reset in{' '}
+            {waitLabel(provider.resetsAtMs - Date.now())}, at {provider.resetsAt}.
           </p>
         </div>
       ))}
