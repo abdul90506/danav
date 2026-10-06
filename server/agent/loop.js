@@ -834,6 +834,18 @@ export async function runAgent({
     lastUserRequest = currentRequest;
 
     /**
+     * No request means there is nothing to do, and the run must say so instead of
+     * starting. Left to itself the model still gets a system prompt and whatever
+     * project memory matches an empty query, and it will confidently carry out some
+     * older task nobody asked for again — a caller that passes the history under
+     * the wrong key can burn tens of thousands of tokens and several minutes before
+     * anyone notices the work was never requested.
+     */
+    if (!currentRequest) {
+      throw new LlmError('This run was started with no request in its history, so there was nothing to work on.');
+    }
+
+    /**
      * The code index, built (or re-used) before the prompt is written.
      *
      * This is what turns "here is a folder listing, go find the code" into "here
@@ -1828,7 +1840,9 @@ export async function runAgent({
       stopReason = wrapUp || stopReason;
     }
   } catch (err) {
-    if (err?.name === 'AbortError' || signal.aborted) {
+    // Guarded: this is the handler that reports every other failure, so it must not
+    // be the thing that throws. A crash here replaces the real error with its own.
+    if (err?.name === 'AbortError' || signal?.aborted) {
       stopReason = 'aborted';
     } else {
       stopReason = 'error';

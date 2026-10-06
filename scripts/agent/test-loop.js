@@ -1946,3 +1946,24 @@ test('a provider that reports nothing shows as unknown, not as a free run', asyn
   const end = agentEvents(events, 'run_end')[0];
   assert.equal(end.usage, undefined, 'no usage key at all, rather than a misleading zero');
 });
+
+test('a run with nothing to work on stops instead of inventing a task', async () => {
+  // History the model can never act on: no user turn at all. Left unguarded the
+  // run still builds a prompt, matches project memory against an empty query and
+  // happily redoes some earlier task at full token cost.
+  const { events, requests, result } = await agentRun({
+    history: [{ role: 'assistant', content: 'Done.' }],
+  });
+  assert.equal(result.stopReason, 'error', 'it must not report success for work it never did');
+  assert.equal(result.toolCalls, 0, 'and it must not touch the workspace');
+  assert.equal(requests.length, 0, 'nothing is sent to the provider at all');
+
+  const end = events.map((e) => e.agent).filter(Boolean).find((a) => a.type === 'run_end');
+  assert.ok(end, 'the run still ends properly rather than hanging');
+  assert.equal(end.usage, undefined, 'nothing was sent, so there is nothing to charge');
+  assert.match(JSON.stringify(events), /nothing to work on/, 'and it says why, instead of failing silently');
+
+  // The same guard must not fire on a real request.
+  const ok = await agentRun({ history: [{ role: 'user', content: 'say hi' }] });
+  assert.notEqual(ok.result.stopReason, 'error', 'an ordinary run is unaffected');
+});
