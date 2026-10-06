@@ -1828,3 +1828,26 @@ test('a finished run says which files it changed', async () => {
   const created = fmt.changedTotals([{ path: 'new.ts', added: 40, removed: 0 }]);
   assert.equal(created.removed, 0);
 });
+
+test('a conversation adds up what all its runs cost', async () => {
+  const fmt = await load('src/agent/format.ts');
+
+  // A chat with no agent runs has no figure — not a zero, which would read as free.
+  assert.equal(fmt.conversationUsage([]), undefined);
+  assert.equal(fmt.conversationUsage([{ role: 'user' }, { role: 'assistant' }]), undefined);
+
+  // A run whose provider reported nothing is skipped rather than counted as zero,
+  // so the total stays a floor instead of becoming a guess.
+  assert.equal(fmt.conversationUsage([{ agentRun: { stopReason: 'completed' } }]), undefined);
+
+  const total = fmt.conversationUsage([
+    { agentRun: { usage: { inputTokens: 55_614, outputTokens: 686, rounds: 5 } } },
+    { agentRun: { stopReason: 'completed' } },
+    { agentRun: { usage: { inputTokens: 20_726, outputTokens: 467, rounds: 2 } } },
+  ]);
+  assert.deepEqual(total, { inputTokens: 76_340, outputTokens: 1_153, rounds: 7, runs: 2 });
+
+  // The headline the palette shows.
+  assert.equal(fmt.formatTokens(total.inputTokens + total.outputTokens), '77.5k');
+  assert.equal(fmt.usageDetail(total), '76,340 in · 1,153 out · 7 rounds');
+});

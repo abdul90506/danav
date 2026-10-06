@@ -556,6 +556,33 @@ export function changedTotals(changed?: Array<{ path: string; added: number; rem
   };
 }
 
+/**
+ * What a whole conversation has cost so far, summed over its agent runs.
+ *
+ * Per-run figures answer "was that expensive?"; this answers the question that
+ * actually decides whether to start a new chat — the one nobody could answer
+ * before, because the numbers were only ever shown one run at a time. Messages
+ * from a provider that reports nothing simply do not count, so the total is a
+ * floor rather than a guess.
+ */
+export function conversationUsage(
+  messages: Array<{ agentRun?: { usage?: { inputTokens?: number; outputTokens?: number; rounds?: number } } }>
+): { inputTokens: number; outputTokens: number; rounds: number; runs: number } | undefined {
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let rounds = 0;
+  let runs = 0;
+  for (const m of messages) {
+    const u = m.agentRun?.usage;
+    if (!u) continue;
+    inputTokens += u.inputTokens || 0;
+    outputTokens += u.outputTokens || 0;
+    rounds += u.rounds || 0;
+    runs += 1;
+  }
+  return runs ? { inputTokens, outputTokens, rounds, runs } : undefined;
+}
+
 export function stopNotice(reason?: string): string | undefined {
   switch (reason) {
     case 'aborted':

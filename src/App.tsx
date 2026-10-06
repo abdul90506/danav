@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Bot, Cpu, FolderOpen, MessageSquare, MessageSquarePlus, Monitor, Moon, PanelLeft,
-  Server, Settings, SquareStack, StopCircle, Sun, Trash2, X,
+  Gauge, Server, Settings, SquareStack, StopCircle, Sun, Trash2, X,
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { ChatArea } from './components/ChatArea';
@@ -16,6 +16,7 @@ import { WorkspacePanel } from './components/WorkspacePanel';
 import { PreviewPanel, clampPreviewWidth, defaultPreviewWidth } from './components/PreviewPanel';
 import { SandboxManagerDialog } from './components/SandboxManagerDialog';
 import { CommandPalette, type Command } from './components/CommandPalette';
+import { conversationUsage, formatTokens, usageDetail } from './agent/format';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import {
   AgentAction,
@@ -2034,6 +2035,21 @@ export const App: React.FC = () => {
         hint: `${chat.messages.length} message${chat.messages.length === 1 ? '' : 's'}${chat.isPinned ? ' · pinned' : ''}`,
         icon: MessageSquare,
         run: () => handleSelectChat(chat.id),
+      });
+    }
+
+    // What this chat has cost so far. Per-run figures never add up to the number
+    // that decides whether to start fresh, and nothing in the app showed it.
+    const spent = activeConversation ? conversationUsage(activeConversation.messages) : undefined;
+    if (spent) {
+      list.push({
+        id: 'chat-usage', group: 'This chat', icon: Gauge,
+        label: `${formatTokens(spent.inputTokens + spent.outputTokens)} tokens used in this chat`,
+        hint: `${usageDetail(spent)} across ${spent.runs} run${spent.runs === 1 ? '' : 's'} — input dominates because every round re-sends the conversation`,
+        keywords: 'cost usage spend price tokens',
+        // A readout, not an action. Starting a new chat from here would be a
+        // surprising thing for a row that only reports a number to do.
+        run: () => {},
       });
     }
 
