@@ -1756,8 +1756,13 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   signal?.addEventListener('abort', onAbort, { once: true });
 });
 
-/** Never sleep longer than one sliding window waiting for a per-minute slot. */
-const MINUTE_WAIT_CAP_MS = 62_000;
+/**
+ * Never sit still for longer than this waiting for a per-minute slot.
+ *
+ * Short on purpose: silence is indistinguishable from a hang, and with several
+ * keys and models there is nearly always something else to try.
+ */
+const MINUTE_WAIT_CAP_MS = 9_000;
 
 /**
  * Only what the provider actually asked for, in milliseconds.
@@ -1810,6 +1815,8 @@ async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provi
   const quotaOn = provider?.quota?.enabled === true;
   const routable = quotaOn ? routableModels(provider) : [];
   let activeModel = isAutoModel(model) ? '' : model;
+  /** Whether the last refusal was "model busy" rather than "out of quota". */
+  let lastWasBusy = false;
   const rotateKey = () => {
     if (!pool.keys.length) return;
     keyIndex = (keyIndex + 1) % pool.keys.length;
@@ -1829,15 +1836,17 @@ async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provi
   for (;;) {
     if (isCancelled?.() || signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
     if (quotaOn && routable.length) {
-      let planned = planAttempts(provider, model, { credentialCount: pool.keys.length || 1, models: routable })[0];
-      if (planned && !planned.available && Number.isFinite(planned.readyAt)) {
-        // A sliding minute window empties on its own: waiting the few seconds
-        // beats spending a request to be told "429" and then waiting anyway.
+      const plan = () => planAttempts(provider, model, { credentialCount: pool.keys.length || 1, models: routable })[0];
+      let planned = plan();
+      // Only wait when the provider itself has refused us AND a slot is
+      // seconds away. An unconfirmed budget is Danav's arithmetic, not a
+      // reason to leave a working key idle: send, and believe the answer.
+      if (planned && !planned.available && planned.confirmed && Number.isFinite(planned.readyAt)) {
         const waitMs = Math.min(MINUTE_WAIT_CAP_MS, Math.max(0, planned.readyAt - Date.now()));
         if (waitMs > 0) {
           await reportRetry({ delayMs: waitMs, reason: `every key is at its per-minute limit; a slot frees in ${Math.ceil(waitMs / 1000)}s` });
           await sleep(waitMs, signal);
-          planned = planAttempts(provider, model, { credentialCount: pool.keys.length || 1, models: routable })[0] || planned;
+          planned = plan() || planned;
         }
       }
       if (planned) {
@@ -1846,7 +1855,7 @@ async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provi
           // The first pick of an `auto` request gave nothing up, so it is not
           // a fallback and there is nothing to report.
           if (activeModel) {
-            await reportRetry({ delayMs: 0, reason: `${activeModel} is out of quota; switching to ${planned.model}` });
+            await reportRetry({ delayMs: 0, reason: `${activeModel} ${lastWasBusy ? 'is busy' : 'is out of quota'}; switching to ${planned.model}` });
           }
           activeModel = planned.model;
         }
@@ -1873,6 +1882,7 @@ async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provi
     }
 
     if (response.ok) {
+      lastWasBusy = false;
       if (quotaOn && activeModel) recordSuccess(provider.id, keyIndex, activeModel);
       if (pool.keys.length) rememberProviderKeyCursor(pool, (keyIndex + 1) % pool.keys.length);
       return response;
@@ -1904,11 +1914,16 @@ async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provi
     }
 
     if (quotaOn && activeModel) {
-      // Park this exact pair, so the next plan cannot hand back the one that
-      // has just refused.
+      // Park what actually failed: a 429 is this pair being over budget, a 503
+      // is the model being busy for everyone. A refusal often states the real
+      // limit too, which is worth more than any configured guess.
+      lastWasBusy = response.status !== 429;
+      let refusal = '';
+      try { refusal = response.clone ? await response.clone().text() : ''; } catch { /* already drained */ }
       recordBusy(provider.id, keyIndex, activeModel, {
         status: response.status,
         retryAfterMs: retryAfterHeaderMs(response),
+        body: refusal,
       });
     }
     retriesUsed += 1;

@@ -66,11 +66,28 @@ function retryAfterMs(value) {
 }
 
 /**
- * Longest we will sit waiting for a per-minute window to roll over. A sliding
- * 60s window can never need more than this; anything longer means the day is
- * gone, and that is reported rather than slept through.
+ * Longest Danav will sit still waiting for a per-minute window to roll over.
+ *
+ * Deliberately short. A silent wait is indistinguishable from a hang, and with
+ * several keys and several models there is almost always something else to
+ * try; waiting is only worth it when a slot is seconds away. Anything longer
+ * is reported instead of slept through.
  */
-const MINUTE_WAIT_CAP_MS = 62_000;
+const MINUTE_WAIT_CAP_MS = 9_000;
+
+/**
+ * Longest the whole attempt loop may spend before giving the user an answer,
+ * even a disappointing one. This is the promise that a busy provider can never
+ * turn into minutes of nothing.
+ */
+const ATTEMPT_BUDGET_MS = 75_000;
+
+/**
+ * Longest to wait for a provider to START responding. Measured against this
+ * endpoint, a healthy first byte arrives in well under two seconds, so twenty
+ * means something is wrong and another model will be quicker than waiting.
+ */
+const HEADER_TIMEOUT_MS = 20_000;
 const retryDelayMs = (retry, retryAfter = 0) =>
   Math.min(MAX_RETRY_WAIT_MS, Math.max(retryBaseMs() * (2 ** Math.max(0, retry - 1)), retryAfter));
 const retryableStatus = (status) => status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599);
@@ -202,6 +219,27 @@ export async function streamCompletion({
   const scheduleRetry = async ({ reason, retryAfter = 0, rotateCredential = true }) => {
     if (attemptsUsed >= MAX_PROVIDER_ATTEMPTS) return false;
     attemptsUsed += 1;
+    if (quotaOn) {
+      // The planner picks the next (key, model) pair and already knows which
+      // ones have just failed, so there is nothing to rotate and, while there
+      // is an untried model, nothing to wait for either. Backing off only
+      // starts once every model has been busy in the same breath.
+      const immediate = Math.max(2, fallbackModels.length);
+      const delayMs = attemptsUsed <= immediate
+        ? 0
+        : Math.min(8_000, Math.max(500 * 2 ** (attemptsUsed - immediate - 1), retryAfter));
+      onRetry?.({
+        attempt: retriesUsed,
+        maxRetries: MAX_PROVIDER_RETRIES,
+        delayMs,
+        reason,
+        credentialIndex: credentialIndex + 1,
+        credentialCount: apiKeys.length,
+        model: activeModel,
+      });
+      if (delayMs) await sleep(delayMs, signal);
+      return true;
+    }
     if (rotateCredential && apiKeys.length > 1 && keysTriedInSweep < apiKeys.length) {
       credentialIndex = (credentialIndex + 1) % apiKeys.length;
       credentialCursors.set(cursorKey, credentialIndex);
@@ -265,19 +303,35 @@ export async function streamCompletion({
 
   // ---- open the stream (retrying provider-busy failures) --------------------
   let withThinking = hasThinkingConfig && !thinkingRejected;
+  /** Whether the last refusal was "model busy" rather than "out of quota". */
+  let lastWasBusy = false;
   /** Open (or re-open) the provider stream. */
+  // One listener for the whole call, forwarding an outer abort to whichever
+  // attempt is in flight. Registering it per attempt leaked a listener per
+  // round onto a signal that lives for the entire agent run.
+  let currentAttempt = null;
+  const abortCurrentAttempt = () => currentAttempt?.abort();
+  signal?.addEventListener('abort', abortCurrentAttempt, { once: true });
+
   const openUpstream = async () => {
     const rejectedCredentials = new Set();
+    const deadline = Date.now() + ATTEMPT_BUDGET_MS;
     for (;;) {
       if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
       // Choose the key AND the model together, from what still has room.
       let planned = nextFromPlan();
-      if (planned && !planned.available && Number.isFinite(planned.readyAt)) {
-        // Everything is busy, but a sliding minute window empties on its own.
-        // Waiting the few seconds for a slot beats spending a request to be
-        // told "429" and then waiting anyway.
-        const waitMs = Math.min(MINUTE_WAIT_CAP_MS, Math.max(0, planned.readyAt - Date.now()));
-        if (waitMs > 0) {
+      if (planned && !planned.available) {
+        // Nothing has room. What happens next depends on whether that is the
+        // provider's word or Danav's arithmetic.
+        const waitMs = Number.isFinite(planned.readyAt) ? Math.max(0, planned.readyAt - Date.now()) : Infinity;
+        if (!planned.confirmed) {
+          // The budget is an ESTIMATE. Refusing to send on an estimate is how
+          // a working key ends up idle, so the request goes anyway: if the
+          // estimate was right the provider says so, and that answer is then
+          // believed and learned from.
+        } else if (waitMs <= MINUTE_WAIT_CAP_MS && Date.now() + waitMs < deadline) {
+          // A slot is seconds away and the provider has actually refused us.
+          // Waiting beats spending a request to be refused again.
           onRetry?.({
             attempt: retriesUsed,
             maxRetries: MAX_PROVIDER_RETRIES,
@@ -289,6 +343,17 @@ export async function streamCompletion({
           });
           await sleep(waitMs, signal);
           planned = nextFromPlan() || planned;
+        } else {
+          // Confirmed empty, and not coming back soon. Say so at once rather
+          // than sleeping through the user's afternoon.
+          throw new LlmError(
+            `Every key for ${provider.name || 'this provider'} has reached its limit on all ${fallbackModels.length} models. ` +
+            (Number.isFinite(waitMs)
+              ? `The next slot opens in about ${Math.ceil(waitMs / 1000)}s.`
+              : 'The daily allowance resets at midnight Pacific.') +
+            ' Add another API key, or raise the limits in Settings if the provider allows more.',
+            { status: 429, code: 'quota_exhausted' },
+          );
         }
       }
       if (planned) {
@@ -301,7 +366,7 @@ export async function streamCompletion({
               attempt: retriesUsed,
               maxRetries: MAX_PROVIDER_RETRIES,
               delayMs: 0,
-              reason: `${activeModel} is out of quota; switching to ${planned.model}`,
+              reason: `${activeModel} ${lastWasBusy ? 'is busy' : 'is out of quota'}; switching to ${planned.model}`,
               credentialIndex: planned.credentialIndex + 1,
               credentialCount: apiKeys.length,
               model: planned.model,
@@ -311,19 +376,45 @@ export async function streamCompletion({
           withThinking = hasThinkingConfig && !thinkingRejected;
         }
       }
+      if (Date.now() > deadline) {
+        throw new LlmError(
+          `${provider.name || 'The provider'} stayed busy for ${Math.round(ATTEMPT_BUDGET_MS / 1000)}s across every key and model. Try again in a moment.`,
+          { status: 503, code: 'provider_busy' },
+        );
+      }
       requestCredentialIndex = credentialIndex;
       const credential = apiKeys.length ? apiKeys[requestCredentialIndex] : '';
       if (quotaOn) recordRequest(provider.id, requestCredentialIndex, activeModel);
       let res;
+      // A provider that accepts the connection and then says nothing is the
+      // worst case for a user: no error, no text, no end. Give it a fixed time
+      // to start answering, then take the request elsewhere.
+      const attempt = new AbortController();
+      currentAttempt = attempt;
+      if (signal?.aborted) attempt.abort();
+      let timedOut = false;
+      const headerTimer = setTimeout(() => { timedOut = true; attempt.abort(); }, HEADER_TIMEOUT_MS);
+      const releaseAttempt = () => clearTimeout(headerTimer);
       try {
         res = await fetch(endpoint, {
           method: 'POST',
           headers: headersForCredential(credential),
           body: JSON.stringify(build(withThinking, streamFunctionCallArguments)),
-          signal,
+          signal: attempt.signal,
         });
+        // Headers are in; the body may now stream for as long as it needs, but
+        // an outer abort must still reach it, so that listener stays attached.
+        clearTimeout(headerTimer);
       } catch (err) {
-        if (err?.name === 'AbortError' || signal?.aborted) throw err;
+        releaseAttempt();
+        if (signal?.aborted) throw err;
+        if (timedOut) {
+          lastWasBusy = true;
+          if (quotaOn) recordBusy(provider.id, requestCredentialIndex, activeModel, { status: 504 });
+          if (await scheduleRetry({ reason: `${activeModel} did not start answering in ${Math.round(HEADER_TIMEOUT_MS / 1000)}s` })) continue;
+          throw new LlmError(`${provider.name || 'The provider'} stopped responding.`, { status: 504, code: 'provider_timeout' });
+        }
+        if (err?.name === 'AbortError') throw err;
         if (await scheduleRetry({ reason: 'connection problem' })) continue;
         if (apiKeys.length) {
           credentialIndex = (requestCredentialIndex + 1) % apiKeys.length;
@@ -331,7 +422,9 @@ export async function streamCompletion({
         }
         throw new LlmError(`Could not reach the provider: ${err?.cause?.code || err?.message || 'network error'}`);
       }
+      if (!res.ok) releaseAttempt();
       if (res.ok) {
+        lastWasBusy = false;
         if (quotaOn) recordSuccess(provider.id, requestCredentialIndex, activeModel);
         return res;
       }
@@ -384,13 +477,16 @@ export async function streamCompletion({
       }
 
       const retryable = retryableStatus(res.status) || retryableMessage(text);
+      if (retryable) lastWasBusy = res.status !== 429;
       if (retryable && quotaOn) {
-        // Park this exact (key, model) pair. Without it the planner would hand
-        // back the same pair on the next pass and the retry would be guaranteed
-        // to fail the same way.
+        // Park what actually failed: a 429 is this pair being over budget, a
+        // 503 is the model being busy for everyone. The body is passed in
+        // because a refusal often states the real limit, which is worth more
+        // than any number configured here.
         recordBusy(provider.id, requestCredentialIndex, activeModel, {
           status: res.status,
           retryAfterMs: retryAfterMs(res.headers.get('retry-after')),
+          body: text,
         });
       }
       if (retryable) {

@@ -29,6 +29,10 @@ export interface QuotaModel {
   model: string;
   rpm: number;
   rpd: number;
+  /** True once the provider has stated these numbers itself. */
+  confirmed: boolean;
+  /** The provider called this model busy; it is skipped for this long. */
+  busyInMs: number;
   minuteUsed: number;
   minuteLimit: number;
   dayUsed: number;
@@ -241,13 +245,21 @@ export function QuotaPanel() {
                       </div>
                       <Bar used={model.dayUsed} limit={model.dayLimit} />
                     </div>
+                    {model.busyInMs > 0 && (
+                      <span
+                        className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 dark:bg-amber-500/10 dark:text-amber-400"
+                        title="The provider says this model is under heavy demand. Danav steps over it and uses another one; it is not using up your allowance."
+                      >
+                        busy {Math.ceil(model.busyInMs / 1000)}s
+                      </span>
+                    )}
                     <span
                       className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] tabular-nums ${
                         exhausted
                           ? 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-400'
                           : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400'
                       }`}
-                      title={`${model.keysAvailable} of ${provider.credentialCount} keys can take a request right now (${model.rpm}/min, ${model.rpd}/day each)`}
+                      title={`${model.keysAvailable} of ${provider.credentialCount} keys can take a request right now (${model.rpm}/min, ${model.rpd}/day each — ${model.confirmed ? 'as stated by the provider' : 'assumed until the provider says otherwise'})`}
                     >
                       {exhausted ? `back in ${waitLabel(model.readyInMs)}` : `${model.keysAvailable}/${provider.credentialCount} free`}
                     </span>
@@ -257,6 +269,11 @@ export function QuotaPanel() {
                       {model.keys.map((entry) => (
                         <KeyCell key={entry.credentialIndex} entry={entry} />
                       ))}
+                      <p className="col-span-2 text-[10.5px] text-zinc-400 sm:col-span-4">
+                        {model.confirmed
+                          ? `${model.rpm} a minute and ${model.rpd} a day per key, as stated by the provider when it last refused a request.`
+                          : `${model.rpm} a minute and ${model.rpd} a day per key is an assumption. Danav never refuses to send on an assumption — if it is wrong, the provider says so and the real figure is learned from the refusal.`}
+                      </p>
                     </div>
                   )}
                 </div>

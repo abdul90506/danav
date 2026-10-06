@@ -27,8 +27,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir } from './config.js';
 
-/** Google's documented free-tier shape for the Flash models, per key, per model. */
-export const DEFAULT_LIMITS = { rpm: 5, rpd: 20 };
+/**
+ * The documented free-tier shape for the Flash models, per key, per model.
+ *
+ * Google publishes roughly 10 requests a minute and 250 a day for Flash on the
+ * free tier, with the day resetting at midnight Pacific. These are a starting
+ * point only: `learnLimits` replaces them with whatever the provider states in
+ * its first refusal, and nothing is ever refused on these numbers alone.
+ */
+export const DEFAULT_LIMITS = { rpm: 10, rpd: 250 };
 
 /**
  * The model id that means "you choose".
@@ -65,8 +72,21 @@ export function autoModelEntry(provider) {
   };
 }
 
-/** How long a pair is left alone after the provider says it is busy. */
-const BUSY_MS = 20_000;
+/**
+ * How long a MODEL is left alone after the provider says it is busy.
+ *
+ * Measured against this provider: a 503 ("this model is currently experiencing
+ * high demand") is about the model, not the key — the same instant, two keys
+ * get the same answer, and a different model answers fine. It also clears in
+ * seconds. So a busy model is skipped briefly and the request moves on, rather
+ * than every key being spent discovering the same thing. Repeats escalate.
+ */
+const MODEL_BUSY_MS = 2_500;
+const MODEL_BUSY_MAX_MS = 20_000;
+/** Consecutive 503s stop counting as consecutive after this long. */
+const BUSY_STREAK_MS = 60_000;
+/** A pair that just 503'd goes to the back of the queue, but not out of it. */
+const BUSY_MS = 1_500;
 /** A 429 with no Retry-After means the minute window is the thing that is full. */
 const RATE_LIMITED_MS = 60_000;
 /** Never trust a provider's Retry-After beyond this; it is sometimes hours. */
@@ -125,8 +145,12 @@ export function nextDayResetAt(at = Date.now()) {
 const keyOf = (providerId, credentialIndex, model) =>
   `${String(providerId || '')}\u0000${Number(credentialIndex) || 0}\u0000${String(model || '')}`;
 
-/** state: key -> { day, used, minute: number[], cooldownUntil, lastStatus } */
+/** state: key -> { day, used, minute: number[], cooldownUntil, lastStatus, refused } */
 const state = new Map();
+/** provider+model -> { busyUntil, strikes, lastBusyAt }. A 503 is model-wide. */
+const modelState = new Map();
+/** provider+model -> { rpm, rpd } exactly as the provider stated them. */
+const learned = new Map();
 let loadedFrom = '';
 let flushTimer = null;
 
@@ -135,9 +159,18 @@ function load() {
   if (loadedFrom === target) return;
   loadedFrom = target;
   state.clear();
+  learned.clear();
   try {
     const raw = JSON.parse(fs.readFileSync(target, 'utf8'));
     const today = quotaDay();
+    for (const [key, value] of Object.entries(raw?.limits || {})) {
+      const entry = {};
+      for (const field of ['rpm', 'rpd']) {
+        const n = Math.floor(Number(value?.[field]));
+        if (Number.isFinite(n) && n > 0) entry[field] = n;
+      }
+      if (Object.keys(entry).length) learned.set(key, entry);
+    }
     for (const [key, value] of Object.entries(raw?.pairs || {})) {
       // Yesterday's counts are not a smaller version of today's; they are gone.
       if (!value || value.day !== today) continue;
@@ -147,6 +180,9 @@ function load() {
         minute: [],
         cooldownUntil: 0,
         lastStatus: 0,
+        // Whether the provider itself has refused this pair today, as opposed
+        // to Danav's own estimate saying it should be full.
+        refused: value.refused === true,
       });
     }
   } catch {
@@ -160,11 +196,14 @@ function flushSoon() {
     flushTimer = null;
     const pairs = {};
     for (const [key, value] of state) {
-      if (value.used > 0) pairs[key] = { day: value.day, used: value.used };
+      if (value.used > 0 || value.refused) {
+        pairs[key] = { day: value.day, used: value.used, ...(value.refused ? { refused: true } : {}) };
+      }
     }
+    const limits = Object.fromEntries(learned);
     try {
       fs.mkdirSync(path.dirname(file()), { recursive: true });
-      fs.writeFileSync(file(), JSON.stringify({ pairs }, null, 0));
+      fs.writeFileSync(file(), JSON.stringify({ pairs, limits }, null, 0));
     } catch {
       /* The ledger is an optimisation. Losing it costs a few wasted requests, never correctness. */
     }
@@ -178,11 +217,12 @@ function entry(providerId, credentialIndex, model, at = Date.now()) {
   const today = quotaDay(at);
   let value = state.get(key);
   if (!value) {
-    value = { day: today, used: 0, minute: [], cooldownUntil: 0, lastStatus: 0 };
+    value = { day: today, used: 0, minute: [], cooldownUntil: 0, lastStatus: 0, refused: false };
     state.set(key, value);
   } else if (value.day !== today) {
     value.day = today;
     value.used = 0;
+    value.refused = false;
   }
   // Drop anything that has fallen out of the sliding window.
   if (value.minute.length) {
@@ -190,6 +230,31 @@ function entry(providerId, credentialIndex, model, at = Date.now()) {
     if (value.minute[0] <= cutoff) value.minute = value.minute.filter((t) => t > cutoff);
   }
   return value;
+}
+
+/** How long this model should be left alone, if at all. */
+export function modelBusyUntil(providerId, model, at = Date.now()) {
+  const value = modelState.get(`${String(providerId || '')}\u0000${String(model || '')}`);
+  return value && value.busyUntil > at ? value.busyUntil : 0;
+}
+
+/** Note that the provider says this model is busy right now. */
+function markModelBusy(providerId, model, at, retryAfterMs = 0) {
+  const key = `${String(providerId || '')}\u0000${String(model || '')}`;
+  const value = modelState.get(key) || { busyUntil: 0, strikes: 0, lastBusyAt: 0 };
+  // Only a run of failures means the model is really struggling; an isolated
+  // one a minute later starts again from the short wait.
+  value.strikes = at - value.lastBusyAt <= BUSY_STREAK_MS ? value.strikes + 1 : 1;
+  value.lastBusyAt = at;
+  const backoff = Math.min(MODEL_BUSY_MAX_MS, MODEL_BUSY_MS * 2 ** (value.strikes - 1));
+  value.busyUntil = Math.max(value.busyUntil, at + Math.max(backoff, Math.min(MAX_COOLDOWN_MS, retryAfterMs)));
+  modelState.set(key, value);
+  return value;
+}
+
+/** A model that answers is not busy, whatever it did a moment ago. */
+function clearModelBusy(providerId, model) {
+  modelState.delete(`${String(providerId || '')}\u0000${String(model || '')}`);
 }
 
 /**
@@ -207,12 +272,56 @@ export function limitsFor(provider, model) {
     const n = Number(value);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
   };
-  return { rpm: num(raw.rpm, DEFAULT_LIMITS.rpm), rpd: num(raw.rpd, DEFAULT_LIMITS.rpd) };
+  // What the provider told us in a refusal beats both the setting and the
+  // default: it is the only number that is not a guess.
+  const taught = learned.get(`${String(provider?.id || '')}\u0000${String(model || '')}`) || {};
+  return {
+    rpm: num(taught.rpm, num(raw.rpm, DEFAULT_LIMITS.rpm)),
+    rpd: num(taught.rpd, num(raw.rpd, DEFAULT_LIMITS.rpd)),
+    // True once the provider has stated these numbers itself.
+    confirmed: Boolean(taught.rpm || taught.rpd),
+  };
+}
+
+/**
+ * Take the provider at its word about its own limits.
+ *
+ * A Google 429 carries a QuotaFailure listing the metric and its value, which
+ * is better information than anything a user can type into Settings. Learning
+ * it means the planner stops guessing after the first refusal, and that a
+ * limit raised or lowered upstream is picked up without anyone editing a file.
+ */
+export function learnLimits(providerId, model, body) {
+  let parsed;
+  try {
+    parsed = typeof body === 'string' ? JSON.parse(body) : body;
+  } catch {
+    return null;
+  }
+  const payload = Array.isArray(parsed) ? parsed[0] : parsed;
+  const details = payload?.error?.details;
+  if (!Array.isArray(details)) return null;
+  const found = {};
+  for (const detail of details) {
+    for (const violation of Array.isArray(detail?.violations) ? detail.violations : []) {
+      const id = String(violation?.quotaId || violation?.quotaMetric || '');
+      const value = Math.floor(Number(violation?.quotaValue));
+      if (!Number.isFinite(value) || value <= 0) continue;
+      if (/perminute/i.test(id)) found.rpm = value;
+      else if (/perday/i.test(id)) found.rpd = value;
+    }
+  }
+  if (!found.rpm && !found.rpd) return null;
+  const key = `${String(providerId || '')}\u0000${String(model || '')}`;
+  const next = { ...(learned.get(key) || {}), ...found };
+  learned.set(key, next);
+  flushSoon();
+  return next;
 }
 
 /** What is left on one (key, model) pair right now, and when it frees up. */
 export function headroom(provider, credentialIndex, model, at = Date.now()) {
-  const { rpm, rpd } = limitsFor(provider, model);
+  const { rpm, rpd, confirmed } = limitsFor(provider, model);
   const value = entry(provider?.id, credentialIndex, model, at);
   const minuteLeft = Math.max(0, rpm - value.minute.length);
   const dayLeft = Math.max(0, rpd - value.used);
@@ -220,6 +329,7 @@ export function headroom(provider, credentialIndex, model, at = Date.now()) {
   const minuteFreeAt = minuteLeft > 0 ? 0 : (value.minute[0] || at) + MINUTE_MS;
   const cooling = value.cooldownUntil > at ? value.cooldownUntil : 0;
   const readyAt = Math.max(minuteFreeAt, cooling);
+  const busyUntil = modelBusyUntil(provider?.id, model, at);
   return {
     rpm,
     rpd,
@@ -228,6 +338,14 @@ export function headroom(provider, credentialIndex, model, at = Date.now()) {
     minuteLeft,
     dayLeft,
     cooling: cooling > 0,
+    // The model is struggling, which is not the same as this pair being spent:
+    // it is a reason to prefer another model, never a reason to refuse to work.
+    busy: busyUntil > at,
+    busyUntil,
+    // Whether this budget is the provider's own word or Danav's assumption.
+    // Nothing is ever refused on an assumption alone.
+    confirmed: confirmed || value.refused === true,
+    refused: value.refused === true,
     // A day-exhausted pair is not "ready later today" — it is done until reset.
     available: minuteLeft > 0 && dayLeft > 0 && !cooling,
     readyAt: dayLeft > 0 ? readyAt : Infinity,
@@ -268,10 +386,18 @@ export function planAttempts(provider, model, { credentialCount = 1, models = []
   return candidates.sort((a, b) => {
     if (a.available !== b.available) return a.available ? -1 : 1;
     if (a.available) {
+      // A model the provider has just called busy is still usable, but anything
+      // not busy is a better bet right now — that is the whole reason a 503
+      // costs one request here instead of one per key.
+      if (a.busy !== b.busy) return a.busy ? 1 : -1;
+      if (a.busy && a.busyUntil !== b.busyUntil) return a.busyUntil - b.busyUntil;
       if (a.modelRank !== b.modelRank) return a.modelRank - b.modelRank;
       if (a.dayLeft !== b.dayLeft) return b.dayLeft - a.dayLeft;
       return a.minuteUsed - b.minuteUsed;
     }
+    // Nothing is free: prefer whatever the provider has not actually refused,
+    // because that budget is only an estimate and may well be wrong.
+    if (a.confirmed !== b.confirmed) return a.confirmed ? 1 : -1;
     if (a.readyAt !== b.readyAt) return a.readyAt - b.readyAt;
     return a.modelRank - b.modelRank;
   });
@@ -295,17 +421,25 @@ export function recordRequest(providerId, credentialIndex, model, at = Date.now(
  * does not cost the key for a minute. An explicit Retry-After wins over both,
  * clamped, because providers do sometimes return absurd values.
  */
-export function recordBusy(providerId, credentialIndex, model, { status = 0, retryAfterMs = 0, at = Date.now() } = {}) {
+export function recordBusy(providerId, credentialIndex, model, { status = 0, retryAfterMs = 0, at = Date.now(), body = '' } = {}) {
   const value = entry(providerId, credentialIndex, model, at);
-  const requested = Number(retryAfterMs) > 0 ? Number(retryAfterMs) : (status === 429 ? RATE_LIMITED_MS : BUSY_MS);
-  value.cooldownUntil = Math.max(value.cooldownUntil, at + Math.min(MAX_COOLDOWN_MS, requested));
   value.lastStatus = Number(status) || 0;
-  // A 429 means the provider counted requests we did not. Fill the local window
-  // so the next choice believes it, instead of trying the same pair again.
   if (status === 429) {
+    // The provider counted requests Danav did not. Believe it: fill the local
+    // window, remember that this pair was genuinely refused, and take any
+    // limit it stated while it is being explicit about them.
+    if (body) learnLimits(providerId, model, body);
+    const requested = Number(retryAfterMs) > 0 ? Number(retryAfterMs) : RATE_LIMITED_MS;
+    value.cooldownUntil = Math.max(value.cooldownUntil, at + Math.min(MAX_COOLDOWN_MS, requested));
+    value.refused = true;
     const { rpm } = limitsFor({ id: providerId }, model);
     while (value.minute.length < rpm) value.minute.push(at);
+    return value;
   }
+  // Anything else — 503 and friends — is the model being busy, not this key
+  // being over budget. Skip the model for a moment and move on immediately.
+  value.cooldownUntil = Math.max(value.cooldownUntil, at + BUSY_MS);
+  markModelBusy(providerId, model, at, Number(retryAfterMs) || 0);
   return value;
 }
 
@@ -314,6 +448,8 @@ export function recordSuccess(providerId, credentialIndex, model, at = Date.now(
   const value = entry(providerId, credentialIndex, model, at);
   value.cooldownUntil = 0;
   value.lastStatus = 0;
+  // A model that answers is not busy, whatever it said a second ago.
+  clearModelBusy(providerId, model);
   return value;
 }
 
@@ -331,7 +467,8 @@ export function snapshot(providers = [], at = Date.now()) {
     const credentialCount = Math.max(1, Number(provider.apiKeyCount) || (provider.apiKeys?.length ?? 0) || 1);
     const models = routableModels(provider);
     const perModel = models.map((model) => {
-      const { rpm, rpd } = limitsFor(provider, model);
+      const { rpm, rpd, confirmed } = limitsFor(provider, model);
+      const busyUntil = modelBusyUntil(provider.id, model, at);
       const keys = [];
       for (let k = 0; k < credentialCount; k++) {
         const room = headroom(provider, k, model, at);
@@ -348,6 +485,10 @@ export function snapshot(providers = [], at = Date.now()) {
         model,
         rpm,
         rpd,
+        // Whether these numbers are the provider's own, or Danav's estimate.
+        confirmed,
+        // The provider said this model is busy; it is skipped, not spent.
+        busyInMs: busyUntil > at ? busyUntil - at : 0,
         minuteUsed: keys.reduce((n, key) => n + key.minuteUsed, 0),
         minuteLimit: rpm * credentialCount,
         dayUsed: keys.reduce((n, key) => n + key.dayUsed, 0),
@@ -380,6 +521,8 @@ export function snapshot(providers = [], at = Date.now()) {
 /** Test seam: drop everything in memory and re-read on next use. */
 export function resetQuotaState() {
   state.clear();
+  modelState.clear();
+  learned.clear();
   loadedFrom = '';
   if (flushTimer) {
     clearTimeout(flushTimer);
