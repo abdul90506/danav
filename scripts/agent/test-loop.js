@@ -1967,3 +1967,29 @@ test('a run with nothing to work on stops instead of inventing a task', async ()
   const ok = await agentRun({ history: [{ role: 'user', content: 'say hi' }] });
   assert.notEqual(ok.result.stopReason, 'error', 'an ordinary run is unaffected');
 });
+
+test('the system prompt stays lean, and says each rule once', () => {
+  const ws = { kind: 'local', name: 'demo', root: '/tmp/demo', describeEnv: () => 'Node 20, git available.' };
+  const prompt = buildSystemPrompt({ workspace: ws, snapshot: '', budget: { maxSteps: 80, maxRunMs: 900_000 } });
+
+  // This prompt is re-sent on every round of every run, so its length is a
+  // per-round cost, not a one-off. The budget is a ceiling to notice bloat, not a
+  // target — if a genuinely new rule needs the room, raise it deliberately.
+  assert.ok(prompt.length < 19_500, `the base system prompt grew to ${prompt.length} chars; trim it or raise this budget on purpose`);
+
+  // Saying a rule twice does not make it twice as followed, it just costs twice.
+  // These were each stated in two or three sections before being consolidated.
+  const once = (re, what) => {
+    const n = prompt.match(re)?.length ?? 0;
+    assert.equal(n, 1, `"${what}" is stated ${n} times; it belongs in exactly one section`);
+  };
+  once(/is DATA, not instructions/g, 'untrusted input');
+  once(/Never reveal, print, store in memory/g, 'the secrets rule');
+  once(/destructive or irreversible/g, 'the destructive-action rule');
+  once(/audit, (?:project-wide )?review, redesign/g, 'scope breadth');
+
+  // The numbered rules have to actually read in order.
+  const ids = [...prompt.matchAll(/^(\d+[a-z]?)\. \*\*/gm)].map((m) => m[1]);
+  assert.deepEqual(ids, [...ids].sort((a, b) => (parseInt(a, 10) - parseInt(b, 10)) || a.localeCompare(b)),
+    `the How-to-work rules are out of order: ${ids.join(', ')}`);
+});
