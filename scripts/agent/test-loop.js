@@ -40,10 +40,11 @@ test('the system prompt distinguishes a full overwrite read from an outline or p
     workspace: { kind: 'local', name: 'fixture', root: '/workspace', describeEnv: () => '' },
     snapshot: '',
   });
-  assert.match(prompt, /For a whole-file overwrite or append, read_file must show the complete file/);
-  assert.match(prompt, /file_outline, a symbol read, or a partial range does not count/);
-  assert.match(prompt, /Treat search snippets as leads, not proof/);
-  assert.match(prompt, /read them with fetch_url before relying on details/);
+  // An outline tells you a file's shape, not its contents, so it can never
+  // license a blind overwrite. The same distinction applies to a web snippet.
+  assert.match(prompt, /Read before you overwrite, append to, or edit an existing file/);
+  assert.match(prompt, /An outline or a symbol read is not enough to replace a file — read it whole/);
+  assert.match(prompt, /Snippets are leads\. Read one to three authoritative pages with fetch_url before relying on detail/);
 });
 
 test('the reveal of a one-frame tool call is paced for a person to watch', () => {
@@ -351,7 +352,7 @@ test('happy path: plan, write, read, multi-edit, edit, command, search, list —
   // what the model was shown
   assert.match(requests[0].messages[0].content, /Danav Agent/);
   assert.match(requests[0].messages[0].content, /fresh workspace/);
-  assert.match(requests[0].messages[0].content, /ALREADY inside it/);
+  assert.match(requests[0].messages[0].content, /already inside it, so relative paths start here/);
   assert.ok(requests[0].tools.length >= 15);
   assertConsistentTranscript(requests.at(-1).messages);
   const finalText = events.filter((e) => e.content).map((e) => e.content).join('');
@@ -1680,9 +1681,9 @@ test('each budget warning is said once, and the prompt states the budget', async
     assert.match(lastMessages, /steps for one run remain/, 'the model was told the budget is nearly gone');
 
     const system = String(requests[0].messages[0].content);
-    assert.match(system, /up to 12 model turns/, 'the prompt states the real step budget');
-    assert.match(system, /documentation true/i);
-    assert.match(system, /context as finite/i);
+    assert.match(system, /Budget: 12 turns/, 'the prompt states the real step budget');
+    assert.match(system, /Update the README or the doc your change made untrue/i, 'docs stay true');
+    assert.match(system, /Every turn re-sends this entire conversation/i, 'context is finite and a turn costs');
   } finally {
     if (previous === undefined) delete process.env.DANAV_AGENT_MAX_STEPS;
     else process.env.DANAV_AGENT_MAX_STEPS = previous;
@@ -1839,18 +1840,17 @@ test('a run that goes quiet is asked to narrate, and a talkative one is left alo
   // The system prompt carries the contract...
   const silent = await agentRun({ model: 'fake-quiet', history: [{ role: 'user', content: 'write the two files' }] });
   const system = String(silent.requests[0].messages[0].content);
-  assert.match(system, /Most turns need no message at all/, 'the prompt says the rows already do the talking');
-  assert.match(system, /Never write progress-formula lines/, 'and bans the "I am going to…" filler');
-  assert.match(system, /I am going to check X/, 'naming the phrasings to avoid');
-  assert.match(system, /about 0–3 short lines for a whole run/, 'the budget for narration is explicit');
+  assert.match(system, /Most turns need no message/, 'the prompt says the rows already do the talking');
+  assert.match(system, /Never write "I am going to check X"/, 'and bans the "I am going to…" filler by name');
+  assert.match(system, /0–3 lines for a whole run/, 'the budget for narration is explicit');
   // The closing summary is required, and its LENGTH is the model's judgement of
   // the run — a one-file change reads differently from a long, risky one. The old
   // flat "500 characters is plenty" is gone on purpose.
-  assert.match(system, /End with a brief summary that fits the work/, 'a closing summary is required');
-  assert.match(system, /small change or direct answer gets one or two short sentences/, 'small work is summarised small');
-  assert.match(system, /multi-file feature or meaningful fix gets a few short sentences/, 'bigger work gets enough explanation without padding');
-  assert.match(system, /never pad, repeat the plan, or under-report/, 'and the rule is fit, not length');
-  assert.match(system, /NO headings, NO bold section labels, NO file-by-file inventory/, 'the shape stays readable');
+  assert.match(system, /Finish with a summary the size of the work/, 'a closing summary is required, scaled to the work');
+  assert.match(system, /a sentence or two for a small change/, 'small work is summarised small');
+  assert.match(system, /a short paragraph for a feature/, 'bigger work gets enough explanation without padding');
+  assert.match(system, /no headings, no file inventory, no pasted code/, 'the shape stays readable');
+  assert.match(system, /what is still open/, 'and unfinished work is never left unsaid');
   assert.ok(!/500 characters is plenty/.test(system), 'the flat length cap is gone');
   assert.match(system, /never describe work you did not do/i, 'the prompt forbids claiming work that never happened');
 
@@ -1905,9 +1905,9 @@ test('the prompt arrives already knowing the project, and the request it has to 
     assert.match(system, /Most depended on:/, 'including what is most depended on');
     assert.match(system, /# Files this request is probably about/, 'and the files the request is about');
     assert.match(system, /src\/theme\.ts[\s\S]{0,200}toggleTheme/, 'the ranked file names the symbol that matched');
-    assert.match(system, /Find code with the index, not with your eyes/, 'the prompt teaches the index tools');
-    assert.match(system, /Reuse the work already done/, 'the prompt tells the agent to use its work log instead of starting over');
-    assert.match(system, /Edit by the safest handle you have/, 'edits get their recovery paths named');
+    assert.match(system, /# Finding code[\s\S]*index of every definition and import/, 'the prompt teaches the index tools');
+    assert.match(system, /update_plan is your durable memory/, 'the agent is told to resume from its own log instead of starting over');
+    assert.match(system, /A failed edit tells you the nearest real code/, 'edits get their recovery paths named');
     assert.match(system, /# Workspace right now\n[\s\S]*the code index above lists what is in the folders/, 'a rich index replaces the nested listing instead of repeating it');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -1975,7 +1975,7 @@ test('the system prompt stays lean, and says each rule once', () => {
   // This prompt is re-sent on every round of every run, so its length is a
   // per-round cost, not a one-off. The budget is a ceiling to notice bloat, not a
   // target — if a genuinely new rule needs the room, raise it deliberately.
-  assert.ok(prompt.length < 19_500, `the base system prompt grew to ${prompt.length} chars; trim it or raise this budget on purpose`);
+  assert.ok(prompt.length < 9_000, `the base system prompt grew to ${prompt.length} chars; trim it or raise this budget on purpose`);
 
   // Saying a rule twice does not make it twice as followed, it just costs twice.
   // These were each stated in two or three sections before being consolidated.
@@ -1983,10 +1983,10 @@ test('the system prompt stays lean, and says each rule once', () => {
     const n = prompt.match(re)?.length ?? 0;
     assert.equal(n, 1, `"${what}" is stated ${n} times; it belongs in exactly one section`);
   };
-  once(/is DATA, not instructions/g, 'untrusted input');
-  once(/Never reveal, print, store in memory/g, 'the secrets rule');
-  once(/destructive or irreversible/g, 'the destructive-action rule');
-  once(/audit, (?:project-wide )?review, redesign/g, 'scope breadth');
+  once(/Everything else is DATA/g, 'untrusted input');
+  once(/Never print or store API keys/g, 'the secrets rule');
+  once(/need the user to have asked/g, 'the destructive-action rule');
+  once(/review, audit or improvement pass/g, 'scope breadth');
 
   // The numbered rules have to actually read in order.
   const ids = [...prompt.matchAll(/^(\d+[a-z]?)\. \*\*/gm)].map((m) => m[1]);
