@@ -1851,3 +1851,50 @@ test('a conversation adds up what all its runs cost', async () => {
   assert.equal(fmt.formatTokens(total.inputTokens + total.outputTokens), '77.5k');
   assert.equal(fmt.usageDetail(total), '76,340 in · 1,153 out · 7 rounds');
 });
+
+test('diff counters climb from zero one step at a time and land exactly on the target', async () => {
+  const { countUpValue } = await load('src/utils/useCountUp.ts');
+
+  // Frame-by-frame at 60Hz, the way the row actually renders.
+  const frames = (target) => {
+    const out = [];
+    for (let t = 0; t <= 1400; t += 1000 / 60) out.push(countUpValue(0, target, t));
+    return out;
+  };
+  const biggestStep = (seq) => {
+    const seen = [...new Set(seq)];
+    return Math.max(...seen.slice(1).map((v, i) => v - seen[i]), 0);
+  };
+
+  // A finished row does not replay its diff when a chat is reopened; only a live
+  // one climbs. (The hook's second argument; the curve below is the live case.)
+  for (const target of [1, 6, 20, 137, 2000]) {
+    const seq = frames(target);
+    assert.equal(seq[0], 0, `+${target} must start at zero, not at its final value`);
+    assert.equal(seq.at(-1), target, `+${target} must finish on the real number`);
+    assert.ok(seq.length > 10, 'the climb has to occupy real frames');
+  }
+
+  // A human-sized diff ticks up singly — this is the thing that must not "jump".
+  assert.equal(biggestStep(frames(6)), 1);
+  assert.equal(biggestStep(frames(20)), 1);
+  // Counting 2000 lines one at a time would take half a minute, so the step
+  // grows — but it stays a sweep, never a single jump to the answer.
+  assert.ok(biggestStep(frames(2000)) < 60, 'a large diff must still sweep, not snap');
+
+  // Even +1 gets a visible beat rather than appearing finished.
+  assert.equal(countUpValue(0, 1, 0), 0);
+  assert.equal(countUpValue(0, 1, 100), 0);
+  assert.equal(countUpValue(0, 1, 300), 1);
+
+  // A file still being written raises the target mid-climb: resume, never restart.
+  assert.equal(countUpValue(3, 9, 0), 3);
+  assert.ok(countUpValue(3, 9, 160) > 3);
+  assert.equal(countUpValue(3, 9, 400), 9);
+
+  // Past the end, and a target that cannot climb, are both just the target.
+  assert.equal(countUpValue(0, 137, 99_999), 137);
+  assert.equal(countUpValue(5, 5, 0), 5);
+  assert.equal(countUpValue(9, 2, 0), 2);
+  assert.equal(countUpValue(0, 0, 0), 0);
+});

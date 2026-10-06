@@ -7,6 +7,7 @@ import { actionLabel, formatRanges, isWorking } from '../agent/format';
 import { FileTypeIcon } from './FileTypeIcon';
 import { createPanelStore, usePanelOpen } from './panels';
 import { useDismissOnOutside } from '../utils/useDismissOnOutside';
+import { useCountUp } from '../utils/useCountUp';
 import { SearchSourceStack } from './SearchSourceStack';
 
 /**
@@ -16,6 +17,44 @@ import { SearchSourceStack } from './SearchSourceStack';
  *   Analyzed  📄 App.tsx  #L1-120
  *   Ran  npm install                         (click to see the command output)
  */
+
+/**
+ * The +added / -removed pair, counted up from zero rather than printed.
+ *
+ * Both hooks run unconditionally so this stays a legal hook site inside a list;
+ * whether a number is *shown* is decided afterwards.
+ */
+function DiffCount({
+  added,
+  removed,
+  className = '',
+  showZero = false,
+  animate = true,
+}: {
+  added?: number;
+  removed?: number;
+  className?: string;
+  showZero?: boolean;
+  /** Climb from zero. False for a row that was already finished when it mounted. */
+  animate?: boolean;
+}) {
+  const liveAdded = useCountUp(added, animate);
+  const liveRemoved = useCountUp(removed, animate);
+  return (
+    <>
+      {added !== undefined && (showZero || added > 0) && (
+        <span className={`font-mono tabular-nums text-emerald-600 dark:text-emerald-400 ${className}`}>
+          +{liveAdded ?? 0}
+        </span>
+      )}
+      {removed !== undefined && removed > 0 && (
+        <span className={`font-mono tabular-nums text-rose-500 dark:text-rose-400 ${className}`}>
+          -{liveRemoved ?? 0}
+        </span>
+      )}
+    </>
+  );
+}
 
 /** Long paths keep their tail: "…/components/AgentActionRow.tsx". */
 const shortPath = (p: string, max = 56) => (p.length <= max ? p : `…${p.slice(p.length - (max - 1))}`);
@@ -145,8 +184,7 @@ const Details: React.FC<{ action: AgentAction }> = ({ action }) => {
               <FileTypeIcon path={f.path} />
               <span className="font-medium text-zinc-800 dark:text-zinc-100 truncate">{f.path}</span>
               {f.ranges && f.ranges.length > 0 && <span className="font-mono text-[11px] text-zinc-400">{formatRanges(f.ranges, 3)}</span>}
-              {f.added > 0 && <span className="font-mono tabular-nums text-emerald-600 dark:text-emerald-400">+{f.added}</span>}
-              {f.removed > 0 && <span className="font-mono tabular-nums text-rose-500 dark:text-rose-400">-{f.removed}</span>}
+              <DiffCount added={f.added} removed={f.removed} animate={false} />
               {f.edits && f.edits > 1 && <span className="text-zinc-400">· {f.edits} edits</span>}
             </div>
             {f.hunks && f.hunks.length > 0 && <Diff hunks={f.hunks} />}
@@ -332,8 +370,7 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
           <span className={`truncate text-[12px] font-medium ${live ? 'agent-shimmer' : queued ? 'text-zinc-400 dark:text-zinc-500' : 'text-zinc-700 dark:text-zinc-300'}`} title={change.path}>
             {shortPath(change.path, 38)}
           </span>
-          <span className="shrink-0 font-mono text-[12px] tabular-nums text-emerald-600 dark:text-emerald-400">+{change.added}</span>
-          {change.removed > 0 ? <span className="shrink-0 font-mono text-[12px] tabular-nums text-rose-500 dark:text-rose-400">-{change.removed}</span> : null}
+          <DiffCount added={change.added} removed={change.removed} className="shrink-0 text-[12px]" showZero animate={live} />
         </span>
       ))}
       {!label.fileChanges && label.fileTargets?.slice(0, 2).map((target) => (
@@ -401,11 +438,8 @@ export const AgentActionRow: React.FC<RowProps> = React.memo(({ action, onApprov
 
           {sourceRange && <span className="shrink-0 font-mono text-[12.5px] text-zinc-400 dark:text-zinc-500">{sourceRange}</span>}
           {/* Live values are disk-confirmed; settled values come from the final tool result. */}
-          {label.added !== undefined && !label.fileChanges && (
-            <span className="shrink-0 font-mono text-[12.5px] tabular-nums text-emerald-600 dark:text-emerald-400">+{label.added}</span>
-          )}
-          {label.removed !== undefined && label.removed > 0 && !label.fileChanges && (
-            <span className="shrink-0 font-mono text-[12.5px] tabular-nums text-rose-500 dark:text-rose-400">-{label.removed}</span>
+          {!label.fileChanges && (
+            <DiffCount added={label.added} removed={label.removed} className="shrink-0 text-[12.5px]" showZero animate={live} />
           )}
           {label.chips?.map((c) => (
             <span key={c} className="shrink-0 font-mono text-[12px] text-zinc-400 dark:text-zinc-500">
