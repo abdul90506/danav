@@ -274,6 +274,11 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   // A checklist is task state, not workspace state. Only the exact run being
   // continued may hand one forward; a different chat/task must never inherit it.
   const handoff = resume ? taskRuns[0] || null : null;
+  // What the chat has already read and already concluded is knowledge, and it
+  // stays true whether the user pressed Continue, typed a follow-up, or switched
+  // model mid-conversation. Only the checklist above is task state, so only that
+  // waits for an explicit resume.
+  const carryKnowledge = taskRuns.length > 0;
   // The newest run of a task is often the thinnest — a run that was stopped
   // seconds in, or a Continue that only re-read a file. Its own plan/findings
   // may be empty while the run before it holds everything that was learned, so
@@ -281,7 +286,7 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   // them, not merely the newest run.
   const newestWith = (pick) => taskRuns.map(pick).find((value) => value && value.length) || [];
   const handoffPlan = handoff ? newestWith((run) => run.plan) : [];
-  const handoffFindings = handoff
+  const handoffFindings = carryKnowledge
     ? [...new Map(taskRuns.flatMap((run) => run.findings).map((f) => [f.normalize('NFKC').toLowerCase(), f])).values()]
     : [];
   const handoffMemories = handoff
@@ -308,7 +313,7 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   // Every run of the task being continued is relevant by definition — the work
   // it did is the thing Continue has to not repeat. Ranking them against the
   // user's words would drop them, because "Continue." has no words to match.
-  if (handoff) for (const run of taskRuns.slice(0, maxEntries)) selected.set(run.id, run);
+  if (carryKnowledge) for (const run of taskRuns.slice(0, maxEntries)) selected.set(run.id, run);
   // Do not inject the newest workspace run into an unrelated task. If the user
   // supplied no searchable words, the latest entry is the only useful default.
   else if (!words.size) selected.set(runs[0].id, runs[0]);
@@ -343,10 +348,6 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
         ? '  Completed items are done; continue from the first open step rather than repeating work.'
         : '  Every step was marked done. Verify that before redoing any of it; the user may be asking for something beyond this list.');
     }
-    if (handoffFindings.length && used < cap) {
-      addLine('- Findings retained from this task (compact notes, not a substitute for checking mutable facts):');
-      for (const finding of handoffFindings) if (!addLine(`  - ${finding}`)) break;
-    }
     if (handoffMemories.length && used < cap) {
       addLine('- Concise task-step memories carried across this exact task (verify mutable facts against current files):');
       for (const memory of handoffMemories.slice(-4)) {
@@ -361,11 +362,6 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
         if (!addLine(`  - ${clipLine(parts.join(' · '), 900)}`)) break;
       }
     }
-    const exploredAll = [...new Set(taskRuns.flatMap((run) => run.explored))];
-    if (exploredAll.length && used < cap) {
-      addLine('- Already looked at on this task (do not re-read or re-search these unless the file changed since):');
-      for (const item of exploredAll.slice(-MAX_EXPLORED)) if (!addLine(`  - ${item}`)) break;
-    }
     if (handoff.toolErrors.length && used < cap) {
       addLine('- Earlier tool failures (do not repeat the same call unchanged; adapt to this result):');
       for (const failure of handoff.toolErrors) if (!addLine(`  ${failure.tool}: ${failure.message}`)) break;
@@ -373,6 +369,18 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
     if (handoff.interrupted.length && used < cap) {
       const files = handoff.interrupted.map((p) => `\`${p}\``).join(', ');
       addLine(`- A write to ${files} was rolled back; those files are unchanged by that interrupted write and must be re-written if still needed.`);
+    }
+  }
+
+  if (carryKnowledge) {
+    if (handoffFindings.length && used < cap) {
+      addLine('- Already established in this chat (compact notes, not a substitute for re-checking anything that can change):');
+      for (const finding of handoffFindings) if (!addLine(`  - ${finding}`)) break;
+    }
+    const exploredAll = [...new Set(taskRuns.flatMap((run) => run.explored))];
+    if (exploredAll.length && used < cap) {
+      addLine('- Already looked at in this chat (do not re-read or re-search these unless the file has changed since):');
+      for (const item of exploredAll.slice(-MAX_EXPLORED)) if (!addLine(`  - ${item}`)) break;
     }
   }
 

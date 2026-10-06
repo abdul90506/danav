@@ -2033,8 +2033,22 @@ test('a stopped run remembers what it explored, and a misspelt tool name still r
 
   // "Continue." has no words to match on, so this has to arrive without ranking.
   const carried = recentRunsForPrompt(workspaceId, 'Continue.', 8000, 6, { resume: true, taskKey });
-  assert.match(carried, /Already looked at on this task/, 'the continued run is told what was covered');
+  assert.match(carried, /Already looked at in this chat/, 'the continued run is told what was covered');
   assert.match(carried, /Read server\/agent\/loop\.js/, 'including the files');
   assert.match(carried, /Looked up symbol runAgent/, 'and the searches');
   assert.match(carried, /Trace the streaming path/, 'the open checklist comes too');
+
+  // The same chat on a plain follow-up — a new message, or the same work after
+  // switching model mid-conversation. What the chat has read is knowledge and
+  // stays true; re-reading it is the expensive outcome this exists to prevent.
+  const followUp = recentRunsForPrompt(workspaceId, 'now make the rows collapsible', 8000, 6, { resume: false, taskKey });
+  assert.match(followUp, /Already looked at in this chat/, 'a follow-up inherits the reading trail');
+  assert.match(followUp, /Read server\/agent\/loop\.js/, 'with the files named');
+  // ...but NOT the checklist. That is task state, and a new request is not the
+  // old task; inheriting it would have the agent resume work nobody asked for.
+  assert.ok(!/Trace the streaming path/.test(followUp), 'the checklist waits for an explicit continue');
+
+  // A different chat inherits none of it.
+  const elsewhere = recentRunsForPrompt(workspaceId, 'something else entirely', 8000, 6, { resume: false, taskKey: taskKeyFor('a-different-chat') });
+  assert.ok(!/Already looked at in this chat/.test(elsewhere), 'one chat never reads as another chat');
 });

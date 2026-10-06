@@ -735,7 +735,7 @@ export async function runAgent({
     redact,
     // End-to-end tests use deterministic scripted providers; taskMemory's focused
     // unit test exercises the background summarizer without consuming their scripts.
-    maxSummaries: process.env.DANAV_AGENT_TEST_SKIP_SUMMARIES === '1' ? 0 : undefined,
+    maxSummaries: process.env.DANAV_AGENT_TEST_SKIP_SUMMARIES === '1' ? 0 : undefined, // default is already 0; see taskMemory.js
     onUpdate: (text) => { if (messages) updateTaskMemoryMessage(messages, text); },
     onRetry: ({ attempt, maxRetries, delayMs, reason }) => {
       if (!runActive) return;
@@ -931,7 +931,11 @@ export async function runAgent({
       /* optional project skills must never prevent the agent from starting */
     }
 
-    const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, resume && priorTaskRun ? 8_000 : 2_500, 6, { resume, taskKey }));
+    // A chat that already has runs gets the bigger budget whether or not this turn
+  // is an explicit Continue: re-reading files the chat has read is the expensive
+  // outcome, not the few hundred characters that prevent it.
+  const knowsThisTask = Boolean(taskKey) && readRunJournal(workspace.id, 30).some((run) => run.taskKey === taskKey);
+  const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, knowsThisTask ? 8_000 : 2_500, 6, { resume, taskKey }));
     // Memory is looked up against the request AND the files this workspace was
     // last working on: "continue with the retry work" has to find the note about
     // the module that was just being changed, even though the words do not match.

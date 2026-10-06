@@ -81,6 +81,11 @@ test('automatic task-step memory is compact, redacted, model-summarized in the b
       redact: (text) => String(text).replaceAll('provider-secret-value', '[REDACTED]'),
       onUpdate: (text) => { liveMemory = text; },
       debounceMs: 60_000,
+      // Background summaries are off by default — they are extra provider
+      // requests on the same rate limit, and the local checkpoint plus the
+      // journal's exploration trail already carry the memory. This test is
+      // about the optional model pass, so it asks for it.
+      maxSummaries: 6,
       summarize: async (input) => {
         summaryInput = input;
         return {
@@ -163,6 +168,7 @@ test('automatic task-step memory is compact, redacted, model-summarized in the b
       const fallback = createTaskMemory({
         workspaceId: 'ws-task-memory', runId: 'run-memory-fallback', taskKey,
         provider: { id: 'unavailable' }, model: 'does-not-matter', debounceMs: 60_000,
+        maxSummaries: 6, // opt in: the model pass is off by default (extra provider requests)
         summarize: async () => { throw new Error('offline'); },
       });
       fallback.capture({
@@ -188,6 +194,7 @@ test('finishing a run cancels background summaries and keeps the final local che
       runId: 'run-memory-finish',
       taskKey: taskKeyFor('finish-before-summary'),
       debounceMs: 0,
+      maxSummaries: 6, // opt in: the model pass is off by default (extra provider requests)
       summarize: async ({ signal }) => {
         calls++;
         startedResolve();

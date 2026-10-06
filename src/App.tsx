@@ -1360,7 +1360,11 @@ export const App: React.FC = () => {
         thinkingLevel: activeConversation.thinkingLevel,
         messages: historyPayload,
         workspaceId: agentWorkspace.id,
-        taskId: assistantMessageId,
+        // Task memory is scoped to the CHAT, not to one assistant bubble. A new
+        // message — or the same message after switching model — used to mint a
+        // fresh id, which changed the journal key and hid everything the chat had
+        // already learned, so the agent re-explored from scratch every turn.
+        taskId: activeConversation.id,
         activity: collectActivity(existingMessages),
         signal: controller.signal,
         resume: isResume,

@@ -17,15 +17,19 @@ const DISCOVERY_TOOLS = new Set([
 ]);
 const MAX_BATCH_EVENTS = 5;
 /**
- * Background summaries are real provider requests, charged against the same
- * rate limit as the run itself — six of them could cost more calls than the
- * task. The local checkpoint is written first and already carries the files,
- * the steps and the plan, and the run journal now records the exploration
- * trail too, so the model pass is a quality improvement on memory that already
- * exists rather than the thing memory depends on. Two is enough to catch the
- * shape of a long task.
+ * Background summaries are real provider requests on the same rate limit as the
+ * run itself, and a four-round task was paying two of them — fifty per cent
+ * overhead for memory the run already has.
+ *
+ * It does have it. The local checkpoint is written first and carries the files,
+ * the steps and the plan; the journal records every changed file with its line
+ * counts, the checks, and now the full exploration trail; findings ride along
+ * with update_plan at no extra call. The model pass only rewords all of that
+ * more nicely, which is not worth a request.
+ *
+ * Off by default. DANAV_AGENT_MEMORY_SUMMARIES=<n> turns it back on.
  */
-const MAX_MODEL_SUMMARIES = 2;
+const MAX_MODEL_SUMMARIES = Math.max(0, Math.min(6, Number(process.env.DANAV_AGENT_MEMORY_SUMMARIES) || 0));
 const MAX_LIVE_MEMORIES = 6;
 const SUMMARY_TIMEOUT_MS = 120_000;
 
