@@ -3365,6 +3365,14 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
 
   return {
     definitions: TOOL_DEFINITIONS,
+    /**
+     * Tools that exist and still run when called, but are not advertised.
+     * The flight recorder writes these down: "why did it not use X" is often
+     * answered by X never having been on the menu.
+     */
+    hiddenDefinitions: ALL_TOOL_DEFINITIONS
+      .filter((d) => !TOOL_DEFINITIONS.some((shown) => shown.function.name === d.function.name))
+      .map((d) => d.function.name),
     parseArgs,
     recoverBody,
     has: (name) => Object.prototype.hasOwnProperty.call(impl, name),

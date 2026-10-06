@@ -262,7 +262,52 @@ const clipLine = (value, max = 180) => {
  * interrupted starts by re-checking the world; a model told what it already did
  * carries on from there.
  */
-export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, limit = 8, { resume = false, taskKey = '' } = {}) {
+/**
+ * The project memory, as prose for the system prompt.
+ *
+ * `live`, when given, is what the workspace listing just proved: `files` are
+ * the paths that exist, `dirs` are the folders the listing actually read.
+ * Memory outlives the files it talks about — a project whose files were
+ * deleted still had the agent being told, run after run, about
+ * `css/style.css` and `js/app.js` as though they were there, and it would go
+ * looking for them.
+ *
+ * Absence is only evidence where the listing looked. A listing two levels
+ * deep says nothing about `src/components/Foo.tsx`, so a file is called
+ * deleted only when its own folder was read and it was not in it. Getting
+ * this backwards would delete true memory, which is far worse than keeping
+ * stale memory.
+ */
+export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, limit = 8, { resume = false, taskKey = '', live = null } = {}) {
+  const liveFiles = live?.files instanceof Set ? live.files : null;
+  const liveDirs = live?.dirs instanceof Set ? live.dirs : null;
+  const gone = (file) => {
+    if (!liveFiles || !liveDirs) return false;
+    const path = String(file || '').replace(/^\.\//, '').replace(/\/$/, '');
+    if (!path || liveFiles.has(path)) return false;
+    // Walk down from the root. The first segment whose own folder WAS read and
+    // which is not in it proves the whole path is gone — a deleted `css/`
+    // folder is proof that `css/style.css` is gone, without ever having
+    // listed `css/` itself. Reaching a folder that was never read proves
+    // nothing, and the answer is no.
+    const parts = path.split('/').filter(Boolean);
+    let prefix = '';
+    for (let i = 0; i < parts.length; i++) {
+      const parent = i === 0 ? '.' : prefix;
+      prefix = i === 0 ? parts[0] : `${prefix}/${parts[i]}`;
+      if (!liveDirs.has(parent)) return false;
+      if (!liveFiles.has(prefix)) return true;
+    }
+    return false;
+  };
+  /** `a.js, b.js` with the deleted ones named as deleted, or '' if all are gone. */
+  const fileList = (files) => {
+    const kept = (files || []).filter((file) => !gone(file));
+    const lost = (files || []).filter((file) => gone(file));
+    if (!kept.length && !lost.length) return '';
+    if (!kept.length) return `${lost.slice(0, 3).join(', ')} (since deleted)`;
+    return `${kept.slice(0, 4).join(', ')}${lost.length ? ` (${lost.length} other file${lost.length === 1 ? '' : 's'} since deleted)` : ''}`;
+  };
   const requestedCap = Number(maxChars);
   const cap = Number.isFinite(requestedCap) ? Math.max(0, Math.min(20_000, Math.floor(requestedCap))) : 0;
   if (!cap) return '';
@@ -352,8 +397,14 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
       addLine('- Concise task-step memories carried across this exact task (verify mutable facts against current files):');
       for (const memory of handoffMemories.slice(-4)) {
         const parts = [];
+        // An entry whose every file is gone describes work that no longer
+        // exists; carrying it forward is worse than carrying nothing.
+        if (memory.files.length && memory.files.every(gone)) continue;
         if (memory.steps?.length) parts.push(`steps: ${memory.steps.slice(-5).map((step) => clipLine(step, 100)).join(' → ')}`);
-        else if (memory.files.length) parts.push(`files: ${memory.files.slice(0, 4).join(', ')}`);
+        else if (memory.files.length) {
+          const list = fileList(memory.files);
+          if (list) parts.push(`files: ${list}`);
+        }
         if (memory.summary) parts.push(`summary: ${clipLine(memory.summary, 100)}`);
         if (memory.facts.length) parts.push(`fact: ${clipLine(memory.facts[0], 100)}`);
         if (memory.decisions.length) parts.push(`decision: ${clipLine(memory.decisions[0], 90)}`);
@@ -377,7 +428,13 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
       addLine('- Already established in this chat (compact notes, not a substitute for re-checking anything that can change):');
       for (const finding of handoffFindings) if (!addLine(`  - ${finding}`)) break;
     }
-    const exploredAll = [...new Set(taskRuns.flatMap((run) => run.explored))];
+    // "Read css/style.css" is a lie once css/style.css has been deleted, and
+    // it is the kind of lie that sends the next run looking for it.
+    const exploredAll = [...new Set(taskRuns.flatMap((run) => run.explored))]
+      .filter((item) => {
+        const match = /^(?:Read|Outlined|Listed|Checked history of)\s+(\S+)/.exec(String(item || ''));
+        return !match || match[1] === '.' || !gone(match[1].replace(/\/$/, ''));
+      });
     if (exploredAll.length && used < cap) {
       addLine('- Already looked at in this chat (do not re-read or re-search these unless the file has changed since):');
       for (const item of exploredAll.slice(-MAX_EXPLORED)) if (!addLine(`  - ${item}`)) break;
@@ -389,7 +446,7 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   for (const run of entries) {
     if (used >= cap) break;
     const changed = run.changed.length
-      ? `changed ${run.changed.slice(0, 5).map((file) => `${file.path} (+${file.added} −${file.removed})`).join(', ')}${run.changed.length > 5 ? `, +${run.changed.length - 5} more files` : ''}`
+      ? `changed ${run.changed.slice(0, 5).map((file) => `${file.path}${gone(file.path) ? ' (since deleted)' : ` (+${file.added} −${file.removed})`}`).join(', ')}${run.changed.length > 5 ? `, +${run.changed.length - 5} more files` : ''}`
       : '';
     const checks = run.checks.length
       ? `checks: ${run.checks.slice(0, 4).map((check) => {

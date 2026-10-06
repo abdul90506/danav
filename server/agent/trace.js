@@ -21,10 +21,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { dataDir, ensureDataDir } from './config.js';
 
-/** One event's text payload is clipped here; a trace is evidence, not a mirror. */
-const MAX_TEXT = 20_000;
+/**
+ * One event's text payload is clipped here.
+ *
+ * This used to be 20k, which quietly turned the record into a sample: a long
+ * file written by the agent, a big command output or a long answer all came
+ * back ending in "…[more characters]", and the one thing the reader wanted was
+ * in the part that was dropped. The point of the recorder is that nothing has
+ * to be run again to find out what happened, so the bodies are kept whole up
+ * to a size where a single event would be unreadable anyway.
+ */
+const MAX_TEXT = 400_000;
+/** Strings nested inside arguments, messages and tool calls. */
+const MAX_NESTED_TEXT = 120_000;
 /** A whole run's file. Past this the run is still recorded, just without bodies. */
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_FILE_BYTES = 128 * 1024 * 1024;
 /** Runs kept per conversation. Old ones are pruned only when this is exceeded. */
 const MAX_RUNS_PER_CHAT = 200;
 
@@ -46,13 +57,13 @@ function clip(value, max = MAX_TEXT) {
 }
 
 /** Clip every string inside a structure, so one huge argument cannot bloat a trace. */
-function clipDeep(value, max = 4000, depth = 0) {
-  if (depth > 6) return '[too deep]';
+function clipDeep(value, max = MAX_NESTED_TEXT, depth = 0) {
+  if (depth > 8) return '[too deep]';
   if (typeof value === 'string') return clip(value, max);
-  if (Array.isArray(value)) return value.slice(0, 60).map((item) => clipDeep(item, max, depth + 1));
+  if (Array.isArray(value)) return value.slice(0, 400).map((item) => clipDeep(item, max, depth + 1));
   if (value && typeof value === 'object') {
     const out = {};
-    for (const [key, item] of Object.entries(value).slice(0, 60)) out[key] = clipDeep(item, max, depth + 1);
+    for (const [key, item] of Object.entries(value).slice(0, 200)) out[key] = clipDeep(item, max, depth + 1);
     return out;
   }
   return value;
@@ -120,8 +131,18 @@ export function startTrace({ runId, chatId, meta = {}, redact = (text) => text }
 
   return {
     file,
-    /** The complete system prompt, tool list and budgets this run was given. */
-    instructions({ systemPrompt, tools, limits, model, provider, thinkingLevel, history }) {
+    /**
+     * Everything the run was given before it said a word: the system prompt as
+     * sent, every tool definition in full (description and JSON schema, not
+     * just the name), the tools that exist but were deliberately not offered,
+     * the budgets, and the conversation it inherited.
+     *
+     * Names alone were not enough to answer the question this event exists
+     * for — "why did it not use X" is usually answered by the wording of X's
+     * description, or by X not being advertised at all.
+     */
+    instructions({ systemPrompt, tools, hiddenTools, limits, model, provider, thinkingLevel, history }) {
+      const defs = Array.isArray(tools) ? tools : [];
       write('instructions', {
         model,
         provider: safe(scrub(provider)),
@@ -129,8 +150,21 @@ export function startTrace({ runId, chatId, meta = {}, redact = (text) => text }
         limits: safe(limits),
         systemPrompt: clip(redact(String(systemPrompt || ''))),
         systemPromptChars: String(systemPrompt || '').length,
-        tools: Array.isArray(tools) ? tools.map((t) => t?.function?.name || t?.name).filter(Boolean) : [],
+        tools: defs.map((t) => t?.function?.name || t?.name).filter(Boolean),
+        toolDefinitions: safe(defs.map((t) => {
+          const fn = t?.function || t || {};
+          return {
+            name: fn.name || '',
+            description: String(fn.description || ''),
+            parameters: fn.parameters || null,
+          };
+        })),
+        hiddenTools: Array.isArray(hiddenTools) ? hiddenTools.slice(0, 200) : [],
         historyTurns: Array.isArray(history) ? history.length : 0,
+        history: safe(scrub((Array.isArray(history) ? history : []).map((m) => ({
+          role: m?.role || '',
+          content: typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content ?? ''),
+        })))),
       });
     },
     /** One request to the provider, as it was actually sent. */
@@ -144,12 +178,19 @@ export function startTrace({ runId, chatId, meta = {}, redact = (text) => text }
         added: safe(scrub(newMessages || [])),
       });
     },
-    /** What the model said, and what it asked to run. */
-    response({ round, model, text, toolCalls, usage, finishReason }) {
+    /**
+     * What the model said, what it thought, and what it asked to run.
+     *
+     * The thinking is the half of the answer the user never sees and the half
+     * that explains the other one — a tool call that looks arbitrary in the
+     * timeline usually has its reason written out here.
+     */
+    response({ round, model, text, thinking, toolCalls, usage, finishReason }) {
       write('response', {
         round,
         model,
         text: clip(redact(String(text || ''))),
+        thinking: clip(redact(String(thinking || ''))),
         toolCalls: safe(scrub(toolCalls || [])),
         usage: safe(usage),
         finishReason,
@@ -209,7 +250,7 @@ function pruneChat(chatId) {
     if (files.length <= MAX_RUNS_PER_CHAT) return;
     const withTime = files.map((name) => ({
       name,
-      at: fs.statSync(path.join(dir, name)).mtimeMs,
+      at: Number(readHeader(path.join(dir, name))?.at) || 0,
     })).sort((a, b) => a.at - b.at);
     for (const item of withTime.slice(0, files.length - MAX_RUNS_PER_CHAT)) {
       fs.rmSync(path.join(dir, item.name), { force: true });
@@ -230,21 +271,56 @@ export function listTracedChats() {
       .filter((entry) => entry.isDirectory())
       .map((entry) => {
         const dir = path.join(tracesRoot(), entry.name);
-        const runs = fs.readdirSync(dir).filter((name) => name.endsWith('.jsonl'));
-        let latest = 0;
+        const names = fs.readdirSync(dir).filter((name) => name.endsWith('.jsonl'));
         let bytes = 0;
-        for (const name of runs) {
-          const st = fs.statSync(path.join(dir, name));
-          latest = Math.max(latest, st.mtimeMs);
-          bytes += st.size;
-        }
-        return { chatId: entry.name, runs: runs.length, updatedAt: latest, bytes };
+        const heads = names.map((name) => {
+          const file = path.join(dir, name);
+          try { bytes += fs.statSync(file).size; } catch { /* counted as zero */ }
+          const header = readHeader(file);
+          return { name, at: Number(header?.at) || 0, request: String(header?.meta?.request || '') };
+        }).sort((a, b) => b.at - a.at);
+        return {
+          chatId: entry.name,
+          runs: names.length,
+          updatedAt: heads[0]?.at || 0,
+          bytes,
+          // The newest run's opening request is what a human recognises a chat
+          // by; an id tells them nothing.
+          label: heads[0]?.request.replace(/\s+/g, ' ').slice(0, 120) || '',
+        };
       })
       .sort((a, b) => b.updatedAt - a.updatedAt);
   } catch {
     return [];
   }
 }
+
+/**
+ * The first line of a trace, which is always run_start.
+ *
+ * File mtimes are not a reliable clock here: restoring a workspace, copying a
+ * data directory or unpacking a backup rewrites every mtime to the same
+ * instant, and the run list then comes back in arbitrary order with every chat
+ * claiming the same "last active" time. The recorded timestamp is the run's
+ * own, and it survives being moved around.
+ */
+const readHeader = (file) => {
+  try {
+    // Traces are appended to, so the header sits in the first bytes; reading
+    // the whole file to find out when a run started would be absurd.
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(4096);
+      const read = fs.readSync(fd, buf, 0, buf.length, 0);
+      const line = buf.subarray(0, read).toString('utf8').split('\n', 1)[0];
+      return JSON.parse(line || '{}');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+};
 
 const readEvents = (file) => {
   const out = [];
@@ -277,7 +353,9 @@ export function listRuns(chatId) {
           runId: name.replace(/\.jsonl$/, ''),
           startedAt: start?.at || st.mtimeMs,
           durationMs: end?.durationMs ?? null,
-          stopReason: end?.stopReason || (end ? 'completed' : 'incomplete'),
+          stopReason: end?.stopReason || (end ? 'completed' : 'running'),
+          /** No run_end yet: either it is happening right now, or it was killed. */
+          live: !end,
           request: start?.meta?.request || '',
           model: instructions?.model || models[0] || '',
           modelsUsed: models,
@@ -298,15 +376,32 @@ export function listRuns(chatId) {
   }
 }
 
-/** One run in full, exactly as it was recorded. */
-export function readRun(chatId, runId) {
+/**
+ * One run, exactly as it was recorded.
+ *
+ * `since` returns only the events after that sequence number, which is what
+ * makes following a live run cheap: the viewer holds what it already has and
+ * asks for the tail every second or two, instead of re-downloading a run that
+ * may be megabytes of tool output.
+ */
+export function readRun(chatId, runId, { since = -1 } = {}) {
   try {
     const file = path.join(
       tracesRoot(),
       chatFolder(chatId),
       `${String(runId).replace(/[^A-Za-z0-9._-]/g, '_')}.jsonl`
     );
-    return { runId, events: readEvents(file) };
+    const all = readEvents(file);
+    const events = Number.isFinite(since) && since >= 0
+      ? all.filter((event) => Number(event.seq) > since)
+      : all;
+    return {
+      runId,
+      events,
+      total: all.length,
+      /** A run with no run_end is either in flight or was killed mid-flight. */
+      live: !all.some((event) => event.type === 'run_end'),
+    };
   } catch {
     return null;
   }
@@ -318,7 +413,7 @@ export function readAllRuns(chatId, max = 40) {
     const dir = path.join(tracesRoot(), chatFolder(chatId));
     return fs.readdirSync(dir)
       .filter((name) => name.endsWith('.jsonl'))
-      .map((name) => ({ name, at: fs.statSync(path.join(dir, name)).mtimeMs }))
+      .map((name) => ({ name, at: Number(readHeader(path.join(dir, name))?.at) || 0 }))
       .sort((a, b) => b.at - a.at)
       .slice(0, max)
       .map(({ name }) => ({

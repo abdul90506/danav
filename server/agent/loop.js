@@ -729,7 +729,10 @@ export async function runAgent({
       provider: { id: provider?.id, name: provider?.name, baseUrl: provider?.baseUrl, keys: Array.isArray(provider?.apiKeys) ? provider.apiKeys.length : provider?.apiKey ? 1 : 0, quota: provider?.quota?.enabled === true },
       thinkingLevel,
       resume: Boolean(resume),
-      request: String(history?.at?.(-1)?.content ?? '').slice(0, 2000),
+      // The request in full. Clipping it to 2000 characters meant a long brief
+      // — exactly the kind of run worth reading back — was recorded as its
+      // opening paragraph and nothing else.
+      request: String(history?.at?.(-1)?.content ?? ''),
     },
   });
   const priorTaskRun = resume && taskKey
@@ -755,7 +758,11 @@ export async function runAgent({
     // End-to-end tests use deterministic scripted providers; taskMemory's focused
     // unit test exercises the background summarizer without consuming their scripts.
     maxSummaries: process.env.DANAV_AGENT_TEST_SKIP_SUMMARIES === '1' ? 0 : undefined, // default is already 0; see taskMemory.js
-    onUpdate: (text) => { if (messages) updateTaskMemoryMessage(messages, text); },
+    onUpdate: (text) => {
+      if (messages) updateTaskMemoryMessage(messages, text);
+      // What the agent will be told it has already done, as it is written.
+      trace.note('task_memory', { text: String(text || '') });
+    },
     onRetry: ({ attempt, maxRetries, delayMs, reason }) => {
       if (!runActive) return;
       const status = delayMs === 0
@@ -954,7 +961,24 @@ export async function runAgent({
   // is an explicit Continue: re-reading files the chat has read is the expensive
   // outcome, not the few hundred characters that prevent it.
   const knowsThisTask = Boolean(taskKey) && readRunJournal(workspace.id, 30).some((run) => run.taskKey === taskKey);
-  const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, knowsThisTask ? 8_000 : 2_500, 6, { resume, taskKey }));
+  // The listing taken a moment ago is the cheapest possible proof of what
+  // still exists. It is shallow, so it is handed over with the folders it
+  // actually read: the journal may only call a file deleted inside one of
+  // those. A truncated listing is not used as evidence at all.
+  const live = snapshotTruncated || !snapshotEntries.length ? null : (() => {
+    const files = new Set();
+    const dirs = new Set(['.']);
+    for (const entry of snapshotEntries) {
+      const path = String(entry.path || '').replace(/\/$/, '');
+      if (!path) continue;
+      files.add(path);
+      // A folder was read only if something inside it came back.
+      const slash = path.lastIndexOf('/');
+      if (slash > 0) dirs.add(path.slice(0, slash));
+    }
+    return { files, dirs };
+  })();
+  const recentRuns = redact(recentRunsForPrompt(workspace.id, currentRequest, knowsThisTask ? 8_000 : 2_500, 6, { resume, taskKey, live }));
     // Memory is looked up against the request AND the files this workspace was
     // last working on: "continue with the retry work" has to find the note about
     // the module that was just being changed, even though the words do not match.
@@ -997,9 +1021,22 @@ export async function runAgent({
       ...priorMessages,
     ];
 
+    // The two memory blocks go into the prompt, so they are already inside the
+    // recorded system prompt — but buried in eight thousand characters of it.
+    // Recording them separately is what makes "show me the summary the agent
+    // was given" a thing the UI can answer directly.
+    trace.note('memory_given', {
+      projectMemory: recentRuns || '',
+      workspaceNotes: memory || '',
+      skills: skills || '',
+      knowsThisTask,
+      resumed: Boolean(resume && priorTaskRun),
+    });
+
     trace.instructions({
       systemPrompt: baseSystemPrompt,
       tools: tools.definitions,
+      hiddenTools: tools.hiddenDefinitions,
       limits: {
         maxSteps,
         maxRunMs: limits.maxRunMs(),
@@ -1236,6 +1273,7 @@ export async function runAgent({
       let servedBy = model;
       for (;;) {
         let attemptText = '';
+        let attemptThinking = '';
         let toolCallStarted = false;
         publishedText = '';
         try {
@@ -1264,7 +1302,12 @@ export async function runAgent({
                 publishedText += t;
               }
             },
-            onThinking: (t) => send({ thinking: t }),
+            onThinking: (t) => {
+              // Also kept for the record: the reasoning is what explains a tool
+              // call that looks arbitrary when the trace is read back later.
+              attemptThinking += t;
+              send({ thinking: t });
+            },
             onToolDelta: (_i, slot) => {
               if (slot?.name && !toolCallStarted) {
                 toolCallStarted = true;
@@ -1295,6 +1338,7 @@ export async function runAgent({
               // The answer is being read again from the start: discard its buffered
               // text and settle any action rows from the abandoned attempt.
               attemptText = '';
+              attemptThinking = '';
               publishedText = '';
               toolCallStarted = false;
               for (const st of live.values()) {
@@ -1310,6 +1354,7 @@ export async function runAgent({
             round: stats.steps,
             model: servedBy,
             text: roundText,
+            thinking: typeof round.thinking === 'string' && round.thinking ? round.thinking : attemptThinking,
             toolCalls: (round.toolCalls || []).map((c) => ({ name: c.name, args: c.args })),
             usage: round.usage,
             finishReason: round.finishReason,

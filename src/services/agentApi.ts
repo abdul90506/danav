@@ -185,6 +185,17 @@ export interface TraceRunSummary {
   changed: Array<{ path: string; added?: number; removed?: number }>;
   bytes: number;
   events: number;
+  /** No run_end on disk: happening now, or killed before it could finish. */
+  live?: boolean;
+}
+
+/** A chat that has traces, as the inspector's chat picker lists it. */
+export interface TraceChatSummary {
+  chatId: string;
+  runs: number;
+  updatedAt: number;
+  bytes: number;
+  label: string;
 }
 
 /** One line of a trace. `type` says which shape the rest of it has. */
@@ -196,11 +207,23 @@ export interface TraceEvent {
   [key: string]: unknown;
 }
 
+export const listTraceChats = () => call<{ chats: TraceChatSummary[] }>('GET', '/traces');
+
 export const listTraceRuns = (chatId: string) =>
   call<{ runs: TraceRunSummary[] }>('GET', `/traces?chatId=${encodeURIComponent(chatId)}`);
 
-export const getTraceRun = (chatId: string, runId: string) =>
-  call<{ events: TraceEvent[] }>('GET', `/traces/${encodeURIComponent(chatId)}/${encodeURIComponent(runId)}`);
+/**
+ * One run's events. `since` asks for only what was written after that sequence
+ * number, which is how a run still in flight is followed without pulling its
+ * whole body down every poll.
+ */
+export const getTraceRun = (chatId: string, runId: string, since?: number) =>
+  call<{ events: TraceEvent[]; total: number; live: boolean }>(
+    'GET',
+    `/traces/${encodeURIComponent(chatId)}/${encodeURIComponent(runId)}${
+      typeof since === 'number' && since >= 0 ? `?since=${since}` : ''
+    }`
+  );
 
 /** One fault the recorder found, with the evidence that proves it. */
 export interface TraceFinding {
@@ -244,8 +267,42 @@ export interface MemoryRun {
   failures: number;
 }
 
-export const getMemory = (workspaceId: string) =>
-  call<{ notes: MemoryNote[]; runs?: MemoryRun[] }>('GET', `/workspaces/${encodeURIComponent(workspaceId)}/memory`);
+/**
+ * One task-step summary, as the agent wrote it during a run — the thing that
+ * is handed back to the model when the same task continues.
+ */
+export interface MemoryStep {
+  id: string;
+  at: number;
+  runId: string;
+  taskKey: string;
+  summary: string;
+  steps: string[];
+  facts: string[];
+  decisions: string[];
+  errors: string[];
+  next: string;
+  source: 'local' | 'model' | string;
+  /** Each file the entry mentions, and whether it still exists. */
+  files: Array<{ path: string; missing: boolean }>;
+}
+
+export const getMemory = (workspaceId: string, taskKey?: string) =>
+  call<{
+    notes: MemoryNote[];
+    runs?: MemoryRun[];
+    /** What this chat is told when it continues, verbatim. */
+    block?: string;
+    blockChars?: number;
+    /** What a brand new chat in this workspace is told, verbatim. */
+    projectBlock?: string;
+    steps?: MemoryStep[];
+  }>(
+    'GET',
+    `/workspaces/${encodeURIComponent(workspaceId)}/memory${
+      taskKey ? `?taskKey=${encodeURIComponent(taskKey)}` : ''
+    }`
+  );
 
 export const deleteMemoryNote = (workspaceId: string, noteId: string) =>
   call<{ notes: MemoryNote[] }>('DELETE', `/workspaces/${encodeURIComponent(workspaceId)}/memory/${encodeURIComponent(noteId)}`);

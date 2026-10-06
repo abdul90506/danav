@@ -25,7 +25,7 @@ import {
 import { resolveApproval } from './approvals.js';
 import { runAgent } from './loop.js';
 import { clearNotes, readNotes, removeNotes } from './memory.js';
-import { readRunJournal } from './journal.js';
+import { readRunJournal, recentRunsForPrompt, taskKeyFor } from './journal.js';
 import { noteRunFinished, touch } from './sandboxActivity.js';
 import {
   killSandboxById, listAccountSandboxes, pauseSandboxById, resumeSandboxById, workspaceSandboxStatus,
@@ -251,8 +251,16 @@ export function registerAgentRoutes(app, {
     return res.json({ success: true, findings: analyzeRun(run) });
   }));
 
+  /**
+   * One run. `?since=<seq>` returns only what has been written after that
+   * event, which is how the viewer follows a run that is still going without
+   * re-downloading megabytes of tool output every second.
+   */
   router.get('/traces/:chatId/:runId', wrap(async (req, res) => {
-    const found = readRun(req.params.chatId, req.params.runId);
+    const since = Number(req.query.since);
+    const found = readRun(req.params.chatId, req.params.runId, {
+      since: Number.isFinite(since) ? since : -1,
+    });
     if (!found) return res.status(404).json({ success: false, error: 'No trace for that run' });
     return res.json({ success: true, ...found });
   }));
@@ -262,9 +270,68 @@ export function registerAgentRoutes(app, {
   }));
 
   // ------------------------------------------------------------------ memory
+  /**
+   * Memory, as the model receives it.
+   *
+   * This used to return notes and a few run headlines, which is the bookkeeping
+   * — not the thing anyone wants to see. What the agent is actually told about
+   * this project is a block of prose built by recentRunsForPrompt, and the
+   * rolling task summaries written during a run; both were invisible. Now the
+   * exact text is returned, together with the step entries it is made of, and
+   * every file each entry mentions is checked against the workspace so a
+   * summary about files that have since been deleted says so.
+   */
   router.get('/workspaces/:id/memory', wrap(async (req, res) => {
-    await openWorkspace(req.params.id); // 404 for an unknown workspace
-    res.json({ success: true, notes: readNotes(req.params.id), runs: readRunJournal(req.params.id, 12) });
+    const ws = await openWorkspace(req.params.id); // 404 for an unknown workspace
+    const runs = readRunJournal(req.params.id, 12);
+    const query = String(req.query.q || '');
+    // The caller passes a conversation id; the journal files runs under the
+    // hashed task key derived from it. Passing the raw id matched nothing and
+    // the block came back as a single headline line.
+    const chatId = String(req.query.taskKey || '');
+    const taskKey = chatId ? taskKeyFor(chatId) : '';
+    const block = recentRunsForPrompt(req.params.id, query, 8_000, 6, {
+      resume: Boolean(taskKey),
+      taskKey,
+    });
+
+    // One existence check per distinct path, not per mention.
+    const paths = [...new Set(runs.flatMap((run) => (run.memories || []).flatMap((m) => m.files || [])))].slice(0, 120);
+    const missing = new Set();
+    await Promise.all(paths.map(async (rel) => {
+      try {
+        const stat = await ws.stat(ws.resolve(rel));
+        if (!stat || !stat.type) missing.add(rel);
+      } catch {
+        missing.add(rel);
+      }
+    }));
+
+    const steps = runs.flatMap((run) => (run.memories || []).map((entry) => ({
+      ...entry,
+      runId: run.id,
+      taskKey: run.taskKey || '',
+      runAt: run.at,
+      files: (entry.files || []).map((file) => ({ path: file, missing: missing.has(file) })),
+    }))).sort((a, b) => b.at - a.at);
+
+    // Two different texts, and conflating them is why this looked empty: a
+    // continued chat is handed its own task's history, while a brand new chat
+    // in the same workspace is handed only what the project as a whole has
+    // taught the agent. Both are real, and the reader wants to see both.
+    const projectBlock = recentRunsForPrompt(req.params.id, '', 8_000, 6, { resume: false, taskKey: '' });
+
+    res.json({
+      success: true,
+      notes: readNotes(req.params.id),
+      runs,
+      /** What THIS chat is told when it continues, verbatim. */
+      block,
+      blockChars: block.length,
+      /** What a NEW chat in this workspace is told, verbatim. */
+      projectBlock,
+      steps,
+    });
   }));
 
   router.delete('/workspaces/:id/memory/:noteId', wrap(async (req, res) => {

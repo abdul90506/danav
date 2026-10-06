@@ -664,7 +664,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 : 'border-transparent text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300'
             }`}
           >
-            Memory & Run Log
+            Memory &amp; Inspector
           </button>
           <button
             onClick={() => {
