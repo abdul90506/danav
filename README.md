@@ -290,6 +290,20 @@ the next run can see rather than a claim.
 
 On **Windows**, local commands run in PowerShell (set `DANAV_SHELL=cmd` for `cmd.exe`).
 
+#### Keyboard
+
+| Shortcut | Does |
+| --- | --- |
+| `Ctrl/⌘ K` | Command palette — every action, chat, model and workspace by name |
+| `Ctrl/⌘ N` | New chat |
+| `Ctrl/⌘ B` | Show/hide the sidebar |
+| `Esc` | Stop the run (when nothing is open to close first) |
+
+The palette is the fast path to everything, including the things that are not
+actions: switching chat, model, workspace or theme is ranked in the same list.
+Typing initials works the way you would expect — `nc` finds New chat, `ms` finds
+Manage sandboxes.
+
 `DANAV_AGENT_TOOLS_EXTRA` re-advertises a tool that is hidden by default
 (`image_search`, `forget`, `repo_status`) — by name, comma-separated, or `all`.
 They stay implemented either way; the default just keeps them out of the schema

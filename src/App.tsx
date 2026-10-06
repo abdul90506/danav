@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { PanelLeft, X } from 'lucide-react';
+import {
+  Bot, Cpu, FolderOpen, MessageSquare, MessageSquarePlus, Monitor, Moon, PanelLeft,
+  Server, Settings, SquareStack, StopCircle, Sun, Trash2, X,
+} from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { ChatArea } from './components/ChatArea';
 import { ChatInput } from './components/ChatInput';
@@ -12,6 +15,7 @@ import { WorkspaceDialog } from './components/WorkspaceDialog';
 import { WorkspacePanel } from './components/WorkspacePanel';
 import { PreviewPanel, clampPreviewWidth, defaultPreviewWidth } from './components/PreviewPanel';
 import { SandboxManagerDialog } from './components/SandboxManagerDialog';
+import { CommandPalette, type Command } from './components/CommandPalette';
 import {
   AgentAction,
   AgentConfig,
@@ -138,6 +142,7 @@ export const App: React.FC = () => {
 
   // Settings Modal state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isPaletteOpen, setIsPaletteOpen] = useState(false);
 
   // Temporary access gate for a public sandbox preview. The token is entered by
   // the user and kept only in this tab's sessionStorage; it is never bundled.
@@ -1923,6 +1928,141 @@ export const App: React.FC = () => {
     setActiveMoviePlayer({ isOpen: true, mediaId: id, mediaType: type, title: title || 'Now Playing' })
   );
 
+  // ---- Command palette -------------------------------------------------------
+
+  /** ⌘ on a Mac, Ctrl everywhere else — shown in the UI, not just bound. */
+  const modKey = useMemo(
+    () => (typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘' : 'Ctrl'),
+    []
+  );
+
+  const commands = useMemo<Command[]>(() => {
+    const list: Command[] = [];
+
+    list.push(
+      { id: 'new-chat', group: 'Actions', label: 'New chat', icon: MessageSquarePlus, shortcut: `${modKey}N`, run: handleNewChat },
+      {
+        id: 'toggle-sidebar', group: 'Actions', icon: PanelLeft, shortcut: `${modKey}B`,
+        label: isSidebarCollapsed ? 'Show sidebar' : 'Hide sidebar',
+        keywords: 'panel collapse expand',
+        run: () => setIsSidebarCollapsed((c) => !c),
+      },
+      { id: 'settings', group: 'Actions', label: 'Open settings', icon: Settings, keywords: 'providers api keys preferences', run: () => setIsSettingsOpen(true) },
+    );
+    if (activeConversation) {
+      list.push({
+        id: 'toggle-agent', group: 'Actions', icon: Bot,
+        label: activeConversation.agentMode ? 'Turn off agent mode' : 'Turn on agent mode',
+        keywords: 'tools workspace autonomous',
+        run: handleToggleAgent,
+      });
+    }
+    if (activeConversation?.agentMode) {
+      list.push(
+        { id: 'files', group: 'Actions', label: filesOpen ? 'Hide workspace files' : 'Show workspace files', icon: FolderOpen, keywords: 'tree browse', run: toggleFiles },
+        { id: 'new-workspace', group: 'Actions', label: 'New workspace', icon: SquareStack, keywords: 'sandbox folder project', run: () => setWorkspaceDialogOpen(true) },
+        { id: 'sandboxes', group: 'Actions', label: 'Manage sandboxes', icon: Server, keywords: 'novita cloud pause resume', run: () => setSandboxesOpen(true) },
+      );
+    }
+    if (isLoading) {
+      list.push({ id: 'stop', group: 'Actions', label: 'Stop generating', icon: StopCircle, shortcut: 'Esc', run: handleStop });
+    }
+    if (activeConversation && conversations.length > 1) {
+      list.push({
+        id: 'delete-chat', group: 'Actions', label: 'Delete this chat', icon: Trash2, keywords: 'remove close',
+        run: () => handleDeleteChat(activeConversation.id),
+      });
+    }
+
+    // Switching workspace is the same gesture as running a command, so it lives
+    // in the same list rather than behind a separate menu.
+    if (activeConversation?.agentMode && workspaces.length > 1) {
+      for (const ws of workspaces) {
+        list.push({
+          id: `ws-${ws.id}`, group: 'Workspaces', label: ws.name,
+          hint: ws.kind === 'sandbox' ? 'Cloud sandbox' : ws.root,
+          icon: ws.kind === 'sandbox' ? Server : FolderOpen,
+          active: activeConversation.agentWorkspaceId === ws.id,
+          run: () => patchActive({ agentWorkspaceId: ws.id }),
+        });
+      }
+    }
+
+    for (const provider of providers) {
+      for (const model of provider.models || []) {
+        list.push({
+          id: `model-${provider.id}-${model.id}`, group: 'Models',
+          label: model.name, hint: provider.name, icon: Cpu,
+          keywords: provider.name,
+          active: activeConversation?.selectedProviderId === provider.id && activeConversation?.selectedModelId === model.id,
+          run: () => handleSelectModel(provider.id, model.id),
+        });
+      }
+    }
+
+    // Pinned chats first, then most recently touched — the same order as the
+    // sidebar, so the palette does not disagree with what is on screen.
+    const recent = [...conversations]
+      .sort((a, b) => Number(!!b.isPinned) - Number(!!a.isPinned) || b.updatedAt - a.updatedAt)
+      .slice(0, 40);
+    for (const chat of recent) {
+      if (chat.id === activeChatId) continue;
+      list.push({
+        id: `chat-${chat.id}`, group: 'Chats',
+        label: chat.title || 'New chat',
+        hint: `${chat.messages.length} message${chat.messages.length === 1 ? '' : 's'}${chat.isPinned ? ' · pinned' : ''}`,
+        icon: MessageSquare,
+        run: () => handleSelectChat(chat.id),
+      });
+    }
+
+    const themes: Array<[Theme, string, typeof Sun]> = [['light', 'Light', Sun], ['dark', 'Dark', Moon], ['system', 'System', Monitor]];
+    for (const [value, name, icon] of themes) {
+      list.push({
+        id: `theme-${value}`, group: 'Theme', label: `${name} theme`, icon,
+        keywords: 'appearance colour color',
+        active: theme === value,
+        run: () => handleThemeChange(value),
+      });
+    }
+
+    return list;
+  }, [
+    modKey, activeConversation, activeChatId, conversations, providers, workspaces,
+    theme, isLoading, isSidebarCollapsed, filesOpen,
+  ]);
+
+  /**
+   * App-level shortcuts.
+   *
+   * A field owns its own keys, so none of these fire while the user is typing —
+   * except the palette itself, which is how you escape a field you are stuck in.
+   * Everything bound here is also a row in the palette: the shortcut is the fast
+   * path, never the only path.
+   */
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod || e.altKey) return;
+      const key = e.key.toLowerCase();
+
+      if (key === 'k') {
+        e.preventDefault();
+        setIsPaletteOpen((open) => !open);
+        return;
+      }
+
+      const target = e.target as HTMLElement | null;
+      const typing = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+      if (typing) return;
+
+      if (key === 'b') { e.preventDefault(); setIsSidebarCollapsed((c) => !c); }
+      else if (key === 'n' && !e.shiftKey) { e.preventDefault(); handleNewChat(); }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleNewChat]);
+
   return (
     <div className="app-viewport relative flex w-screen overflow-hidden bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 font-sans">
       {/* Sidebar */}
@@ -1937,6 +2077,8 @@ export const App: React.FC = () => {
         onOpenSettings={() => setIsSettingsOpen(true)}
         isCollapsed={isSidebarCollapsed}
         onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+        onOpenPalette={() => setIsPaletteOpen(true)}
+        modKey={modKey}
         isMobileOpen={isMobileSidebarOpen}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
       />
@@ -2081,6 +2223,8 @@ export const App: React.FC = () => {
       )}
 
       {/* Settings Modal */}
+      <CommandPalette isOpen={isPaletteOpen} onClose={() => setIsPaletteOpen(false)} commands={commands} />
+
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}

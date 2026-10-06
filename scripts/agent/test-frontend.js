@@ -1646,3 +1646,74 @@ test('the work row says what the run cost, and says nothing when the provider di
   assert.equal(fmt.usageDetail({ inputTokens: 48_000, outputTokens: 320, rounds: 6 }), '48,000 in · 320 out · 6 rounds');
   assert.equal(fmt.usageDetail(undefined), undefined);
 });
+
+test('the palette ranks what you meant, not merely what contains the letters', async () => {
+  const { fuzzyMatch, fuzzyRank } = await load('src/utils/fuzzyMatch.ts');
+
+  // An empty query keeps every command, in the order it was given.
+  const all = ['New chat', 'Hide sidebar', 'Open settings'];
+  assert.deepEqual(fuzzyRank('', all, (s) => s).map((r) => r.item), all);
+
+  // A query that is not a subsequence is simply not a match.
+  assert.equal(fuzzyMatch('zzz', 'New chat'), null);
+  assert.equal(fuzzyMatch('chatt', 'New chat'), null, 'a longer query than the text cannot match');
+
+  const top = (q, items) => fuzzyRank(q, items, (s) => s)[0]?.item;
+
+  // Initials are how people actually use a palette: both of these contain an
+  // n and a c, and only one of them is what "nc" means.
+  assert.equal(top('nc', ['Sandbox manager', 'New chat']), 'New chat');
+  assert.equal(top('sb', ['Stop generating', 'Show sidebar']), 'Show sidebar');
+
+  // A real substring beats a scattered subsequence...
+  assert.equal(top('set', ['Stop generating', 'Open settings']), 'Open settings');
+  // ...and starting with the query beats containing it.
+  assert.equal(top('new', ['Open new chat', 'New workspace']), 'New workspace');
+  // Between two equally good prefixes, the shorter label is the better guess.
+  assert.equal(top('new', ['New workspace from template', 'New chat']), 'New chat');
+
+  // Highlighting has to point at the characters that actually matched.
+  const hit = fuzzyMatch('nc', 'New chat');
+  assert.deepEqual(hit.matched, [0, 4], 'the N of New and the c of chat');
+  assert.deepEqual(fuzzyMatch('chat', 'New chat').matched, [4, 5, 6, 7]);
+
+  // Case never matters to matching, only to display.
+  assert.ok(fuzzyMatch('NEW', 'New chat'));
+  assert.ok(fuzzyMatch('new', 'NEW CHAT'));
+
+  // camelCase and separators count as word starts, which is what makes file
+  // paths and identifiers findable.
+  assert.deepEqual(fuzzyMatch('ab', 'alphaBeta').matched, [0, 5]);
+  assert.deepEqual(fuzzyMatch('sa', 'src/App.tsx').matched, [0, 4]);
+});
+
+test('the command palette shows, filters and runs what it is given', async () => {
+  const { CommandPalette } = await loadComponent('src/components/CommandPalette.tsx');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const React = (await import('react')).default;
+
+  let ran = '';
+  const commands = [
+    { id: 'a', group: 'Actions', label: 'New chat', shortcut: 'CtrlN', run: () => { ran = 'a'; } },
+    { id: 'b', group: 'Actions', label: 'Hide sidebar', run: () => { ran = 'b'; } },
+    { id: 'c', group: 'Chats', label: 'Refactor the parser', hint: '12 messages', run: () => { ran = 'c'; } },
+    { id: 'd', group: 'Theme', label: 'Dark theme', active: true, run: () => { ran = 'd'; } },
+  ];
+
+  // Closed is closed: no overlay, nothing focus-trapped behind the app.
+  assert.equal(renderToStaticMarkup(React.createElement(CommandPalette, { isOpen: false, onClose: () => {}, commands })), '');
+
+  const html = renderToStaticMarkup(React.createElement(CommandPalette, { isOpen: true, onClose: () => {}, commands }));
+  for (const label of ['New chat', 'Hide sidebar', 'Refactor the parser', 'Dark theme']) {
+    assert.ok(html.includes(label), `${label} should be listed`);
+  }
+  // Group headings, the hint line, the shortcut and the "current" marker.
+  for (const bit of ['Actions', 'Chats', 'Theme', '12 messages', 'CtrlN', 'current']) {
+    assert.ok(html.includes(bit), `the palette should render ${bit}`);
+  }
+  assert.ok(html.includes('4 results'), 'it says how many commands matched');
+  assert.ok(html.includes('role="dialog"') && html.includes('aria-modal="true"'), 'it is a real dialog for a screen reader');
+  assert.ok(html.includes('role="listbox"') && html.includes('role="option"'), 'and the list is navigable as one');
+  assert.ok(html.includes('aria-selected="true"'), 'the first row starts selected, so Enter always does something');
+  assert.equal(ran, '', 'rendering must not run a command');
+});

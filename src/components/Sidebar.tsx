@@ -2,6 +2,7 @@ import React, { useState, useMemo, useRef, useCallback } from 'react';
 import {
   SquarePen,
   Search,
+  Command,
   Settings as SettingsIcon,
   MessageSquare,
   MoreHorizontal,
@@ -25,6 +26,10 @@ interface SidebarProps {
   onDeleteChat: (id: string) => void;
   onTogglePinChat?: (id: string) => void;
   onOpenSettings: () => void;
+  /** Opens the command palette; the sidebar shows the shortcut so it is findable. */
+  onOpenPalette?: () => void;
+  /** ⌘ or Ctrl, decided once by the app rather than guessed per component. */
+  modKey?: string;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   isMobileOpen: boolean;
@@ -36,6 +41,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeChatId,
   onSelectChat,
   onNewChat,
+  onOpenPalette,
+  modKey = 'Ctrl',
   onRenameChat,
   onDeleteChat,
   onTogglePinChat,
@@ -377,7 +384,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <SquarePen className="w-4 h-4 text-zinc-500 dark:text-zinc-400 shrink-0 stroke-[1.75]" />
             <span>New chat</span>
+            <kbd className="ml-auto hidden lg:block font-sans text-[10px] font-normal tracking-normal text-zinc-400 dark:text-zinc-500">{modKey}N</kbd>
           </button>
+
+          {/* A shortcut nobody can find is a shortcut nobody has. */}
+          {onOpenPalette && (
+            <button
+              type="button"
+              onClick={() => {
+                closeSearch();
+                onOpenPalette();
+                if (isMobileOpen) onCloseMobile();
+              }}
+              title="Search commands, chats and models"
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 font-medium text-xs tracking-wide transition-all select-none cursor-pointer"
+            >
+              <Command className="w-4 h-4 text-zinc-500 dark:text-zinc-400 shrink-0 stroke-[1.75]" />
+              <span>Commands</span>
+              <kbd className="ml-auto hidden lg:block font-sans text-[10px] font-normal tracking-normal text-zinc-400 dark:text-zinc-500">{modKey}K</kbd>
+            </button>
+          )}
         </div>
 
         {/* Search input (when toggled open) */}
