@@ -70,7 +70,16 @@ function previewToken() {
 function previewTokenMatches(req) {
   const expected = Buffer.from(previewToken());
   if (!expected.length) return true;
-  const supplied = Buffer.from(String(req.headers['x-danav-preview-token'] || ''));
+  // The header is how every normal call proves itself. `navigator.sendBeacon`
+  // cannot set one, and the pagehide flush — the save that catches the last
+  // few hundred milliseconds before a reload — is a beacon. It was arriving
+  // unauthenticated and being rejected with a 401 that nothing could report,
+  // so on a preview with an access code a refresh could genuinely swallow the
+  // last message. A beacon may therefore present the same token in the query
+  // string instead; it is the identical secret, checked the identical way.
+  const fromHeader = String(req.headers['x-danav-preview-token'] || '');
+  const fromQuery = fromHeader ? '' : String(req.query?.token || '');
+  const supplied = Buffer.from(fromHeader || fromQuery);
   return expected.length === supplied.length && timingSafeEqual(expected, supplied);
 }
 

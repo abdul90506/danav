@@ -79,7 +79,7 @@ import { runAgentTurn } from './agent/runAgentTurn';
 import { collectActivity } from './agent/format';
 import { SmoothStreamer } from './utils/smoothStream';
 import { buildMessageContent } from './utils/messageContent';
-import { savePreviewAccessCode } from './services/previewAuth';
+import { previewAuthQuery, savePreviewAccessCode } from './services/previewAuth';
 
 /**
  * What a resumed turn says to the model: nothing but the fact that it should go on.
@@ -224,6 +224,9 @@ export const App: React.FC = () => {
   /** The server's copy of the chat store stopped accepting updates. */
   const [backendSaveFailed, setBackendSaveFailed] = useState(false);
 
+  /** How long to wait before trying a failed conversation save again. */
+  const SAVE_RETRY_MS = [800, 1600, 3000, 6000, 10000];
+
   // Has the server's copy of the conversations been READ yet?
   // Until it has, this tab's local state (which is just one empty chat in a fresh browser
   // profile) must never be pushed over it — that is how a slow first request used to wipe
@@ -329,18 +332,39 @@ export const App: React.FC = () => {
       const data = await fetchBackendConversations();
       if (cancelled) return;
       if (data) {
-        if (Array.isArray(data.conversations) && data.conversations.length > 0) {
-          setConversations(data.conversations);
-          saveStoredConversations(data.conversations);
+        const remote = Array.isArray(data.conversations) ? data.conversations : [];
+        const local = getStoredConversations();
+        if (remote.length > 0) {
+          /**
+           * Take the union, not the server's word for it.
+           *
+           * The server used to win outright, which quietly threw away any chat
+           * this browser held that the server did not: a save that failed
+           * while the backend was restarting, or a reload inside the save
+           * window, left the chat alive in localStorage and then a refresh
+           * replaced it with the server's older set. From the user's seat the
+           * conversation simply vanished on refresh.
+           *
+           * A chat that exists only here is real work. It is kept, and pushed
+           * back up so the server stops being the one that is behind. Empty
+           * placeholder chats are not worth reviving.
+           */
+          const remoteIds = new Set(remote.map((c) => c.id));
+          const onlyLocal = local.filter(
+            (c) => !remoteIds.has(c.id) && (c.messages?.length || 0) > 0
+          );
+          const merged = [...remote, ...onlyLocal].sort(
+            (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)
+          );
+          setConversations(merged);
+          saveStoredConversations(merged);
+          if (onlyLocal.length > 0) void saveBackendConversations(merged, getStoredActiveChatId());
           if (data.activeChatId) {
             setActiveChatId(data.activeChatId);
             saveStoredActiveChatId(data.activeChatId);
           }
-        } else {
-          const local = getStoredConversations();
-          if (local.length > 0) {
-            saveBackendConversations(local, getStoredActiveChatId());
-          }
+        } else if (local.length > 0) {
+          void saveBackendConversations(local, getStoredActiveChatId());
         }
         setBackendHydrated(true);
         setBackendSaveFailed(false);
@@ -450,11 +474,27 @@ export const App: React.FC = () => {
     // Not before the server's own copy has been read (see backendHydrated above).
     if (!backendHydrated) return;
     if (backendSaveTimerRef.current) clearTimeout(backendSaveTimerRef.current);
-    backendSaveTimerRef.current = setTimeout(() => {
-      void saveBackendConversations(conversations, activeChatId).then((result) => {
+    /**
+     * Keep trying until it lands.
+     *
+     * One attempt per state change was fine until the attempt failed — a
+     * backend that was restarting at that moment (which is most of why chats
+     * went missing) swallowed the save, and nothing ever sent it again. If the
+     * user then stopped typing, that was the last chance the chat had. Each
+     * retry re-reads the newest state rather than resending a stale snapshot.
+     */
+    const attemptSave = (attempt = 0) => {
+      void saveBackendConversations(
+        latestConversations.current,
+        latestActiveChatId.current
+      ).then((result) => {
         setBackendSaveFailed(!result.ok);
+        if (result.ok) return;
+        const wait = SAVE_RETRY_MS[Math.min(attempt, SAVE_RETRY_MS.length - 1)];
+        backendSaveTimerRef.current = setTimeout(() => attemptSave(attempt + 1), wait);
       });
-    }, 400);
+    };
+    backendSaveTimerRef.current = setTimeout(() => attemptSave(), 400);
     return () => {
       if (backendSaveTimerRef.current) clearTimeout(backendSaveTimerRef.current);
     };
@@ -481,15 +521,25 @@ export const App: React.FC = () => {
         const [light] = stripImagePayloads(sanitizeConversations([active]), new Set());
         const body = JSON.stringify({ conversation: light, activeChatId: id });
         navigator.sendBeacon?.(
-          '/api/conversations/one',
+          // A beacon cannot set headers, so a preview access code has to ride
+          // in the URL or the save is rejected on the way out.
+          `/api/conversations/one${previewAuthQuery()}`,
           new Blob([body], { type: 'application/json' })
         );
       } catch {
         /* An unload is no place to raise anything. */
       }
     };
+    // `pagehide` covers reload, back-navigation and close. `visibilitychange`
+    // catches the step before all of them — switching tabs or apps — so the
+    // work is already safe by the time the page actually goes away.
+    const onHide = () => { if (document.visibilityState === 'hidden') flush(); };
     window.addEventListener('pagehide', flush);
-    return () => window.removeEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onHide);
+    };
   }, [backendHydrated]);
 
   // Persist activeChatId
