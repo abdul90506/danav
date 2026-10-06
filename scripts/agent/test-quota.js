@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  DEFAULT_LIMITS, headroom, limitsFor, planAttempts, quotaDay,
-  recordBusy, recordRequest, recordSuccess, resetQuotaState, snapshot,
+  AUTO_MODEL_ID, DEFAULT_LIMITS, headroom, limitsFor, nextDayResetAt, planAttempts, quotaDay,
+  recordBusy, recordRequest, recordSuccess, resetQuotaState, routableModels, snapshot,
 } from '../../server/agent/quota.js';
 
 const { test } = globalThis.__agentTest;
@@ -115,6 +115,16 @@ test('a refusal parks that exact pair, and a 429 is believed about the whole min
   });
 });
 
+test('the reset is the provider\'s midnight, found rather than assumed', () => {
+  // March 8th 2026 is a DST change in Los Angeles: that day is 23 hours long,
+  // which fixed arithmetic gets wrong by an hour.
+  const dst = Date.parse('2026-03-08T12:00:00Z');
+  assert.equal(quotaDay(nextDayResetAt(dst)), '2026-03-09');
+  assert.equal(quotaDay(nextDayResetAt(dst) - 90_000), '2026-03-08', 'and not a minute earlier');
+  const plain = Date.parse('2026-10-06T12:00:00Z');
+  assert.equal(quotaDay(nextDayResetAt(plain)), '2026-10-07');
+});
+
 test('an exhausted day is finished, not merely delayed', async () => {
   await withDataDir(() => {
     const p = provider();
@@ -178,4 +188,73 @@ test('the provider form turns the budget on and off without a text editor', asyn
 
   const off = mergeSettingsPatch({ providers: [saved] }, { providers: [edit({ enabled: false, rpm: '7', rpd: '40' })] });
   assert.equal(off.providers[0].quota.enabled, false, 'unticking the box really turns it off');
+});
+
+test('auto is a request to choose, never a model a provider is asked for', async () => {
+  await withDataDir(() => {
+    const p = provider();
+    const at = Date.parse('2026-10-06T10:00:00Z');
+    const plan = planAttempts(p, AUTO_MODEL_ID, { credentialCount: 2, models: MODELS, at });
+    assert.ok(plan.length, 'it still plans');
+    assert.equal(plan.every((item) => item.model !== AUTO_MODEL_ID), true, 'no attempt is addressed to "auto"');
+    assert.equal(plan[0].model, 'g-3.5', 'with everything free it takes the first model listed');
+    assert.deepEqual(routableModels({ models: [{ id: AUTO_MODEL_ID }, { id: 'g-3.5' }] }), ['g-3.5']);
+
+    // Fill the first model on both keys: auto moves on without being told.
+    for (let i = 0; i < 10; i++) recordRequest(p.id, i % 2, 'g-3.5', at);
+    const [next] = planAttempts(p, AUTO_MODEL_ID, { credentialCount: 2, models: MODELS, at });
+    assert.equal(next.model, 'g-3.6');
+    assert.equal(next.available, true);
+  });
+});
+
+test('the browser is offered auto, and can never save it as a model', async () => {
+  const { mergeSettingsPatch, publicSettings } = await import('../../server/settings.js');
+  const base = {
+    providers: [{
+      id: 'provider-gemini', name: 'gemmni', baseUrl: 'https://example.test/v1', apiType: 'openai',
+      apiKeys: ['k1', 'k2'], quota: { enabled: true },
+      models: [{ id: 'g-3.5' }, { id: 'g-3.6' }],
+    }],
+  };
+  const [shown] = publicSettings(base).providers;
+  assert.equal(shown.models[0].id, AUTO_MODEL_ID, 'the router is offered first');
+  assert.match(shown.models[0].description, /2 models and 2 keys/);
+  assert.deepEqual(shown.models.slice(1).map((m) => m.id), ['g-3.5', 'g-3.6']);
+
+  // The browser hands back what it was shown; storing it would make "auto" a
+  // model the planner could address.
+  const saved = mergeSettingsPatch(base, { providers: [{ ...shown, models: shown.models }] });
+  assert.deepEqual(saved.providers[0].models.map((m) => m.id), ['g-3.5', 'g-3.6']);
+
+  // A provider that has not opted in is offered nothing extra.
+  const plain = publicSettings({ providers: [{ ...base.providers[0], quota: { enabled: false } }] });
+  assert.deepEqual(plain.providers[0].models.map((m) => m.id), ['g-3.5', 'g-3.6']);
+});
+
+test('the catalogue and the budget are read from disk, not from the request', async () => {
+  const { resolveConfiguredProvider } = await import('../../server/settings.js');
+  const settings = {
+    providers: [{
+      id: 'provider-gemini', baseUrl: 'https://example.test/v1', apiType: 'openai',
+      apiKeys: ['k1'], quota: { enabled: true, limits: { '*': { rpm: 5, rpd: 20 } } },
+      models: [{ id: 'g-3.5' }, { id: 'g-3.6' }],
+    }],
+  };
+  // Agent mode sends an id and an endpoint and nothing else. Without the stored
+  // catalogue the router has no model to fall back to and no limit to respect.
+  const resolved = resolveConfiguredProvider(
+    { id: 'provider-gemini', baseUrl: 'https://example.test/v1', apiType: 'openai' },
+    settings,
+  );
+  assert.deepEqual(resolved.models.map((m) => m.id), ['g-3.5', 'g-3.6']);
+  assert.equal(resolved.quota.enabled, true);
+  assert.equal(resolved.apiKeys.length, 1);
+
+  // A limit the caller invented is replaced by the saved one.
+  const lying = resolveConfiguredProvider(
+    { id: 'provider-gemini', baseUrl: 'https://example.test/v1', apiType: 'openai', quota: { enabled: true, limits: { '*': { rpm: 9999, rpd: 9999 } } } },
+    settings,
+  );
+  assert.deepEqual(lying.quota.limits['*'], { rpm: 5, rpd: 20 });
 });

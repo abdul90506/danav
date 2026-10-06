@@ -13,10 +13,20 @@ import {
   File,
   Folder,
   Loader2,
+  Shuffle,
 } from 'lucide-react';
 import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 import { Attachment, Provider, ThinkingLevel, Model } from '../types';
 import { applyMention, mentionQueryAt, rankMentions } from './MentionPicker';
+
+/**
+ * The picker entry that means "choose for me".
+ *
+ * The server offers it for any provider that budgets its requests. Selecting a
+ * named model selects one allowance; selecting this one hands the choice to
+ * the router, which knows which allowances still have room.
+ */
+const AUTO_MODEL_ID = 'auto';
 import {
   ATTACHMENT_BUDGET_BYTES,
   MAX_ATTACHMENT_BYTES,
@@ -284,6 +294,7 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
             const isSelected = selectedProviderId === provider.id && selectedModelId === model.id;
             const hasThinking = isThinkingCapable(model);
             const isFast = isFastModel(model.id);
+            const isAuto = model.id === AUTO_MODEL_ID;
             const cleanDisplayName = (model.name || model.id).replace(/^models\//, '');
 
             return (
@@ -313,17 +324,24 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                         Think
                       </span>
                     )}
-                    {isFast && (
+                    {isFast && !isAuto && (
                       <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[10px] bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-300 font-medium shrink-0">
                         <Zap className="w-2.5 h-2.5" />
                         Fast
+                      </span>
+                    )}
+                    {isAuto && (
+                      <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[10px] bg-sky-50 dark:bg-sky-950/60 text-sky-600 dark:text-sky-300 font-medium shrink-0">
+                        <Shuffle className="w-2.5 h-2.5" />
+                        No limits
                       </span>
                     )}
                   </div>
                   <div className="flex items-center gap-1 text-[10px] text-zinc-400">
                     <span className="truncate max-w-[90px]">{provider.name}</span>
                     <span>•</span>
-                    <span className="truncate">{model.id}</span>
+                    {/* The router has no model id worth showing; what it does is the useful part. */}
+                    <span className="truncate">{isAuto ? (model.description || 'picks a model with quota left') : model.id}</span>
                   </div>
                 </div>
 
@@ -771,10 +789,12 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     activeProvider?.models.find((m) => m.id === selectedModelId) ||
     activeProvider?.models[0];
 
-  const cleanModelName = (activeModel?.name || activeModel?.id || 'Select Model').replace(
-    /^models\//,
-    ''
-  );
+  // The router's full name explains itself in the menu and is far too long for
+  // the composer button, which has one line.
+  const cleanModelName =
+    activeModel?.id === AUTO_MODEL_ID
+      ? 'Auto'
+      : (activeModel?.name || activeModel?.id || 'Select Model').replace(/^models\//, '');
 
   const thinkingOptions: Array<{ level: ThinkingLevel; iconClass: string; desc: string }> = [
     { level: 'Auto', iconClass: 'text-zinc-400', desc: 'Use the model’s default effort' },

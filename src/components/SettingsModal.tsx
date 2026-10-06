@@ -266,9 +266,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setFormQuotaEnabled(p.quota?.enabled === true);
     setFormQuotaRpm(String(p.quota?.limits?.['*']?.rpm ?? 5));
     setFormQuotaRpd(String(p.quota?.limits?.['*']?.rpd ?? 20));
-    setFormModels(p.models || []);
-    setFetchedCandidateModels(p.models || []);
-    setSelectedCandidateModelIds(new Set((p.models || []).map((m) => m.id)));
+    // The router's entry is offered by the server for budgeted providers; it is
+    // not a model anyone configures, so the editor never shows or saves it.
+    const editable = (p.models || []).filter((m) => m.id !== 'auto');
+    setFormModels(editable);
+    setFetchedCandidateModels(editable);
+    setSelectedCandidateModelIds(new Set(editable.map((m) => m.id)));
     setIsModelPickerOpen(false);
     setModelFilterQuery('');
     setTestingStatus({ loading: false });

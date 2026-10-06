@@ -15,7 +15,7 @@
 import { createStreamSplitter } from '../streamSplitter.js';
 import { isCloudMetadataUrl } from '../publicFetch.js';
 import { isGoogleGenerativeLanguageUrl, modelForProvider, normalizeThinkingLevel, thinkingParams } from './thinking.js';
-import { planAttempts, recordBusy, recordRequest, recordSuccess } from './quota.js';
+import { isAutoModel, planAttempts, recordBusy, recordRequest, recordSuccess, routableModels } from './quota.js';
 
 export class LlmError extends Error {
   constructor(message, { status, code } = {}) {
@@ -141,22 +141,42 @@ export async function streamCompletion({
    * leaves the requested model once no key has room for it.
    */
   const quotaOn = provider?.quota?.enabled === true;
-  const fallbackModels = quotaOn ? (provider.models || []).map((m) => m?.id).filter(Boolean) : [];
-  let activeModel = model;
+  const providerModels = routableModels(provider);
+  const fallbackModels = quotaOn ? providerModels : [];
+  // `auto` is the user asking the planner to choose. There is nothing to send
+  // upstream under that name, so the first plan picks the real model, and the
+  // notice below is skipped because nothing was switched away from.
+  const autoRequested = isAutoModel(model);
+  let activeModel = autoRequested ? '' : model;
   const nextFromPlan = (at = Date.now()) => {
     if (!quotaOn) return null;
     const [best] = planAttempts(provider, model, { credentialCount: apiKeys.length || 1, models: fallbackModels, at });
     return best || null;
   };
 
-  let requestModel = modelForProvider(baseUrl, model);
-  const configuredThinking = thinkingParams({ model: requestModel, baseUrl, level: normalizedLevel });
-  const hasThinkingConfig = Object.keys(configuredThinking).length > 0;
-  // Gemini's OpenAI-compatible API streams text by default, but tool-call arguments
-  // stay whole unless this Google-specific opt-in is sent. Without it, the UI only
-  // learns a file's body after generation has finished.
-  let streamFunctionCallArguments =
-    isGoogleGenerativeLanguageUrl(baseUrl) && /gemini[-_]\d/i.test(requestModel) && Array.isArray(tools) && tools.length > 0;
+  // Thinking support and Gemini's streaming opt-in are properties of the MODEL,
+  // so both are recomputed whenever the planner moves to a different one. A
+  // level the provider has already rejected stays rejected.
+  let configuredThinking = {};
+  let hasThinkingConfig = false;
+  let streamFunctionCallArguments = false;
+  let thinkingRejected = false;
+  let requestModel = '';
+  const useModel = (next) => {
+    activeModel = next;
+    requestModel = modelForProvider(baseUrl, next);
+    configuredThinking = thinkingParams({ model: requestModel, baseUrl, level: normalizedLevel });
+    hasThinkingConfig = Object.keys(configuredThinking).length > 0;
+    // Gemini's OpenAI-compatible API streams text by default, but tool-call arguments
+    // stay whole unless this Google-specific opt-in is sent. Without it, the UI only
+    // learns a file's body after generation has finished.
+    streamFunctionCallArguments =
+      isGoogleGenerativeLanguageUrl(baseUrl) && /gemini[-_]\d/i.test(requestModel) && Array.isArray(tools) && tools.length > 0;
+  };
+  // Without budgeting there is no planner to choose, so `auto` means the first
+  // model the provider lists rather than a name no endpoint would recognise.
+  useModel(autoRequested ? (providerModels[0] || model) : model);
+  if (autoRequested && quotaOn && fallbackModels.length) activeModel = '';
   const tokenLimit = Number.isFinite(maxOutputTokens)
     ? Math.max(256, Math.min(maxTokens(), Math.floor(maxOutputTokens)))
     : maxTokens();
@@ -244,7 +264,7 @@ export async function streamCompletion({
   };
 
   // ---- open the stream (retrying provider-busy failures) --------------------
-  let withThinking = hasThinkingConfig;
+  let withThinking = hasThinkingConfig && !thinkingRejected;
   /** Open (or re-open) the provider stream. */
   const openUpstream = async () => {
     const rejectedCredentials = new Set();
@@ -274,18 +294,22 @@ export async function streamCompletion({
       if (planned) {
         credentialIndex = planned.credentialIndex;
         if (planned.model !== activeModel) {
-          onRetry?.({
-            attempt: retriesUsed,
-            maxRetries: MAX_PROVIDER_RETRIES,
-            delayMs: 0,
-            reason: `${activeModel} is out of quota; switching to ${planned.model}`,
-            credentialIndex: planned.credentialIndex + 1,
-            credentialCount: apiKeys.length,
-            model: planned.model,
-          });
-          activeModel = planned.model;
+          // Nothing to announce on the first pick of an `auto` request: no
+          // model was chosen, so none was given up.
+          if (activeModel) {
+            onRetry?.({
+              attempt: retriesUsed,
+              maxRetries: MAX_PROVIDER_RETRIES,
+              delayMs: 0,
+              reason: `${activeModel} is out of quota; switching to ${planned.model}`,
+              credentialIndex: planned.credentialIndex + 1,
+              credentialCount: apiKeys.length,
+              model: planned.model,
+            });
+          }
+          useModel(planned.model);
+          withThinking = hasThinkingConfig && !thinkingRejected;
         }
-        requestModel = modelForProvider(baseUrl, activeModel);
       }
       requestCredentialIndex = credentialIndex;
       const credential = apiKeys.length ? apiKeys[requestCredentialIndex] : '';
@@ -334,6 +358,7 @@ export async function streamCompletion({
         }
         // Auto has no requested effort to preserve. Retry without optional thought
         // summaries if a compatible endpoint rejects that display-only parameter.
+        thinkingRejected = true;
         withThinking = false;
         continue;
       }

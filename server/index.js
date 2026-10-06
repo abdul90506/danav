@@ -13,7 +13,15 @@ import { assertPublicResultUrl, fetchPublicUrl, isCloudMetadataUrl, UrlRefusedEr
 import { registerAgentRoutes, _activeRuns } from './agent/routes.js';
 import { startIdlePauseSweeper } from './agent/idlePause.js';
 import { normalizeAgentBlockForDisk } from './agent/persist.js';
-import { snapshot as quotaSnapshot } from './agent/quota.js';
+import {
+  isAutoModel,
+  planAttempts,
+  recordBusy,
+  recordRequest,
+  recordSuccess,
+  routableModels,
+  snapshot as quotaSnapshot,
+} from './agent/quota.js';
 import { modelForProvider, normalizeThinkingLevel, thinkingParams } from './agent/thinking.js';
 import { mergeSettingsPatch, providerApiKeys, publicSettings, resolveAgentSummaryModel, resolveConfiguredProvider } from './settings.js';
 import {
@@ -1748,6 +1756,25 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   signal?.addEventListener('abort', onAbort, { once: true });
 });
 
+/** Never sleep longer than one sliding window waiting for a per-minute slot. */
+const MINUTE_WAIT_CAP_MS = 62_000;
+
+/**
+ * Only what the provider actually asked for, in milliseconds.
+ *
+ * `retryWaitMs` blends the hint with Danav's own backoff, which is right for
+ * sleeping and wrong for the ledger: a cooldown must come from the provider or
+ * from the module's defaults, never from a backoff curve.
+ */
+function retryAfterHeaderMs(response) {
+  const header = response?.headers?.get?.('retry-after');
+  if (!header) return 0;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const when = Date.parse(header);
+  return Number.isNaN(when) ? 0 : Math.max(when - Date.now(), 0);
+}
+
 function retryWaitMs(response, retryNumber) {
   const header = response?.headers?.get?.('retry-after');
   let retryAfter = 0;
@@ -1773,11 +1800,16 @@ function isRetryableProviderMessage(value) {
   return /rate[ _-]?limit|too many requests|overload(?:ed)?|server busy|provider busy|temporar(?:y|ily) unavailable|resource exhausted|capacity|try again later|timed? out/i.test(String(value || ''));
 }
 
-async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provider } = {}) {
+async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provider, model = '' } = {}) {
   const pool = createProviderKeyPool(provider);
   let keyIndex = pool.keys.length ? pool.cursor : 0;
   let retriesUsed = 0;
   const rejectedKeys = new Set();
+  // Budgeted providers choose the key AND the model before each attempt, from
+  // what still has room, rather than learning the hard way from a 429.
+  const quotaOn = provider?.quota?.enabled === true;
+  const routable = quotaOn ? routableModels(provider) : [];
+  let activeModel = isAutoModel(model) ? '' : model;
   const rotateKey = () => {
     if (!pool.keys.length) return;
     keyIndex = (keyIndex + 1) % pool.keys.length;
@@ -1796,10 +1828,36 @@ async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provi
 
   for (;;) {
     if (isCancelled?.() || signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+    if (quotaOn && routable.length) {
+      let planned = planAttempts(provider, model, { credentialCount: pool.keys.length || 1, models: routable })[0];
+      if (planned && !planned.available && Number.isFinite(planned.readyAt)) {
+        // A sliding minute window empties on its own: waiting the few seconds
+        // beats spending a request to be told "429" and then waiting anyway.
+        const waitMs = Math.min(MINUTE_WAIT_CAP_MS, Math.max(0, planned.readyAt - Date.now()));
+        if (waitMs > 0) {
+          await reportRetry({ delayMs: waitMs, reason: `every key is at its per-minute limit; a slot frees in ${Math.ceil(waitMs / 1000)}s` });
+          await sleep(waitMs, signal);
+          planned = planAttempts(provider, model, { credentialCount: pool.keys.length || 1, models: routable })[0] || planned;
+        }
+      }
+      if (planned) {
+        keyIndex = planned.credentialIndex;
+        if (planned.model !== activeModel) {
+          // The first pick of an `auto` request gave nothing up, so it is not
+          // a fallback and there is nothing to report.
+          if (activeModel) {
+            await reportRetry({ delayMs: 0, reason: `${activeModel} is out of quota; switching to ${planned.model}` });
+          }
+          activeModel = planned.model;
+        }
+      }
+    }
     const apiKey = pool.keys.length ? pool.keys[keyIndex] : '';
+    const sendModel = quotaOn && activeModel && activeModel !== model ? activeModel : '';
+    if (quotaOn && activeModel) recordRequest(provider.id, keyIndex, activeModel);
     let response;
     try {
-      response = await call(apiKey, keyIndex);
+      response = await call(apiKey, keyIndex, sendModel);
     } catch (err) {
       if (err?.name === 'AbortError' || isCancelled?.()) throw err;
       if (retriesUsed >= UPSTREAM_RETRIES) {
@@ -1815,6 +1873,7 @@ async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provi
     }
 
     if (response.ok) {
+      if (quotaOn && activeModel) recordSuccess(provider.id, keyIndex, activeModel);
       if (pool.keys.length) rememberProviderKeyCursor(pool, (keyIndex + 1) % pool.keys.length);
       return response;
     }
@@ -1844,6 +1903,14 @@ async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provi
       return response;
     }
 
+    if (quotaOn && activeModel) {
+      // Park this exact pair, so the next plan cannot hand back the one that
+      // has just refused.
+      recordBusy(provider.id, keyIndex, activeModel, {
+        status: response.status,
+        retryAfterMs: retryAfterHeaderMs(response),
+      });
+    }
     retriesUsed += 1;
     const delayMs = retryWaitMs(response, retriesUsed);
     const reason = response.status === 429
@@ -1973,13 +2040,23 @@ app.post('/api/chat', async (req, res) => {
   // Keep the request shape identical in chat and Agent mode. Gemini's Auto
   // effort leaves the model default alone while requesting thought summaries.
   const selectedThinkingLevel = normalizeThinkingLevel(thinkingLevel);
-  const requestModel = modelForProvider(baseUrl, model);
+  // `auto` names the router, not an endpoint. Until the planner has chosen, the
+  // provider's first model stands in, so thinking support is decided against a
+  // real model rather than against a word no provider knows.
+  const resolvedModel = isAutoModel(model) ? (routableModels(provider)[0] || model) : model;
+  const requestModel = modelForProvider(baseUrl, resolvedModel);
   const configuredThinking = thinkingParams({ model: requestModel, baseUrl, level: selectedThinkingLevel });
   const hasThinkingConfig = Object.keys(configuredThinking).length > 0;
 
-  const buildRequestBody = (withTools, withThinking) => {
+  const buildRequestBody = (withTools, withThinking, modelOverride = '') => {
+    // The planner may have moved this attempt to another model, which carries
+    // its own thinking parameters.
+    const sendModel = modelOverride ? modelForProvider(baseUrl, modelOverride) : requestModel;
+    const thinking = modelOverride
+      ? thinkingParams({ model: sendModel, baseUrl, level: selectedThinkingLevel })
+      : configuredThinking;
     const body = {
-      model: requestModel,
+      model: sendModel,
       messages: conversation,
       stream: true,
       max_tokens: CHAT_MAX_TOKENS,
@@ -1988,7 +2065,7 @@ app.post('/api/chat', async (req, res) => {
       body.tools = CHAT_TOOLS;
       body.tool_choice = 'auto';
     }
-    if (withThinking) Object.assign(body, configuredThinking);
+    if (withThinking) Object.assign(body, thinking);
     return body;
   };
 
@@ -2020,8 +2097,8 @@ app.post('/api/chat', async (req, res) => {
     // retried before this turn got its answer.
     let upstreamRetries = 0;
 
-    const callProvider = (withTools, withThinking, messageList, apiKey = '') => {
-      const body = buildRequestBody(withTools, withThinking);
+    const callProvider = (withTools, withThinking, messageList, apiKey = '', modelOverride = '') => {
+      const body = buildRequestBody(withTools, withThinking, modelOverride);
       if (messageList) body.messages = messageList;
       return fetch(endpoint, {
         method: 'POST',
@@ -2273,8 +2350,9 @@ app.post('/api/chat', async (req, res) => {
       for (let i = 0; i < ladder.length; i++) {
         const step = ladder[i];
         failedStep = step;
-        upstreamResponse = await callProviderWithRetry((apiKey) => callProvider(step.tools, step.thinking, undefined, apiKey), {
+        upstreamResponse = await callProviderWithRetry((apiKey, _keyIndex, chosenModel) => callProvider(step.tools, step.thinking, undefined, apiKey, chosenModel), {
           provider,
+          model,
           signal: controller.signal,
           isCancelled: () => controller.signal.aborted,
           onRetry: (info) => {
@@ -2405,8 +2483,9 @@ app.post('/api/chat', async (req, res) => {
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (round > 0) {
-        upstream = await callProviderWithRetry((apiKey) => callProvider(toolsActive, thinkingActive, undefined, apiKey), {
+        upstream = await callProviderWithRetry((apiKey, _keyIndex, chosenModel) => callProvider(toolsActive, thinkingActive, undefined, apiKey, chosenModel), {
           provider,
+          model,
           signal: controller.signal,
           isCancelled: () => controller.signal.aborted,
           onRetry: (info) => {
@@ -2488,8 +2567,9 @@ app.post('/api/chat', async (req, res) => {
         });
       }
 
-      const finalRes = await callProviderWithRetry((apiKey) => callProvider(false, thinkingActive, flat, apiKey), {
+      const finalRes = await callProviderWithRetry((apiKey, _keyIndex, chosenModel) => callProvider(false, thinkingActive, flat, apiKey, chosenModel), {
         provider,
+        model,
         signal: controller.signal,
         isCancelled: () => controller.signal.aborted,
         onRetry: (info) => {

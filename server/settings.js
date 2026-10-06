@@ -1,4 +1,5 @@
 /** Pure helpers for keeping provider credentials on the backend settings store. */
+import { AUTO_MODEL_ID, autoModelEntry, isAutoModel } from './agent/quota.js';
 
 const isObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 const normalizeUrl = (value) => String(value || '').trim().replace(/\/+$/, '');
@@ -104,8 +105,10 @@ export function mergeSettingsPatch(current, patch) {
       for (const key of ['id', 'name', 'baseUrl', 'apiType']) {
         next[key] = typeof next[key] === 'string' ? next[key] : String(next[key] ?? '');
       }
+      // The router's own entry is offered by the server, never stored: saving it
+      // would make it a model the planner could try to send a request to.
       next.models = (Array.isArray(next.models) ? next.models : [])
-        .filter((model) => isObject(model) && String(model.id || '').trim())
+        .filter((model) => isObject(model) && String(model.id || '').trim() && !isAutoModel(model.id))
         .map((model) => ({
           ...model,
           id: String(model.id),
@@ -150,6 +153,39 @@ function normalizeQuota(raw) {
   return { enabled: raw.enabled === true, ...(Object.keys(limits).length ? { limits } : {}) };
 }
 
+/**
+ * A provider's models as the browser should see them.
+ *
+ * A provider that budgets its requests also offers the router itself, first in
+ * the list, so the picker has something to select that is not one single
+ * budget. It is synthesised on every read rather than stored, so it can never
+ * drift from the models actually configured.
+ */
+function withAutoModel(provider) {
+  const models = (Array.isArray(provider.models) ? provider.models : [])
+    .filter(isObject)
+    .filter((model) => !isAutoModel(model.id))
+    .map((model) => ({
+      id: String(model.id || ''),
+      name: String(model.name || model.id || ''),
+      providerId: String(model.providerId || provider.id || ''),
+      ...(typeof model.supportsThinking === 'boolean' ? { supportsThinking: model.supportsThinking } : {}),
+      ...(typeof model.description === 'string' ? { description: model.description } : {}),
+    }));
+  if (!isObject(provider.quota) || provider.quota.enabled !== true || !models.length) return models;
+  const auto = autoModelEntry({ ...provider, models, apiKeyCount: providerApiKeys(provider).length });
+  return [
+    {
+      id: AUTO_MODEL_ID,
+      name: auto.name,
+      providerId: String(provider.id || ''),
+      ...(auto.supportsThinking === true ? { supportsThinking: true } : {}),
+      description: auto.description,
+    },
+    ...models,
+  ];
+}
+
 /** The only settings shape safe to return to the browser. */
 export function publicSettings(settings) {
   const value = isObject(settings) ? settings : {};
@@ -164,13 +200,7 @@ export function publicSettings(settings) {
         apiKeyConfigured: providerApiKeys(provider).length > 0,
         apiKeyCount: providerApiKeys(provider).length,
         ...(isObject(provider.quota) ? { quota: normalizeQuota(provider.quota) } : {}),
-        models: Array.isArray(provider.models) ? provider.models.filter(isObject).map((model) => ({
-          id: String(model.id || ''),
-          name: String(model.name || model.id || ''),
-          providerId: String(model.providerId || provider.id || ''),
-          ...(typeof model.supportsThinking === 'boolean' ? { supportsThinking: model.supportsThinking } : {}),
-          ...(typeof model.description === 'string' ? { description: model.description } : {}),
-        })) : [],
+        models: withAutoModel(provider),
       }))
     : [];
 
@@ -221,5 +251,11 @@ export function resolveConfiguredProvider(provider, settings) {
     apiType: stored.apiType || provider.apiType,
     apiKeys: storedKeys,
     apiKey: storedKeys[0] || '',
+    // The catalogue and the request budget come from disk, never from the
+    // browser. Agent mode sends only an id and an endpoint, so without this the
+    // router has no models to fall back to and no limits to respect; and a
+    // client could otherwise claim a limit the provider does not grant.
+    ...(Array.isArray(stored.models) && stored.models.length ? { models: stored.models } : {}),
+    ...(isObject(stored.quota) ? { quota: stored.quota } : {}),
   };
 }

@@ -30,6 +30,41 @@ import { dataDir } from './config.js';
 /** Google's documented free-tier shape for the Flash models, per key, per model. */
 export const DEFAULT_LIMITS = { rpm: 5, rpd: 20 };
 
+/**
+ * The model id that means "you choose".
+ *
+ * Picking a specific model is picking a specific budget, and the user cannot
+ * know which of the four has room at the moment they press send. This id is
+ * offered in the model picker and resolved here, per request, to whichever
+ * real model still has quota. It is never sent to the provider.
+ */
+export const AUTO_MODEL_ID = 'auto';
+
+export const isAutoModel = (model) => String(model || '').trim().toLowerCase() === AUTO_MODEL_ID;
+
+/** The models a request can really be sent to, in the order the user listed them. */
+export function routableModels(provider) {
+  return (provider?.models || [])
+    .map((model) => (typeof model === 'string' ? model : model?.id))
+    .filter((id) => id && !isAutoModel(id));
+}
+
+/** The picker entry for the router itself, built from whatever the provider holds. */
+export function autoModelEntry(provider) {
+  const models = routableModels(provider);
+  const keys = Math.max(1, Number(provider?.apiKeyCount) || (provider?.apiKeys?.length ?? 0) || 1);
+  const perDay = models.reduce((total, model) => total + limitsFor(provider, model).rpd * keys, 0);
+  return {
+    id: AUTO_MODEL_ID,
+    providerId: provider?.id,
+    name: 'Auto — whichever model has quota',
+    description: models.length
+      ? `Routes each request across ${models.length} models and ${keys} ${keys === 1 ? 'key' : 'keys'}: about ${perDay} requests a day. Skips anything already at its limit.`
+      : 'Routes each request to whichever model and key still has quota.',
+    supportsThinking: (provider?.models || []).some((model) => model?.supportsThinking === true) || undefined,
+  };
+}
+
 /** How long a pair is left alone after the provider says it is busy. */
 const BUSY_MS = 20_000;
 /** A 429 with no Retry-After means the minute window is the thing that is full. */
@@ -60,6 +95,31 @@ export function quotaDay(at = Date.now()) {
   } catch {
     return new Date(at).toISOString().slice(0, 10);
   }
+}
+
+/**
+ * When today's count goes back to zero, as a timestamp.
+ *
+ * Pacific midnight is not a fixed offset from UTC, so the boundary is found by
+ * stepping forward until the day string changes and then narrowing to the
+ * minute. That is correct on the two DST days a year, which arithmetic is not.
+ */
+export function nextDayResetAt(at = Date.now()) {
+  const today = quotaDay(at);
+  const STEP = 30 * 60_000;
+  for (let i = 1; i <= 100; i++) {
+    const probe = at + i * STEP;
+    if (quotaDay(probe) === today) continue;
+    let before = probe - STEP;
+    let after = probe;
+    while (after - before > 60_000) {
+      const mid = Math.floor((before + after) / 2);
+      if (quotaDay(mid) === today) before = mid;
+      else after = mid;
+    }
+    return after;
+  }
+  return at + 24 * 60 * 60_000;
 }
 
 const keyOf = (providerId, credentialIndex, model) =>
@@ -190,7 +250,14 @@ export function headroom(provider, credentialIndex, model, at = Date.now()) {
  */
 export function planAttempts(provider, model, { credentialCount = 1, models = [], at = Date.now() } = {}) {
   const keys = Math.max(1, Number(credentialCount) || 1);
-  const chain = [model, ...models.filter((m) => m && m !== model)];
+  // `auto` is a request to choose, not something a provider can answer, so it
+  // never enters the chain — it simply leaves the first real model preferred.
+  const chain = [];
+  for (const candidate of [model, ...models]) {
+    if (!candidate || isAutoModel(candidate) || chain.includes(candidate)) continue;
+    chain.push(candidate);
+  }
+  if (!chain.length) return [];
   const candidates = [];
   for (let m = 0; m < chain.length; m++) {
     for (let k = 0; k < keys; k++) {
@@ -262,11 +329,21 @@ export function snapshot(providers = [], at = Date.now()) {
   for (const provider of providers) {
     if (!provider?.quota?.enabled) continue;
     const credentialCount = Math.max(1, Number(provider.apiKeyCount) || (provider.apiKeys?.length ?? 0) || 1);
-    const models = (provider.models || []).map((m) => m.id);
+    const models = routableModels(provider);
     const perModel = models.map((model) => {
       const { rpm, rpd } = limitsFor(provider, model);
       const keys = [];
-      for (let k = 0; k < credentialCount; k++) keys.push({ credentialIndex: k, ...headroom(provider, k, model, at) });
+      for (let k = 0; k < credentialCount; k++) {
+        const room = headroom(provider, k, model, at);
+        keys.push({
+          credentialIndex: k,
+          ...room,
+          // JSON has no Infinity: a day-exhausted pair reports null, meaning
+          // "not until the daily reset", which is a different wait entirely.
+          readyAt: Number.isFinite(room.readyAt) ? room.readyAt : null,
+          readyInMs: Number.isFinite(room.readyAt) ? Math.max(0, room.readyAt - at) : null,
+        });
+      }
       return {
         model,
         rpm,
@@ -276,6 +353,10 @@ export function snapshot(providers = [], at = Date.now()) {
         dayUsed: keys.reduce((n, key) => n + key.dayUsed, 0),
         dayLimit: rpd * credentialCount,
         keysAvailable: keys.filter((key) => key.available).length,
+        // How long until this model can take a request again, when none can now.
+        readyInMs: keys.some((key) => key.available)
+          ? 0
+          : keys.reduce((soonest, key) => (key.readyInMs === null ? soonest : Math.min(soonest, key.readyInMs)), Infinity),
         keys,
       };
     });
@@ -284,6 +365,7 @@ export function snapshot(providers = [], at = Date.now()) {
       name: provider.name,
       credentialCount,
       resetsAt: 'midnight America/Los_Angeles',
+      resetsAtMs: nextDayResetAt(at),
       day: quotaDay(at),
       minuteUsed: perModel.reduce((n, m) => n + m.minuteUsed, 0),
       minuteLimit: perModel.reduce((n, m) => n + m.minuteLimit, 0),
