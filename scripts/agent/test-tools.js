@@ -67,9 +67,12 @@ test('every tool has a schema and an implementation', async () => {
   for (const n of names) assert.ok(tools.has(n), `missing implementation for ${n}`);
   for (const d of TOOL_DEFINITIONS) assert.equal(d.function.parameters.type, 'object');
   const description = (name) => TOOL_DEFINITIONS.find((d) => d.function.name === name).function.description;
-  assert.match(description('write_file'), /complete contents with read_file/);
-  assert.match(description('append_file'), /complete contents with read_file/);
-  assert.match(description('file_outline'), /does not authorize write_file or append_file/);
+  // append_file and file_outline are no longer advertised separately — they are
+  // write_file(append) and read_file(outline). The rule they carried still has to
+  // be stated where the model will actually read it.
+  assert.match(description('write_file'), /[Rr]ead an existing file before replacing/);
+  assert.ok(!TOOL_DEFINITIONS.some((d) => ['append_file', 'file_outline', 'file_search', 'relevant_files', 'list_processes'].includes(d.function.name)),
+    'the merged tools must not also be advertised on their own');
 });
 
 test('whole-file writes require all visible read_file ranges; outlines and partial reads are insufficient', async () => {
@@ -166,7 +169,9 @@ test('delegate_task runs a bounded read-only second opinion and excludes secret 
   fs.writeFileSync(path.join(dir, '.env'), 'DO_NOT_SEND=this-is-a-test-secret\n');
 
   assert.ok(READ_ONLY_TOOLS.has('delegate_task'));
-  assert.ok(tools.definitions.some((d) => d.function.name === 'delegate_task'));
+  // Not advertised any more: a second opinion costs a whole extra model call for
+  // something the run can read itself. The implementation stays callable.
+  assert.ok(!tools.definitions.some((d) => d.function.name === 'delegate_task'));
   const r = await run('delegate_task', { task: 'Review the handler for likely edge cases.', paths: ['src/handler.ts', '.env'] });
   assert.equal(r.ok, true);
   assert.match(r.output, /empty-input guard/);

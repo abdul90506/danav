@@ -443,49 +443,46 @@ const P = {
 export const ALL_TOOL_DEFINITIONS = [
   fn(
     'list_dir',
-    'List files and folders (folders first). depth=1 lists one level, up to 4 gives a tree. Generated folders (node_modules, .git, dist, build…) are shown but not expanded.',
-    { path: { ...P.path, description: 'Folder to list. Default: workspace root.' }, depth: { type: 'integer', description: '1–4. Default 1.' } }
+    'List a folder. With `pattern`, finds files by name anywhere underneath instead (glob or substring). Generated folders (node_modules, .git, dist) are not expanded.',
+    {
+      path: { ...P.path, description: 'Default: workspace root.' },
+      depth: { type: 'integer', description: '1-4 levels. Default 1.' },
+      pattern: { type: 'string', description: 'Find files by name, e.g. "src/**/*.test.ts" or "login".' },
+    }
   ),
+
   fn(
     'read_file',
-    'Read a text file with line numbers (like `cat -n`). Returns at most 2000 lines. For a big file DO NOT read it top to bottom: call file_outline first, then read only the chunks you need — start_line/end_line for one chunk, or ranges for SEVERAL chunks in ONE call. For write_file or append_file, read_file must show the complete file (all ranges if clipped); a symbol read or partial range is not enough. For targeted edits, read the relevant code first.',
+    'Read a text file with line numbers. Use `outline` to see its structure first on a long file, `symbol` to jump to one definition, `ranges` to pull several chunks in one call.',
     {
       path: P.path,
-      start_line: { type: 'integer', description: '1-based first line. Default 1.' },
-      end_line: { type: 'integer', description: '1-based last line (inclusive).' },
+      outline: { type: 'boolean', description: 'Return the table of contents (definitions + line numbers) instead of the text.' },
+      symbol: { type: 'string', description: 'Read one definition by name, whole body, no line numbers to guess.' },
+      start_line: { type: 'integer', description: '1-based first line.' },
+      end_line: { type: 'integer', description: '1-based last line, inclusive.' },
       ranges: {
         type: 'array',
-        description: 'Several chunks in ONE call, e.g. [[1,60],[200,260]]. Overlapping chunks are merged. Overrides start_line/end_line.',
+        description: 'Several chunks in ONE call, e.g. [[1,60],[200,260]].',
         items: { type: 'array', items: { type: 'integer' } },
-      },
-      symbol: {
-        type: 'string',
-        description: 'Read one definition by NAME (a function, component, class or method) — jumps straight to it and returns its whole body, no line numbers to guess. Near-misses are listed if the name is not found.',
       },
     },
     ['path']
   ),
-  fn(
-    'file_outline',
-    'A table of contents for a source file: functions, classes, methods, headings, selectors, routes… with LINE NUMBERS. Use it first on any file longer than ~200 lines, then read only the chunks you need (read_file ranges). This shows structure, not the full contents, so it does not authorize write_file or append_file; read the complete file with read_file before either.',
-    { path: P.path },
-    ['path']
-  ),
+
   fn(
     'write_file',
-    'Create a new file, or completely replace an existing one, with `content` (parent folders are created for you). Best for NEW files. Before replacing an existing file that was not created in this run, read the complete contents with read_file (all ranges if clipped); file_outline, a symbol read, or a partial range is not enough, and an incomplete overwrite is refused. For changes to existing code prefer edit_file / multi_edit — they are faster and cannot accidentally drop code. Write the whole file in ONE call, however long it is; splitting a file across calls just resends the conversation each time. Always put "path" FIRST in the arguments, so a call cut off by the output limit is still recoverable at that point -- only then finish the file with append_file.',
-    { path: P.path, content: { type: 'string', description: 'The complete file contents.' } },
+    'Write a file whole: creates it, or replaces it completely. With append=true, adds to the end instead. Put the entire file in one call however long it is. Read an existing file before replacing it.',
+    {
+      path: P.path,
+      content: { type: 'string', description: 'The complete file (or the text to add, with append).' },
+      append: { type: 'boolean', description: 'Add to the end rather than replacing.' },
+    },
     ['path', 'content']
   ),
-  fn(
-    'append_file',
-    'Add text to the END of a file (the file is created if it does not exist). Before appending to an existing file that was not created in this run, read the complete contents with read_file (all ranges if clipped); file_outline, a symbol read, or a partial range is not enough, and an incomplete append is refused. Use it to FINISH a file whose write_file call was cut off at the output limit: continue from the line the result named. A file that fits in one call should be written in one call, not split up on purpose. Never repeat what is already in the file, and put "path" FIRST in the arguments.',
-    { path: P.path, content: { type: 'string', description: 'The text to add at the end.' } },
-    ['path', 'content']
-  ),
+
   fn(
     'edit_file',
-    'For exactly ONE change in one existing file. old_string must match the file EXACTLY (indentation and line breaks included) and be unique — add surrounding lines if needed — unless replace_all=true. Copy it from read_file WITHOUT the line-number prefix. If the file needs 2+ changes, NEVER call edit_file repeatedly: use one multi_edit call for all changes, even when target lines are far apart (for example L26, L147, and L924).',
+    'Exactly ONE change in one file — for 2+ changes use multi_edit instead. old_string must match EXACTLY, indentation and line breaks included, and be unique (add surrounding lines) unless replace_all=true. Copy it from read_file without the line-number prefix.',
     {
       path: P.path,
       old_string: { type: 'string', description: 'Exact text to find.' },
@@ -498,11 +495,11 @@ export const ALL_TOOL_DEFINITIONS = [
   ),
   fn(
     'multi_edit',
-    'Apply MANY edits in ONE call, top to bottom — in one file or across several files — atomically (if any edit cannot be applied, nothing is written). ' +
-      'Each edit is either by TEXT { old_string, new_string, replace_all? } (applied one after another), or by LINE NUMBERS ' +
-      '{ start_line, end_line?, new_string } (replace those lines; new_string "" deletes them) / { insert_after_line, new_string } (0 = at the top). ' +
-      'Line numbers always refer to the file as you last read it: the edits are applied bottom-up, so they never shift each other. Do not mix the two styles for one file. ' +
-      'Give every edit its own "path" to change several files at once, or set one top-level "path". This is the required ONE-CALL method for two or more changes to the same file; do not send one edit_file call per range.',
+    'Many edits in ONE call, across one or several files, atomically — if any edit will not apply, nothing is written. ' +
+      'Use this for 2+ changes anywhere, never repeated edit_file calls. ' +
+      'Each edit is by TEXT { old_string, new_string, replace_all? } or by LINE { start_line, end_line?, new_string } ("" deletes) / { insert_after_line, new_string } (0 = top); do not mix the two styles in one file. ' +
+      'Line numbers mean the file as you last read it — edits apply bottom-up, so they never shift each other. ' +
+      'Give each edit its own "path" to span files, or set one top-level "path".',
     {
       path: { ...P.path, description: 'Default file for edits that have no "path" of their own.' },
       edits: {
@@ -529,7 +526,7 @@ export const ALL_TOOL_DEFINITIONS = [
   ),
   fn(
     'grep_search',
-    'Search file CONTENTS with a regular expression. Results are grouped by file with a count per file. Skips node_modules, .git, build output and binary files. For a bare name use find_symbol instead — it is exact and cheap. Use this for text, strings, error messages, patterns, and comments. Looking for several things at once? Put them in ONE call as alternation — "TODO|FIXME|HACK" — instead of one search per term.',
+    'Regex search over file CONTENTS, grouped by file. Skips node_modules, .git, build output, binaries. Use it for strings, error messages, patterns and comments; for a bare symbol name use find_symbol. Search several terms in ONE call with alternation — "TODO|FIXME|HACK" — not one call per term.',
     {
       pattern: { type: 'string', description: 'Regular expression.' },
       path: { ...P.path, description: 'File or folder to search. Default: workspace root.' },
@@ -544,23 +541,18 @@ export const ALL_TOOL_DEFINITIONS = [
     ['pattern']
   ),
   fn(
-    'file_search',
-    'Find files by NAME. pattern is a glob ("src/**/*.test.ts", "*.css") or a case-insensitive substring of the path.',
-    { pattern: { type: 'string' }, path: { ...P.path, description: 'Folder to search. Default: workspace root.' }, max_results: { type: 'integer' } },
-    ['pattern']
-  ),
-  fn(
     'code_map',
-    'The shape of the project as an index: folders, which files define the most, and which files are depended on by the most others. Call this ONCE at the start of work in an unfamiliar codebase — it is cheaper than listing and reading folders, and it says where the code actually lives. Pass a folder to zoom into one part.',
+    'The project index. With `task`, ranks the files that matter for that job ("where is the theme toggle handled"). Without one, returns the shape: folders, what defines the most, what is depended on most.',
     {
-      path: { ...P.path, description: 'Folder to describe. Default: the whole workspace.' },
-      limit: { type: 'integer', description: 'How many lines per section. Default 24.' },
-    },
-    []
+      task: { type: 'string', description: 'Describe the job in your own words to get ranked files.' },
+      path: { ...P.path, description: 'Limit to a subtree.' },
+      limit: { type: 'integer', description: 'Max rows. Default 25.' },
+    }
   ),
+
   fn(
     'find_symbol',
-    'Look a NAME up in the code index: where it is DEFINED (file, line, signature) and where it is USED. Use this instead of grepping for a function, component, class, type or route name — it answers "where is X?", "who calls X?" and "what breaks if I change X?" in one call, including the test files that cover it. Near-misses are listed when there is no exact definition, so a half-remembered name still lands.',
+    'Look a NAME up in the code index: where it is DEFINED (file, line, signature) and everywhere it is USED, tests included. Use this rather than grepping for a function, component, class, type or route — one call answers "where is X", "who calls X", "what breaks if I change X". Near-misses are returned, so a half-remembered name still lands.',
     {
       name: { type: 'string', description: 'Symbol name, e.g. "createPanelStore" or "AuthProvider".' },
       kind: { type: 'string', description: 'Optional: function, class, component, type, route, test, const.' },
@@ -571,15 +563,6 @@ export const ALL_TOOL_DEFINITIONS = [
     ['name']
   ),
   fn(
-    'relevant_files',
-    'Which files matter for what you are about to do? Describe the job in your own words ("where is the theme toggle handled", "the agent retry logic", "the login form") and the index ranks the files — paths, their key symbols, how depended-upon they are. Use it when the request names no file, or when you are unsure where a feature lives.',
-    {
-      query: { type: 'string', description: 'What you are looking for, in plain words.' },
-      limit: { type: 'integer', description: 'Default 8, max 20.' },
-    },
-    ['query']
-  ),
-  fn(
     'repo_status',
     'Where this repository stands: branch, last commit, uncommitted changes (what you or the user already touched), and the most recent commits. One cheap call at the start of work in an unfamiliar repo — the prompt already carries a summary of this, so call it only when you need the detail.',
     {},
@@ -587,7 +570,7 @@ export const ALL_TOOL_DEFINITIONS = [
   ),
   fn(
     'repo_history',
-    'The project\'s own history, read-only. Three views: view="log" (with path) lists the commits that touched a file or folder — "when and why did this change?"; view="blame" (with path + symbol, or path + line_start/end) groups who last changed those lines and in which commit — "why is this code like this?"; view="diff" shows the uncommitted changes in the working tree, including your own edits so far (+added/−removed per file, then the hunks) — use it to review what you just did before you finish, or to see what the user had already changed. Nothing here can modify the repository.',
+    'Read-only git history. view="log" (+path): commits that touched it, and why. view="blame" (+path and symbol, or line_start/end): who last changed those lines, in which commit. view="diff": uncommitted working-tree changes including your own edits so far — review your work with this before finishing. Cannot modify the repository.',
     {
       view: { type: 'string', enum: ['log', 'blame', 'diff'], description: 'log | blame | diff. Default log.' },
       path: { type: 'string', description: 'Limit to one file or folder (relative path). Optional for log and diff; required for blame.' },
@@ -616,7 +599,7 @@ export const ALL_TOOL_DEFINITIONS = [
   ),
   fn(
     'run_command',
-    'Run a shell command in the workspace; returns its output and exit code. This is also where housekeeping happens — there is no create/move/delete tool: "mkdir -p <folder>", "mv <from> <to>", "cp -r <from> <to>", "rm -f <file>" / "rm -rf <folder>", "git …", "npm …" ("md", "move", "copy", "del", "rmdir /s" on Windows). Every call is a fresh shell (use `cwd`, or `cd dir && …`). Non-interactive only: pass -y/--yes flags, never wait for input. Anything that keeps running — dev servers, watchers — MUST use background=true, which returns immediately with a process id. Read the output: a non-zero exit code is information, not a dead end.',
+    'Run a shell command; returns output and exit code. There is no create/move/delete tool — use mkdir/mv/cp/rm/git/npm here. Each call is a fresh shell (use `cwd` or `cd dir && …`). Non-interactive only: pass -y, never wait for input. Anything long-running (dev server, watcher) MUST set background=true, which returns a process id immediately. A non-zero exit is information, not a dead end.',
     {
       command: { type: 'string', description: 'The command line.' },
       cwd: { type: 'string', description: 'Working directory, relative to the workspace root.' },
@@ -627,7 +610,7 @@ export const ALL_TOOL_DEFINITIONS = [
   ),
   fn(
     'run_checks',
-    'Run this project\'s own checks — the ones listed under "How this project checks itself" (package.json scripts, tsconfig, Makefile, pytest, cargo, go). Prefer `only` to run the narrowest check that covers the change (for example, only: "tsc" or only: "test:agent"). Without `only`, it runs every detected check, fastest first, stopping at the first real failure; reserve that broader run for changes that need it. Results are recorded so the run can say exactly what was verified. Green checks come back in one line each; a failure comes back with its errors and the fix loop continues from there.',
+    'Run this project\'s own checks (package.json scripts, tsconfig, Makefile, pytest, cargo, go). Prefer `only` for the narrowest check covering the change — only: "tsc", only: "test:agent". Without it, every detected check runs fastest-first and stops at the first real failure. Failures come back with their errors so you can fix and re-run.',
     {
       only: { type: 'string', description: 'Substring of the checks to run, e.g. "test:agent", "tsc" or "lint". Omit only when a broader verification run is warranted.' },
       timeout_seconds: { type: 'integer', description: 'Per check. Default 240, max 900.' },
@@ -635,16 +618,14 @@ export const ALL_TOOL_DEFINITIONS = [
     []
   ),
   fn(
-    'list_processes',
-    'List this workspace\'s background processes: id, command, and whether each is still running or has exited. Use it to recover the id of a server you started in an earlier turn (for read_process_output, stop_process or get_preview_url), or to check that a dev server survived.',
-    {}
-  ),
-  fn(
     'read_process_output',
-    'Show the latest output of a background process started with run_command(background=true), and whether it is still running.',
-    { id: { type: 'string', description: 'Process id such as "bg-1".' }, tail_lines: { type: 'integer', description: 'Default 60.' } },
-    ['id']
+    'Latest output of a background process, and whether it is still running. Call with no id to list this workspace\'s processes and their ids.',
+    {
+      id: { type: 'string', description: 'Process id. Omit to list all.' },
+      tail_lines: { type: 'integer', description: 'Lines from the end. Default 60.' },
+    }
   ),
+
   fn('stop_process', 'Stop a background process and its children.', { id: { type: 'string' } }, ['id']),
   fn(
     'get_preview_url',
@@ -746,7 +727,19 @@ export const ALL_TOOL_DEFINITIONS = [
  * runs if something calls it, and DANAV_AGENT_TOOLS_EXTRA brings any of them back
  * by name (or "all").
  */
-const HIDDEN_FROM_AGENT = new Set(['image_search', 'forget', 'repo_status']);
+/**
+ * Implemented and callable, but not worth a schema of their own.
+ *
+ * Separately from this set, five tools were folded into the one that already did
+ * the same job — file_outline and file_search and append_file and relevant_files
+ * and list_processes are now an argument on read_file, list_dir, write_file,
+ * code_map and read_process_output. Their implementations are untouched and
+ * still answer to their old names; they just no longer cost a schema each.
+ *
+ * delegate_task is here for a different reason: it spends an entire extra model
+ * call to get a second opinion on code the run can simply read.
+ */
+const HIDDEN_FROM_AGENT = new Set(['image_search', 'forget', 'repo_status', 'delegate_task']);
 
 function advertisedToolDefinitions() {
   const raw = String(process.env.DANAV_AGENT_TOOLS_EXTRA || '').trim().toLowerCase();
@@ -1581,6 +1574,8 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
   const impl = {
     // ------------------------------------------------------------------ files
     async list_dir(args, ctx) {
+      // `pattern` is the old file_search: same job, one tool.
+      if (typeof args.pattern === 'string' && args.pattern.trim()) return impl.file_search(args, ctx);
       const abs = await target(optStr(args, 'path') || '.');
       const depth = clampInt(args.depth, 1, 4, 1);
       let listing;
@@ -1606,6 +1601,8 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
     },
 
     async read_file(args, ctx) {
+      // `outline` is the old file_outline: both are "look at this file".
+      if (args.outline === true || args.outline === 'true') return impl.file_outline(args, ctx);
       const abs = await target(reqStr(args, 'path'));
       let r;
       try { r = await ws.readText(abs); } catch (err) { throw await explainMissing(err, abs); }
@@ -1752,6 +1749,8 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
     },
 
     async write_file(args, ctx) {
+      // `append` is the old append_file: both put content in a file.
+      if (args.append === true || args.append === 'true') return impl.append_file(args, ctx);
       const abs = await target(reqStr(args, 'path'));
       guardWrite(abs);
       if (typeof args.content !== 'string') throw new ToolError('Missing required argument "content" (string).');
@@ -2116,7 +2115,10 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
     },
 
     // ------------------------------------------------------------- the index
-    async code_map(args) {
+    async code_map(args, ctx) {
+      // `task` is the old relevant_files: both answer "where do I start".
+      const task = typeof args.task === 'string' ? args.task.trim() : '';
+      if (task) return impl.relevant_files({ ...args, query: task }, ctx);
       const index = await indexOrNull();
       if (!index || !Object.keys(index.files || {}).length) {
         throw new ToolError('No code index is available for this workspace (it may be empty, or nothing readable in it). Use list_dir and file_search instead.');
@@ -2734,7 +2736,9 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       };
     },
 
-    async read_process_output(args) {
+    async read_process_output(args, ctx) {
+      // No id means "what is running?" — the old list_processes.
+      if (!args || args.id === undefined || args.id === null || args.id === '') return impl.list_processes(args, ctx);
       const id = reqStr(args, 'id');
       const r = await ws.readBackground(id, { tail: clampInt(args.tail_lines, 1, 500, 60) });
       const out = safe(r.output);
