@@ -250,6 +250,16 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   // A checklist is task state, not workspace state. Only the exact run being
   // continued may hand one forward; a different chat/task must never inherit it.
   const handoff = resume ? taskRuns[0] || null : null;
+  // The newest run of a task is often the thinnest — a run that was stopped
+  // seconds in, or a Continue that only re-read a file. Its own plan/findings
+  // may be empty while the run before it holds everything that was learned, so
+  // the checklist and the notes come from the newest run that actually has
+  // them, not merely the newest run.
+  const newestWith = (pick) => taskRuns.map(pick).find((value) => value && value.length) || [];
+  const handoffPlan = handoff ? newestWith((run) => run.plan) : [];
+  const handoffFindings = handoff
+    ? [...new Map(taskRuns.flatMap((run) => run.findings).map((f) => [f.normalize('NFKC').toLowerCase(), f])).values()]
+    : [];
   const handoffMemories = handoff
     ? [...new Map(taskRuns.flatMap((run) => run.memories).sort((a, b) => a.at - b.at).map((item) => [
         JSON.stringify([item.summary, item.facts, item.decisions, item.errors, item.files, item.steps, item.next]), item,
@@ -271,7 +281,10 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   }).sort((a, b) => b.relevance - a.relevance || b.run.at - a.run.at);
 
   const selected = new Map();
-  if (handoff) selected.set(handoff.id, handoff);
+  // Every run of the task being continued is relevant by definition — the work
+  // it did is the thing Continue has to not repeat. Ranking them against the
+  // user's words would drop them, because "Continue." has no words to match.
+  if (handoff) for (const run of taskRuns.slice(0, maxEntries)) selected.set(run.id, run);
   // Do not inject the newest workspace run into an unrelated task. If the user
   // supplied no searchable words, the latest entry is the only useful default.
   else if (!words.size) selected.set(runs[0].id, runs[0]);
@@ -293,18 +306,22 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
   };
 
   if (handoff) {
-    const plan = handoff.plan || [];
+    const plan = handoffPlan;
     const open = plan.filter((item) => item.status !== 'completed');
-    if (open.length) {
+    if (plan.length) {
       addLine('- Checklist saved for this exact continued task:');
       for (const item of plan) {
         if (!addLine(`  ${item.status === 'completed' ? '[x]' : item.status === 'in_progress' ? '[~]' : '[ ]'} ${item.content}`)) break;
       }
-      addLine('  Completed items are done; continue from the first open step rather than repeating work.');
+      // A checklist with nothing open still has to be reported. Staying silent
+      // reads as "there was no plan", and the run starts the task over.
+      addLine(open.length
+        ? '  Completed items are done; continue from the first open step rather than repeating work.'
+        : '  Every step was marked done. Verify that before redoing any of it; the user may be asking for something beyond this list.');
     }
-    if (handoff.findings.length && used < cap) {
+    if (handoffFindings.length && used < cap) {
       addLine('- Findings retained from this task (compact notes, not a substitute for checking mutable facts):');
-      for (const finding of handoff.findings) if (!addLine(`  - ${finding}`)) break;
+      for (const finding of handoffFindings) if (!addLine(`  - ${finding}`)) break;
     }
     if (handoffMemories.length && used < cap) {
       addLine('- Concise task-step memories carried across this exact task (verify mutable facts against current files):');
@@ -330,7 +347,7 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
     }
   }
 
-  const includedFindings = new Set(handoff?.findings.map((finding) => finding.normalize('NFKC').toLowerCase()) || []);
+  const includedFindings = new Set(handoffFindings.map((finding) => finding.normalize('NFKC').toLowerCase()));
   const includedErrors = new Set(handoff?.toolErrors.map((failure) => `${failure.tool}:${failure.message}`.normalize('NFKC').toLowerCase()) || []);
   for (const run of entries) {
     if (used >= cap) break;
@@ -348,7 +365,7 @@ export function recentRunsForPrompt(workspaceId, query = '', maxChars = 3000, li
     const sameTask = Boolean(taskKey && run.taskKey === taskKey);
     const parts = [new Date(run.at).toISOString().slice(0, 10), resume && sameTask ? '' : run.stopReason, changed, checks, run.failures ? `${run.failures} tool failure${run.failures === 1 ? '' : 's'}` : '']
       .filter(Boolean);
-    if (parts.length > 1 || !lines.length) addLine(`- ${parts.join(' · ')}`);
+    if (parts.length > 1 || !lines.length) addLine(`- ${resume && sameTask ? 'Earlier in this task: ' : ''}${parts.join(' · ')}`);
 
     // Task-step summaries are retrieved only when their content matches this
     // request. They are hints, not current workspace truth.
