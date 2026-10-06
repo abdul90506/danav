@@ -1058,20 +1058,89 @@ app.post('/api/conversations/one', conversationsBody, (req, res) => {
     : res.status(500).json({ success: false, error: 'Could not save the conversation' });
 });
 
+/**
+ * Save the chats — by MERGING, never by replacing.
+ *
+ * This used to overwrite the store with whatever arrived, which made every
+ * client the single source of truth for everyone. One stale tab, one reload
+ * that posted before it had finished reading, one empty array from a client
+ * that had just been reset, and every conversation on disk was gone. That is
+ * the "my chats disappeared" bug, and no amount of client-side care fixes it,
+ * because the server was doing exactly what it was told.
+ *
+ * So the server now keeps what it has. A conversation in the payload wins only
+ * if it is newer than the stored copy; one that is simply absent is left alone.
+ * Deleting is an explicit act with its own endpoint, not a side effect of a
+ * short list arriving.
+ */
 app.post('/api/conversations', (req, res) => {
   const { conversations, activeChatId } = req.body;
   if (!Array.isArray(conversations)) {
     return res.status(400).json({ success: false, error: 'Conversations array is required' });
   }
+  const current = readConversationsFromDisk();
+  const stored = Array.isArray(current.conversations) ? current.conversations : [];
+  const byId = new Map();
+  for (const item of stored) if (item && item.id) byId.set(item.id, item);
+
+  let added = 0;
+  let updated = 0;
+  const order = [];
+  for (const item of conversations) {
+    if (!item || typeof item !== 'object' || !item.id) continue;
+    order.push(item.id);
+    const existing = byId.get(item.id);
+    if (!existing) {
+      byId.set(item.id, item);
+      added++;
+      continue;
+    }
+    // An older copy of a chat must never roll a newer one back. Equal stamps
+    // mean the same edit arriving twice, where the newer payload is harmless.
+    const incomingAt = Number(item.updatedAt) || 0;
+    const storedAt = Number(existing.updatedAt) || 0;
+    if (incomingAt >= storedAt) {
+      byId.set(item.id, item);
+      if (incomingAt > storedAt) updated++;
+    }
+  }
+
+  // The client's order first (it is the user's sidebar), then anything the
+  // client did not know about, newest first, so nothing is quietly lost.
+  const seen = new Set(order);
+  const extras = [...byId.values()]
+    .filter((item) => !seen.has(item.id))
+    .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
+  const merged = [...order.map((id) => byId.get(id)).filter(Boolean), ...extras];
+
   const ok = writeConversationsToDisk({
-    conversations,
-    activeChatId: activeChatId || null,
+    conversations: merged,
+    activeChatId: activeChatId || current.activeChatId || null,
     updatedAt: Date.now(),
   });
   if (ok) {
-    return res.json({ success: true });
+    return res.json({ success: true, stored: merged.length, added, updated, kept: extras.length });
   }
   return res.status(500).json({ success: false, error: 'Could not save conversations to backend' });
+});
+
+/** Deleting a chat is deliberate, so it has its own verb and its own endpoint. */
+app.delete('/api/conversations/:id', (req, res) => {
+  const id = String(req.params.id || '');
+  const current = readConversationsFromDisk();
+  const stored = Array.isArray(current.conversations) ? current.conversations : [];
+  const remaining = stored.filter((item) => item && item.id !== id);
+  if (remaining.length === stored.length) {
+    return res.json({ success: true, removed: 0, stored: stored.length });
+  }
+  const ok = writeConversationsToDisk({
+    conversations: remaining,
+    activeChatId: current.activeChatId === id ? (remaining[0]?.id || null) : current.activeChatId,
+    updatedAt: Date.now(),
+  }, { keepBackup: true });
+  return ok
+    ? res.json({ success: true, removed: 1, stored: remaining.length })
+    : res.status(500).json({ success: false, error: 'Could not delete the conversation' });
 });
 
 // The safety copy taken when the store shrank. Lets an accidental wipe be undone

@@ -454,6 +454,24 @@ export async function restoreConversationsBackup(): Promise<{ success: boolean; 
   }
 }
 
+/**
+ * Delete one chat on the server.
+ *
+ * The save endpoint merges now and never removes, so a deletion has to say so
+ * explicitly — otherwise the chat would come straight back on the next load.
+ */
+export async function deleteBackendConversation(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: previewAuthHeaders(),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export interface BackendSaveResult {
   /** The server's copy of the chats is up to date. */
   ok: boolean;

@@ -58,6 +58,7 @@ import {
   saveBackendSettings,
   fetchBackendConversations,
   saveBackendConversations,
+  deleteBackendConversation,
   generateAIChatTitle,
 } from './services/api';
 import {
@@ -699,6 +700,9 @@ export const App: React.FC = () => {
       resetComposer();
     }
     titleEditRevisionRef.current.delete(id);
+    // The save endpoint merges and never removes, so a deleted chat has to be
+    // deleted out loud or it returns on the next load.
+    void deleteBackendConversation(id);
 
     // Computed outside the updater: a `setState` updater must be pure, and
     // calling setActiveChatId from inside it runs twice under StrictMode.
@@ -2350,6 +2354,8 @@ export const App: React.FC = () => {
         onSaveAgentSummaryModel={handleSaveAgentSummaryModel}
         conversations={conversations}
         onConversationsRestored={handleConversationsRestored}
+        activeChatId={activeChatId}
+        activeWorkspaceId={activeConversation?.agentWorkspaceId || null}
       />
 
       {/* Agent mode: create a workspace (cloud sandbox or a folder on this machine) */}

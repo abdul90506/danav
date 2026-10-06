@@ -129,10 +129,11 @@ function errorMessageFrom(status, text, model) {
  * @param {(text: string) => void} o.onThinking
  * @param {(index: number, slot: {id:string,name:string,args:string}) => void} o.onToolDelta
  * @param {(info: {attempt:number, delayMs:number, reason:string}) => void} [o.onRetry]
+ * @param {(info: {model:string, credentialIndex:number, attempt:number}) => void} [o.onAttempt]
  * @param {() => void} [o.onStreamRestart] the answer is being read again; anything the chat showed for the abandoned attempt should be settled
  */
 export async function streamCompletion({
-  provider, model, thinkingLevel, messages, tools, signal, onText, onThinking, onToolDelta, onRetry,
+  provider, model, thinkingLevel, messages, tools, signal, onText, onThinking, onToolDelta, onRetry, onAttempt,
   onStreamRestart, maxOutputTokens,
 }) {
   const baseUrl = normalizeBaseUrl(provider.baseUrl);
@@ -385,6 +386,17 @@ export async function streamCompletion({
       requestCredentialIndex = credentialIndex;
       const credential = apiKeys.length ? apiKeys[requestCredentialIndex] : '';
       if (quotaOn) recordRequest(provider.id, requestCredentialIndex, activeModel);
+      // Which (model, key) pair is actually about to be used. The caller's
+      // trace needs this: after a fallback, the model that answered is not the
+      // model that was asked for, and nothing else records the difference.
+      onAttempt?.({
+        model: activeModel,
+        requestModel,
+        credentialIndex: requestCredentialIndex,
+        credentialCount: apiKeys.length,
+        attempt: attemptsUsed + 1,
+        thinking: withThinking,
+      });
       let res;
       // A provider that accepts the connection and then says nothing is the
       // worst case for a user: no error, no text, no end. Give it a fixed time

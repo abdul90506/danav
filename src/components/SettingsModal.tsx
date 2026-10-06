@@ -35,6 +35,7 @@ import {
   testProviderConnection,
 } from '../services/api';
 import { buildEditedProvider, parseKeyFile } from './providerSettings.js';
+import RunLog from './RunLog';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -49,6 +50,10 @@ interface SettingsModalProps {
   conversations: Conversation[];
   /** Re-read the server's store after a restore, so the UI shows what came back. */
   onConversationsRestored: () => void | Promise<void>;
+  /** The open chat, whose recorded runs the Run Log shows. */
+  activeChatId: string | null;
+  /** Its agent workspace, whose project memory is shown with them. */
+  activeWorkspaceId: string | null;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -62,8 +67,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSaveAgentSummaryModel,
   conversations,
   onConversationsRestored,
+  activeChatId,
+  activeWorkspaceId,
 }) => {
-  const [activeTab, setActiveTab] = useState<'appearance' | 'providers' | 'limits' | 'agent' | 'data'>('appearance');
+  const [activeTab, setActiveTab] = useState<'appearance' | 'providers' | 'limits' | 'agent' | 'runlog' | 'data'>('appearance');
   const dialogRef = useRef<HTMLDivElement>(null);
   useFocusTrap(dialogRef, isOpen);
 
@@ -645,6 +652,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             }`}
           >
             Agent
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab('runlog');
+              cancelProviderForm();
+            }}
+            className={`pb-2.5 transition-colors border-b-2 ${
+              activeTab === 'runlog'
+                ? 'border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100 font-semibold'
+                : 'border-transparent text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300'
+            }`}
+          >
+            Memory & Run Log
           </button>
           <button
             onClick={() => {
@@ -1360,6 +1380,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
             </div>
+          )}
+
+          {/* TAB 5: MEMORY & RUN LOG — what the agent remembers, and what it did */}
+          {activeTab === 'runlog' && (
+            <RunLog chatId={activeChatId} workspaceId={activeWorkspaceId} />
           )}
 
           {/* TAB 4: CHAT DATA */}

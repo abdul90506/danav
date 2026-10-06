@@ -14,6 +14,7 @@ import { LlmError, streamCompletion } from './llm.js';
 import { buildSystemPrompt, formatSnapshot } from './prompt.js';
 import { cachedIndex, getIndex, primeIndex, renderRelevantFiles, renderRepoMap } from './codeindex.js';
 import { buildKnowledgeBlock } from './knowledge.js';
+import { startTrace } from './trace.js';
 import { detectChecks, formatChecksHint } from './verify.js';
 import { formatRepoState, readRepoState } from './githistory.js';
 import { collectProjectGuidance } from './context.js';
@@ -714,6 +715,23 @@ export async function runAgent({
     ...(Array.isArray(taskSummaryProvider?.apiKeys) ? taskSummaryProvider.apiKeys : []), taskSummaryProvider?.apiKey,
   ]);
   const taskKey = taskKeyFor(taskId);
+  /**
+   * Everything this run is about to do, on disk, under the chat it belongs to.
+   * Started before the first decision so a crash still leaves evidence.
+   */
+  const trace = startTrace({
+    runId,
+    chatId: taskId || workspace.id,
+    redact,
+    meta: {
+      workspace: { id: workspace.id, name: workspace.name, kind: workspace.kind },
+      requestedModel: model,
+      provider: { id: provider?.id, name: provider?.name, baseUrl: provider?.baseUrl, keys: Array.isArray(provider?.apiKeys) ? provider.apiKeys.length : provider?.apiKey ? 1 : 0, quota: provider?.quota?.enabled === true },
+      thinkingLevel,
+      resume: Boolean(resume),
+      request: String(history?.at?.(-1)?.content ?? '').slice(0, 2000),
+    },
+  });
   const priorTaskRun = resume && taskKey
     ? readRunJournal(workspace.id, 30).find((run) => run.taskKey === taskKey) || null
     : null;
@@ -979,6 +997,25 @@ export async function runAgent({
       ...priorMessages,
     ];
 
+    trace.instructions({
+      systemPrompt: baseSystemPrompt,
+      tools: tools.definitions,
+      limits: {
+        maxSteps,
+        maxRunMs: limits.maxRunMs(),
+        contextChars: limits.contextChars(),
+        maxOutputChars: limits.maxOutputChars,
+        maxReadLines: limits.maxReadLines,
+      },
+      model,
+      provider: { id: provider?.id, name: provider?.name },
+      thinkingLevel,
+      history,
+    });
+
+    /** How much of the transcript the trace has already recorded. */
+    let tracedMessages = 0;
+
     const failCounts = new Map();
     /** name+args -> the result hash of the last time it ran, to spot a loop. */
     const callMemory = new Map();
@@ -1195,12 +1232,24 @@ export async function runAgent({
       let roundText = '';
       let publishedText = '';
       let contextAttempts = 0;
+      /** Which model actually served this round, after any fallback. */
+      let servedBy = model;
       for (;;) {
         let attemptText = '';
         let toolCallStarted = false;
         publishedText = '';
         try {
           updateTaskMemoryMessage(messages, taskMemory.promptText());
+          // Only what this round added to the transcript: the whole conversation
+          // is the sum of these, without storing it again on every round.
+          trace.request({
+            round: stats.steps,
+            model,
+            messages,
+            chars: totalSize(messages),
+            newMessages: messages.slice(tracedMessages),
+          });
+          tracedMessages = messages.length;
           round = await streamCompletion({
             provider,
             model,
@@ -1226,7 +1275,12 @@ export async function runAgent({
               }
               onDelta(slot);
             },
-            onRetry: ({ attempt, maxRetries, delayMs, reason, credentialIndex, credentialCount }) => {
+            onAttempt: (info) => {
+              if (info?.model) servedBy = info.model;
+              trace.routing({ round: stats.steps, kind: 'attempt', ...info });
+            },
+            onRetry: ({ attempt, maxRetries, delayMs, reason, credentialIndex, credentialCount, model: nextModel }) => {
+              trace.routing({ round: stats.steps, kind: 'retry', attempt, maxRetries, delayMs, reason, credentialIndex, credentialCount, model: nextModel });
               if (reason === 'the answer was cut off') {
                 send({ status: 'The answer was cut off — reconnecting…' });
                 return;
@@ -1252,8 +1306,17 @@ export async function runAgent({
           });
           roundText = typeof round.text === 'string' ? round.text : attemptText;
           addUsage(round.usage);
+          trace.response({
+            round: stats.steps,
+            model: servedBy,
+            text: roundText,
+            toolCalls: (round.toolCalls || []).map((c) => ({ name: c.name, args: c.args })),
+            usage: round.usage,
+            finishReason: round.finishReason,
+          });
           break;
         } catch (err) {
+          trace.failure({ round: stats.steps, where: 'completion', message: String(err?.message || err), status: err?.status, code: err?.code });
           if (!isContextLimitError(err) || contextAttempts >= 3) throw err;
           const before = totalSize(messages);
           const target = Math.max(8_000, Math.floor(before * 0.58));
@@ -1757,6 +1820,19 @@ export async function runAgent({
         // How long the tool itself really took, measured before the row is held.
         const tookMs = Date.now() - t0;
 
+        // On the record before the row is even shown: a run that dies here is
+        // exactly the run whose last tool call needs to be readable afterwards.
+        trace.tool({
+          round: stats.steps,
+          name,
+          args: args || {},
+          ok: Boolean(res.ok),
+          denied: Boolean(res.denied || res.blocked),
+          output: String(res.output ?? ''),
+          error: res.ok ? undefined : String(res.error || ''),
+          durationMs: tookMs,
+        });
+
         // The file is already written; only the row that names it is held back, and
         // only when it would otherwise be replaced before it could be read. Nothing
         // about the result changes — it is reported in full the moment it is shown.
@@ -1940,6 +2016,18 @@ export async function runAgent({
       /* continuity data is best effort and must never turn a finished run into an error */
     }
     cancelApprovalsFor(`${runId}:`);
+    trace.finish({
+      stopReason,
+      steps: stats.steps,
+      toolCalls: stats.toolCalls,
+      failures: state.toolFailures,
+      usage: usage.rounds ? { ...usage } : null,
+      changed: [...state.changed].map(([filePath, counts]) => ({ path: filePath, ...counts })),
+      checks: state.checks,
+      plan: state.plan || [],
+      findings: state.findings || [],
+      toolErrors: state.toolErrors || [],
+    });
     send({
       agent: {
         type: 'run_end',

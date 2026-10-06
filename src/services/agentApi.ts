@@ -167,6 +167,44 @@ export interface AgentSkill {
 export const listSkills = (workspaceId: string) =>
   call<{ skills: AgentSkill[] }>('GET', `/workspaces/${encodeURIComponent(workspaceId)}/skills`);
 
+/** One recorded run, as the Run Log lists it. */
+export interface TraceRunSummary {
+  runId: string;
+  startedAt: number;
+  durationMs: number | null;
+  stopReason: string;
+  request: string;
+  model: string;
+  modelsUsed: string[];
+  switched: number;
+  rounds: number;
+  toolCalls: number;
+  failures: number;
+  routingEvents: number;
+  usage: { inputTokens?: number; outputTokens?: number; rounds?: number } | null;
+  changed: Array<{ path: string; added?: number; removed?: number }>;
+  bytes: number;
+  events: number;
+}
+
+/** One line of a trace. `type` says which shape the rest of it has. */
+export interface TraceEvent {
+  seq: number;
+  at: number;
+  ms: number;
+  type: string;
+  [key: string]: unknown;
+}
+
+export const listTraceRuns = (chatId: string) =>
+  call<{ runs: TraceRunSummary[] }>('GET', `/traces?chatId=${encodeURIComponent(chatId)}`);
+
+export const getTraceRun = (chatId: string, runId: string) =>
+  call<{ events: TraceEvent[] }>('GET', `/traces/${encodeURIComponent(chatId)}/${encodeURIComponent(runId)}`);
+
+export const clearTraces = (chatId: string) =>
+  call<{ success: boolean }>('DELETE', `/traces/${encodeURIComponent(chatId)}`);
+
 export interface MemoryNote {
   id: string;
   text: string;

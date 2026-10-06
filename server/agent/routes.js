@@ -32,6 +32,7 @@ import {
 } from './sandboxAdmin.js';
 import { TOOL_DEFINITIONS } from './tools.js';
 import { createSkillRegistry } from './skills.js';
+import { deleteChatTraces, listRuns, listTracedChats, readRun } from './trace.js';
 import { createRedactor, genId } from './util.js';
 import { WorkspaceError } from './workspaces/base.js';
 import {
@@ -211,6 +212,30 @@ export function registerAgentRoutes(app, {
       skills = [];
     }
     res.json({ success: true, skills });
+  }));
+
+  // ------------------------------------------------------------------- traces
+  /**
+   * The flight recorder, read back.
+   *
+   * Everything a run was given and everything it did, per chat: the exact
+   * instructions, the tools it was offered, every call with its arguments and
+   * result, each model the fallback moved it to, the budgets, the errors.
+   */
+  router.get('/traces', wrap(async (req, res) => {
+    const chatId = String(req.query.chatId || '').trim();
+    if (!chatId) return res.json({ success: true, chats: listTracedChats() });
+    return res.json({ success: true, chatId, runs: listRuns(chatId) });
+  }));
+
+  router.get('/traces/:chatId/:runId', wrap(async (req, res) => {
+    const found = readRun(req.params.chatId, req.params.runId);
+    if (!found) return res.status(404).json({ success: false, error: 'No trace for that run' });
+    return res.json({ success: true, ...found });
+  }));
+
+  router.delete('/traces/:chatId', wrap(async (req, res) => {
+    return res.json({ success: deleteChatTraces(req.params.chatId) });
   }));
 
   // ------------------------------------------------------------------ memory
