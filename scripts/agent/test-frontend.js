@@ -1717,3 +1717,42 @@ test('the command palette shows, filters and runs what it is given', async () =>
   assert.ok(html.includes('aria-selected="true"'), 'the first row starts selected, so Enter always does something');
   assert.equal(ran, '', 'rendering must not run a command');
 });
+
+test('a render crash shows an explanation instead of a white page', async () => {
+  const { ErrorBoundary } = await loadComponent('src/components/ErrorBoundary.tsx');
+  const React = (await import('react')).default;
+  const { renderToStaticMarkup } = await import('react-dom/server');
+
+  const Boom = () => { throw new Error('cannot read properties of undefined'); };
+
+  // The happy path must be completely transparent — no wrapper markup, no cost.
+  const fine = renderToStaticMarkup(
+    React.createElement(ErrorBoundary, null, React.createElement('p', null, 'all good'))
+  );
+  assert.equal(fine, '<p>all good</p>', 'a boundary around working children adds nothing');
+
+  // renderToStaticMarkup does not run componentDidCatch, so drive the state the
+  // same way React does and render the fallback.
+  const state = ErrorBoundary.getDerivedStateFromError(new Error('cannot read properties of undefined'));
+  assert.ok(state.error, 'the error is captured into state');
+
+  class Pre extends ErrorBoundary {
+    state = { error: new Error('cannot read properties of undefined'), info: '', copied: false, attempt: 0 };
+  }
+  const html = renderToStaticMarkup(React.createElement(Pre, { label: 'The conversation' }, React.createElement(Boom)));
+
+  assert.ok(html.includes('The conversation could not be displayed'), 'it names what broke');
+  assert.ok(html.includes('cannot read properties of undefined'), 'and shows the actual error, not a shrug');
+  assert.ok(/chats are saved/i.test(html), 'it says the chats survived, which is the users first question');
+  assert.ok(html.includes('Try again') && html.includes('Copy details'), 'and offers a way out');
+
+  // An inline boundary is for a panel inside the app: no full-page takeover and
+  // no "reload the page", because the rest of the window is still working.
+  const inline = renderToStaticMarkup(React.createElement(
+    class extends ErrorBoundary { state = { error: new Error('nope'), info: '', copied: false, attempt: 0 }; },
+    { inline: true, label: 'The file list' }
+  ));
+  assert.ok(!inline.includes('min-h-screen'), 'an inline failure does not take over the window');
+  assert.ok(!inline.includes('Reload the page'), 'and does not suggest throwing the session away');
+  assert.ok(inline.includes('Try again'), 'it can still recover on its own');
+});

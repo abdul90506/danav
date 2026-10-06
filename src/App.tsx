@@ -16,6 +16,7 @@ import { WorkspacePanel } from './components/WorkspacePanel';
 import { PreviewPanel, clampPreviewWidth, defaultPreviewWidth } from './components/PreviewPanel';
 import { SandboxManagerDialog } from './components/SandboxManagerDialog';
 import { CommandPalette, type Command } from './components/CommandPalette';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import {
   AgentAction,
   AgentConfig,
@@ -2145,6 +2146,7 @@ export const App: React.FC = () => {
         ) : (
           <div className="relative flex-1 flex flex-col h-full min-h-0 w-full overflow-hidden">
             {/* Chat Messages View with Far-Right Pinned Scrollbar */}
+            <ErrorBoundary label="The conversation" inline key={`chat-${activeConversation.id}`}>
             <ChatArea
               messages={activeConversation.messages}
               isLoading={isLoading}
@@ -2159,6 +2161,7 @@ export const App: React.FC = () => {
               conversationId={activeConversation?.id}
               onWatchMedia={onWatchMediaStable}
             />
+            </ErrorBoundary>
 
             {/* Floating Compact Chat Input at Bottom with subtle bottom fade */}
             <div className="absolute bottom-0 left-0 right-0 z-20 pointer-events-none pt-10 safe-bottom px-4 bg-gradient-to-t from-white via-white/85 to-transparent dark:from-zinc-950 dark:via-zinc-950/85 dark:to-transparent">
@@ -2207,7 +2210,9 @@ export const App: React.FC = () => {
 
       {/* Agent mode: browse the workspace the agent is working in */}
       {agentOn && filesOpen && activeWorkspace && (
-        <WorkspacePanel key={activeWorkspace.id} workspace={activeWorkspace} refreshToken={filesRefresh} onClose={() => setFilesOpen(false)} />
+        <ErrorBoundary label="The file list" inline key={`files-${activeWorkspace.id}`}>
+          <WorkspacePanel workspace={activeWorkspace} refreshToken={filesRefresh} onClose={() => setFilesOpen(false)} />
+        </ErrorBoundary>
       )}
 
       {/* The running app the agent built, docked on the right of the chat */}
