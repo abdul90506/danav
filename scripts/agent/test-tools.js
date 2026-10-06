@@ -1578,3 +1578,53 @@ test('a move made with the shell is still the run\'s own file', async () => {
   await run('run_command', { command: 'mv index.html index.html.bak' });
   assert.equal(ctx.state.changed.has('index.html.bak'), true);
 });
+
+test('an analysis call repeated verbatim is answered once with a nudge, not with the whole result again', async () => {
+  const { run, ctx } = await setup();
+  await run('write_file', { path: 'src/cart.js', content: 'export function cartTotal(i) {\n  return i.length;\n}\n' });
+
+  const first = await run('grep_search', { pattern: 'cartTotal' });
+  assert.equal(first.ok, true, first.output);
+  assert.match(first.output, /src\/cart\.js:1/);
+  assert.ok(!first.ui.repeated);
+
+  // Nothing has changed on disk, so the answer cannot have changed either.
+  const again = await run('grep_search', { pattern: 'cartTotal' });
+  assert.equal(again.ok, true);
+  assert.equal(again.ui.repeated, true);
+  assert.match(again.output, /already ran grep_search/);
+  assert.match(again.output, /1 match in 1 file/, 'the nudge still says what the answer was');
+  assert.ok(!/src\/cart\.js:1:/.test(again.output), 'but not the body of it');
+  assert.equal(again.ui.kind, first.ui.kind, 'same shape as a real result');
+
+  // Asked a third time, the earlier answer really is gone from context: send it.
+  const third = await run('grep_search', { pattern: 'cartTotal' });
+  assert.ok(!third.ui.repeated);
+  assert.match(third.output, /src\/cart\.js:1/);
+
+  // Argument order must not make two identical calls look different.
+  assert.equal((await run('grep_search', { pattern: 'cartTotal' })).ui.repeated, true);
+  assert.equal((await run('grep_search', { path: '.', pattern: 'cartTotal' })).ui.repeated, undefined, 'different arguments are a different call');
+});
+
+test('a repeated analysis call runs again once anything on disk may have moved', async () => {
+  const { run, ctx } = await setup();
+  await run('write_file', { path: 'a.js', content: 'export const one = 1;\n' });
+  assert.ok(!(await run('grep_search', { pattern: 'one' })).ui.repeated);
+  assert.equal((await run('grep_search', { pattern: 'one' })).ui.repeated, true);
+
+  // A shell command can change the workspace without any write tool being called,
+  // so every non-read-only call has to retire the cached answers.
+  await run('run_command', { command: 'echo "export const two = 2;" >> a.js' });
+  const after = await run('grep_search', { pattern: 'one' });
+  assert.ok(!after.ui.repeated, 'the workspace may have moved: the search must really run');
+  assert.match(after.output, /a\.js:1/);
+
+  // A write through the tools does the same.
+  assert.equal((await run('grep_search', { pattern: 'one' })).ui.repeated, true);
+  await run('write_file', { path: 'b.js', content: 'export const three = 3;\n' });
+  assert.ok(!(await run('grep_search', { pattern: 'one' })).ui.repeated);
+
+  // read_file keeps its own finer, range-aware ledger and is not touched by this.
+  assert.ok(ctx.state.analysisEpoch > 0, 'writes advanced the epoch');
+});

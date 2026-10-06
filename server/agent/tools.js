@@ -833,6 +833,37 @@ function editDistance(a, b) {
   return prev[b.length];
 }
 
+/**
+ * Analysis tools whose answer is a pure function of the workspace: ask twice
+ * without changing anything and the second answer is the first one again.
+ *
+ * read_file is deliberately absent — it has a finer ledger of its own that works
+ * in line ranges. Anything touching the network, a process, memory or a subagent
+ * is absent too: those can legitimately differ between identical calls.
+ */
+const CACHEABLE_ANALYSIS = new Set([
+  'list_dir', 'file_outline', 'grep_search', 'file_search',
+  'code_map', 'find_symbol', 'relevant_files', 'repo_status',
+]);
+
+/** A stable identity for one call: key order must not make two equal calls differ. */
+function callKey(name, args) {
+  const stable = (v) => {
+    if (Array.isArray(v)) return v.map(stable);
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(
+        Object.keys(v).filter((k) => !k.startsWith('_')).sort().map((k) => [k, stable(v[k])])
+      );
+    }
+    return v;
+  };
+  try {
+    return `${name}\n${JSON.stringify(stable(args ?? {}))}`;
+  } catch {
+    return ''; // unserialisable arguments are simply not cached
+  }
+}
+
 export const READ_ONLY_TOOLS = new Set([
   'list_dir', 'read_file', 'file_outline', 'grep_search', 'file_search', 'code_map', 'find_symbol', 'relevant_files',
   'list_processes', 'read_process_output', 'web_search', 'fetch_url', 'search_memory', 'load_skill', 'image_search', 'delegate_task',
@@ -3259,7 +3290,43 @@ export function buildToolset({ workspace: ws, runSearchTool, runSubagent, redact
       const kindByTool = { list_dir: 'list', read_file: 'read', write_file: 'write', edit_file: 'edit', multi_edit: 'edit' };
       try {
         const args = normalizeArgs(rawArgs);
+        const state = ctx?.state;
+        // Anything that is not a pure read may have changed the workspace — a shell
+        // command as much as a write — so it retires every cached analysis answer.
+        if (state && !READ_ONLY_TOOLS.has(name)) state.analysisEpoch = (state.analysisEpoch || 0) + 1;
+
+        // An analysis call repeated verbatim, with nothing changed on disk in
+        // between, can only return what it returned before. Sending it again costs
+        // thousands of tokens and tells the model nothing, so the first repeat is
+        // answered with a nudge. Asking a second time sends the real thing: by then
+        // the earlier answer has genuinely fallen out of the model's context.
+        const epoch = state?.analysisEpoch || 0;
+        const key = state && CACHEABLE_ANALYSIS.has(name) ? callKey(name, args) : '';
+        if (key) {
+          if (!state.analysisCalls) state.analysisCalls = new Map();
+          const prior = state.analysisCalls.get(key);
+          if (prior && prior.epoch === epoch && prior.hits === 0) {
+            prior.hits += 1;
+            return {
+              ok: true,
+              output: safe(
+                `You already ran ${name} with exactly these arguments in this run, and nothing has changed on disk since, so the answer is identical${prior.summary ? ` — ${prior.summary}` : ''}. ` +
+                'I skipped the repeat to save context. If that earlier result is no longer in your context, ask once more and the full result will be sent.'
+              ),
+              ui: { ...prior.ui, ok: true, repeated: true },
+            };
+          }
+        }
+
         let res = await impl[name](args, ctx);
+        if (key && res.ok !== false) {
+          state.analysisCalls.set(key, {
+            epoch,
+            hits: 0,
+            ui: { ...(res.ui || {}) },
+            summary: String(res.output || '').split('\n')[0].slice(0, 160),
+          });
+        }
         if (name === 'run_command' && res.ok !== false) {
           const tip = gitReadTip(args.command, ctx);
           if (tip) res = { ...res, output: `${res.output}${tip}` };
