@@ -18,6 +18,7 @@ import {
 import { useDismissOnOutside } from '../utils/useDismissOnOutside';
 import { Attachment, Provider, ThinkingLevel, Model } from '../types';
 import { applyMention, mentionQueryAt, rankMentions } from './MentionPicker';
+import { applySkill, rankSkills, skillQueryAt, type SkillOption } from './SkillPicker';
 
 /**
  * The picker entry that means "choose for me".
@@ -43,6 +44,17 @@ import {
  */
 const MAX_IMAGE_EDGE = 1568;
 const MAX_IMAGE_BYTES = 1_500_000;
+
+/** Files whose bytes are never text: attaching them as text attaches mojibake. */
+const BINARY_EXTENSIONS = new Set([
+  'pdf', 'zip', 'gz', 'tar', 'tgz', 'rar', '7z', 'bz2', 'xz',
+  'exe', 'dll', 'so', 'dylib', 'bin', 'class', 'jar', 'wasm', 'pyc',
+  'mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac',
+  'mp4', 'mov', 'avi', 'mkv', 'webm',
+  'doc', 'xls', 'ppt', 'docx', 'xlsx', 'pptx',
+  'ttf', 'otf', 'woff', 'woff2', 'eot',
+  'db', 'sqlite', 'sqlite3', 'iso', 'dmg', 'psd', 'ai', 'sketch', 'blend',
+]);
 
 
 function readAsDataURL(file: File): Promise<string> {
@@ -117,6 +129,11 @@ interface ChatInputProps {
    * no workspace, so there is nothing to point at.
    */
   mentionFiles?: string[];
+  /**
+   * Playbooks this workspace can run, offered by the "+" menu and by typing "/".
+   * Agent mode only — chat mode has no skills to load.
+   */
+  skills?: SkillOption[];
 }
 
 // Compact, responsive Model Selector Popup with Provider Tabs and Search Filter
@@ -375,6 +392,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   onSelectThinkingLevel,
   agentControls,
   mentionFiles,
+  skills,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -395,6 +413,58 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     setMention(found ? { query: found.query, start: found.start, end: caret } : null);
     setMentionCursor(0);
   }, [mentionFiles]);
+
+  // ---- /skills ---------------------------------------------------------------
+  const [skillCursor, setSkillCursor] = useState(0);
+  const [skill, setSkill] = useState<{ query: string; start: number; end: number } | null>(null);
+  const skillHits = useMemo(
+    () => (skill && skills?.length ? rankSkills(skill.query, skills) : []),
+    [skill, skills]
+  );
+  const skillOpen = !!skill && skillHits.length > 0;
+
+  const syncSkill = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el || !skills?.length) { setSkill(null); return; }
+    const caret = el.selectionStart ?? 0;
+    const found = el.selectionStart === el.selectionEnd ? skillQueryAt(el.value, caret) : null;
+    setSkill(found ? { query: found.query, start: found.start, end: caret } : null);
+    setSkillCursor(0);
+  }, [skills]);
+
+  const acceptSkill = useCallback((name: string) => {
+    const el = textareaRef.current;
+    if (!el || !skill) return;
+    const next = applySkill(el.value, skill.start, skill.end, name);
+    setDraft(next.text);
+    setSkill(null);
+    requestAnimationFrame(() => {
+      const node = textareaRef.current;
+      if (!node) return;
+      node.focus();
+      node.setSelectionRange(next.caret, next.caret);
+    });
+  }, [skill]);
+
+  /** The "+" menu's Skills entry: type the slash for the user and open the list. */
+  const openSkillPicker = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const caret = el.selectionStart ?? el.value.length;
+    const before = el.value.slice(0, caret);
+    // A slash only counts at the start of a word, so add the space it needs.
+    const prefix = before && !/\s$/.test(before) ? ' ' : '';
+    const text = `${before}${prefix}/${el.value.slice(caret)}`;
+    const at = caret + prefix.length + 1;
+    setDraft(text);
+    setSkill({ query: '', start: at - 1, end: at });
+    setSkillCursor(0);
+    requestAnimationFrame(() => {
+      const node = textareaRef.current;
+      if (!node) return;
+      node.focus();
+      node.setSelectionRange(at, at);
+    });
+  }, []);
 
   const acceptMention = useCallback((path: string) => {
     const el = textareaRef.current;
@@ -438,7 +508,6 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   const plusMenuRef = useRef<HTMLDivElement>(null);
   const controlsRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
 
   // A pinned controls bar lets go when you click anywhere outside it.
   useEffect(() => {
@@ -460,6 +529,21 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   useDismissOnOutside(modelMenuRef, modelDropdownOpen, closeModelMenu);
   useDismissOnOutside(thinkingMenuRef, thinkingDropdownOpen, closeThinkingMenu);
   useDismissOnOutside(plusMenuRef, plusMenuOpen, closePlusMenu);
+
+  /**
+   * True for a file whose bytes are not text and not an image.
+   *
+   * Extension first, because browsers leave `type` empty for plenty of real
+   * text files (.env, Dockerfile, .ts on some systems) and an empty type must
+   * not be treated as binary.
+   */
+  const looksBinary = (file: File): boolean => {
+    const ext = file.name.toLowerCase().split('.').pop() || '';
+    if (BINARY_EXTENSIONS.has(ext)) return true;
+    const type = file.type || '';
+    if (!type) return false;
+    return !(type.startsWith('text/') || /json|xml|javascript|typescript|csv|yaml|x-sh|sql|html|svg/.test(type));
+  };
 
   // Process file batches in order so simultaneous drops/selections share one
   // attachment budget and cannot sneak into a different chat after a reset.
@@ -504,6 +588,11 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
             } catch {
               readFailed = true;
             }
+          } else if (looksBinary(file)) {
+            // Reading a PDF or a zip with readAsText attaches pages of mojibake
+            // and spends the prompt budget on nothing. Say so instead.
+            skipped.push(`${file.name} is not a text or image file`);
+            continue;
           } else {
             try {
               content = await new Promise<string>((resolve) => {
@@ -574,13 +663,6 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       processFiles(e.target.files, false);
-      e.target.value = '';
-    }
-  };
-
-  const handleFolderInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      processFiles(e.target.files, true);
       e.target.value = '';
     }
   };
@@ -760,6 +842,18 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // The skill picker owns the keyboard the same way the mention picker does.
+    if (skillOpen) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSkillCursor((c) => (c + 1) % skillHits.length); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setSkillCursor((c) => (c - 1 + skillHits.length) % skillHits.length); return; }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        if (e.nativeEvent?.isComposing) return;
+        e.preventDefault();
+        acceptSkill(skillHits[skillCursor].key);
+        return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); setSkill(null); return; }
+    }
     // The mention picker owns the arrows and Enter while it is up: Enter there
     // means "take this file", not "send the half-written message".
     if (mentionOpen) {
@@ -847,6 +941,41 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     </div>
   ) : null;
 
+  /** The "/" skill list. Sits above the composer, like the mention list. */
+  const skillPanel = skillOpen ? (
+    <div
+      role="listbox"
+      aria-label="Skills"
+      className="absolute bottom-full left-0 right-0 z-30 mb-2 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-xl"
+    >
+      <div className="max-h-60 overflow-y-auto py-1">
+        {skillHits.map((hit, i) => (
+          <div
+            key={hit.key}
+            role="option"
+            aria-selected={i === skillCursor}
+            onPointerDown={(e) => { e.preventDefault(); acceptSkill(hit.key); }}
+            onPointerMove={() => setSkillCursor(i)}
+            className={`mx-1 flex cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1.5 ${
+              i === skillCursor ? 'bg-zinc-100 dark:bg-zinc-800' : ''
+            }`}
+          >
+            <span className="flex items-baseline gap-1.5">
+              <Sparkles className="h-3 w-3 shrink-0 translate-y-[1px] text-violet-500" />
+              <span className="truncate text-[13px] text-zinc-800 dark:text-zinc-200">{hit.key}</span>
+            </span>
+            {hit.description && (
+              <span className="truncate pl-[18px] text-[11.5px] text-zinc-400 dark:text-zinc-500">{hit.description}</span>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="border-t border-zinc-200 dark:border-zinc-800 px-2.5 py-1 text-[10.5px] text-zinc-400 dark:text-zinc-500">
+        ↑↓ pick · ↵ insert · esc dismiss
+      </div>
+    </div>
+  ) : null;
+
   // --------------------------------------------------------------------------
   // CENTERED MODE: Clean Card in Center of Screen (Welcome Screen)
   // --------------------------------------------------------------------------
@@ -854,6 +983,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     return (
       <div className="relative w-full max-w-2xl sm:max-w-3xl mx-auto px-4 select-none">
         {mentionPanel}
+        {skillPanel}
         {agentControls && <div className="px-1 pb-2">{agentControls}</div>}
         {/* Hidden File and Folder Inputs */}
         <input
@@ -862,14 +992,6 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
           multiple
           className="hidden"
           onChange={handleFileInputChange}
-        />
-        <input
-          ref={folderInputRef}
-          type="file"
-          multiple
-          {...({ webkitdirectory: '', directory: '' } as any)}
-          className="hidden"
-          onChange={handleFolderInputChange}
         />
 
         {/* Centered Card Container */}
@@ -919,11 +1041,11 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
             <textarea
               ref={textareaRef}
               value={draft}
-              onChange={(e) => { setDraft(e.target.value); syncMention(e.target); }}
+              onChange={(e) => { setDraft(e.target.value); syncMention(e.target); syncSkill(e.target); }}
               onKeyDown={handleKeyDown}
-              onKeyUp={(e) => syncMention(e.currentTarget)}
-              onClick={(e) => syncMention(e.currentTarget)}
-              onBlur={() => setMention(null)}
+              onKeyUp={(e) => { syncMention(e.currentTarget); syncSkill(e.currentTarget); }}
+              onClick={(e) => { syncMention(e.currentTarget); syncSkill(e.currentTarget); }}
+              onBlur={() => { setMention(null); setSkill(null); }}
               placeholder={placeholder}
               disabled={disabled}
               rows={1}
@@ -977,17 +1099,20 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
                       <File className="w-3.5 h-3.5 text-blue-500 shrink-0" />
                       <span>Upload Files</span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPlusMenuOpen(false);
-                        folderInputRef.current?.click();
-                      }}
-                      className="flex items-center gap-2 w-full px-2.5 py-1.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-200 cursor-pointer"
-                    >
-                      <Folder className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                      <span>Upload Folder</span>
-                    </button>
+                    {!!skills?.length && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPlusMenuOpen(false);
+                          openSkillPicker();
+                        }}
+                        className="flex items-center gap-2 w-full px-2.5 py-1.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-200 cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-violet-500 shrink-0" />
+                        <span>Skills</span>
+                        <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">/</span>
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -1183,17 +1308,20 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
             <File className="w-3.5 h-3.5 text-blue-500 shrink-0" />
             <span>Upload Files</span>
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setPlusMenuOpen(false);
-              folderInputRef.current?.click();
-            }}
-            className="flex items-center gap-2 w-full px-2.5 py-1.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-200 cursor-pointer"
-          >
-            <Folder className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-            <span>Upload Folder</span>
-          </button>
+          {!!skills?.length && (
+            <button
+              type="button"
+              onClick={() => {
+                setPlusMenuOpen(false);
+                openSkillPicker();
+              }}
+              className="flex items-center gap-2 w-full px-2.5 py-1.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-200 cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-violet-500 shrink-0" />
+              <span>Skills</span>
+              <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">/</span>
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -1303,11 +1431,11 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     <textarea
       ref={textareaRef}
       value={draft}
-      onChange={(e) => { setDraft(e.target.value); syncMention(e.target); }}
+      onChange={(e) => { setDraft(e.target.value); syncMention(e.target); syncSkill(e.target); }}
       onKeyDown={handleKeyDown}
-      onKeyUp={(e) => syncMention(e.currentTarget)}
-      onClick={(e) => syncMention(e.currentTarget)}
-      onBlur={() => setMention(null)}
+      onKeyUp={(e) => { syncMention(e.currentTarget); syncSkill(e.currentTarget); }}
+      onClick={(e) => { syncMention(e.currentTarget); syncSkill(e.currentTarget); }}
+      onBlur={() => { setMention(null); setSkill(null); }}
       placeholder={placeholder}
       disabled={disabled}
       rows={1}
@@ -1319,6 +1447,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   return (
     <div ref={composerRootRef} className="relative w-full max-w-3xl mx-auto select-none">
         {mentionPanel}
+        {skillPanel}
       {/* Hidden File and Folder Inputs */}
       <input
         ref={fileInputRef}
@@ -1326,14 +1455,6 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
         multiple
         className="hidden"
         onChange={handleFileInputChange}
-      />
-      <input
-        ref={folderInputRef}
-        type="file"
-        multiple
-        {...({ webkitdirectory: '', directory: '' } as any)}
-        className="hidden"
-        onChange={handleFolderInputChange}
       />
 
       {/* Attached Files & Folders preview chips if any */}

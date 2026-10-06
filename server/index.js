@@ -1027,6 +1027,37 @@ app.get('/api/conversations', (req, res) => {
   return res.json({ success: true, ...data });
 });
 
+/**
+ * Merge ONE conversation into the store.
+ *
+ * The browser's last chance to save is `pagehide`, and the only request that
+ * survives it is a beacon, which browsers cap at 64 KB — smaller than a real
+ * chat history. So the unload path sends just the conversation at risk and
+ * this merges it, rather than the whole store being dropped for being large.
+ */
+app.post('/api/conversations/one', conversationsBody, (req, res) => {
+  const incoming = req.body?.conversation;
+  if (!incoming || typeof incoming !== 'object' || !incoming.id) {
+    return res.status(400).json({ success: false, error: 'A conversation with an id is required' });
+  }
+  const current = readConversationsFromDisk();
+  const list = Array.isArray(current.conversations) ? [...current.conversations] : [];
+  const at = list.findIndex((item) => item && item.id === incoming.id);
+  // An unload payload has its images stripped to fit the beacon, so a saved
+  // attachment must not be deleted by arriving a second time without it.
+  const merged = at === -1 ? incoming : { ...list[at], ...incoming };
+  if (at === -1) list.unshift(merged);
+  else list[at] = merged;
+  const ok = writeConversationsToDisk({
+    conversations: list,
+    activeChatId: req.body?.activeChatId || current.activeChatId || null,
+    updatedAt: Date.now(),
+  }, { keepBackup: true });
+  return ok
+    ? res.json({ success: true, conversations: list.length })
+    : res.status(500).json({ success: false, error: 'Could not save the conversation' });
+});
+
 app.post('/api/conversations', (req, res) => {
   const { conversations, activeChatId } = req.body;
   if (!Array.isArray(conversations)) {

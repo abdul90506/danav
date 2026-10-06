@@ -70,7 +70,7 @@ const AgentWorkRow: React.FC<{
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
             <span className={`min-w-0 max-w-full truncate text-[13.5px] font-medium leading-5 ${live ? 'agent-shimmer' : 'text-zinc-700 dark:text-zinc-200'}`}>
-              {live ? liveLabel : summary || 'Work complete'}
+              {live ? liveLabel : summary || 'Done'}
             </span>
             <ChevronRight
               aria-hidden="true"
@@ -1354,7 +1354,9 @@ urlTransform={safeMarkdownUrl}
               </button>
             )}
 
-            {onRegenerateResponse && (
+            {/* Agent turns do not offer Regenerate: an agent run edits real files,
+                so re-running it silently is not the harmless retry it is in chat. */}
+            {onRegenerateResponse && !message.agent && (
               <button
                 type="button"
                 onClick={() => onRegenerateResponse(message.id)}

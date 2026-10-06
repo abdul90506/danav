@@ -155,6 +155,18 @@ export const getFile = (id: string, path: string) =>
     `/workspaces/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`
   );
 
+/** One entry of the composer's skill picker — the same list `load_skill` accepts. */
+export interface AgentSkill {
+  key: string;
+  name: string;
+  description: string;
+  path?: string;
+  source?: string;
+}
+
+export const listSkills = (workspaceId: string) =>
+  call<{ skills: AgentSkill[] }>('GET', `/workspaces/${encodeURIComponent(workspaceId)}/skills`);
+
 export interface MemoryNote {
   id: string;
   text: string;

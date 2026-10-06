@@ -1152,8 +1152,11 @@ test('formatRanges / formatDuration / workedSummary / stopNotice', () => {
     fmt.workedSummary({ durationMs: 32_000, toolCalls: 8, changed: [{ path: 'a', added: 5, removed: 1 }, { path: 'b', added: 2, removed: 0 }] }),
     'Worked for 32s', 'the header uses the compact reference wording; file details stay in the activity trail'
   );
-  assert.equal(fmt.workedSummary({ durationMs: 7 * 60_000 + 48_000, toolCalls: 8 }), 'Worked for 7m', 'the finished parent shows whole minutes like the references');
-  assert.equal(fmt.workedSummary({ durationMs: 300, toolCalls: 1 }), 'Work complete', 'no stopwatch under a second');
+  assert.equal(fmt.workedSummary({ durationMs: 7 * 60_000 + 48_000, toolCalls: 8 }), 'Worked for 7m 48s', 'a long run keeps its seconds instead of rounding them away');
+  assert.equal(fmt.workedSummary({ durationMs: 300, toolCalls: 1 }), 'Worked for 0.3s', 'a sub-second run still shows its clock');
+  assert.equal(fmt.workedSummary({ durationMs: 42_000, toolCalls: 1 }), 'Worked for 42s', 'seconds stay seconds');
+  assert.equal(fmt.workedSummary({ durationMs: 80_000, toolCalls: 1 }), 'Worked for 1m 20s', 'minutes keep their seconds');
+  assert.equal(fmt.workedSummary({ durationMs: 120_000, toolCalls: 1 }), 'Worked for 2m', 'a whole minute drops the zero');
   assert.equal(fmt.workedSummary({ durationMs: 9_000, toolCalls: 1, stopReason: 'step_limit' }), 'Paused after 9s');
   assert.equal(fmt.workedSummary({}), undefined);
   assert.equal(fmt.workedSummary({ durationMs: 6_000, toolCalls: 0, changed: [] }), undefined, 'a turn that only talked reports nothing');
@@ -1755,6 +1758,28 @@ test('a render crash shows an explanation instead of a white page', async () => 
   assert.ok(!inline.includes('min-h-screen'), 'an inline failure does not take over the window');
   assert.ok(!inline.includes('Reload the page'), 'and does not suggest throwing the session away');
   assert.ok(inline.includes('Try again'), 'it can still recover on its own');
+});
+
+test('typing / offers skills, but never inside a path', async () => {
+  const m = await load('src/components/SkillPicker.ts');
+  const at = (text, caret = text.length) => m.skillQueryAt(text, caret);
+
+  assert.deepEqual(at('/'), { query: '', start: 0 }, 'a slash on its own opens the picker');
+  assert.deepEqual(at('fix this /deb'), { query: 'deb', start: 9 }, 'a slash after a space carries its query');
+  assert.equal(at('src/App.tsx'), null, 'a path separator is not a command');
+  assert.equal(at('</div>'), null, 'a closing tag is not a command');
+  assert.equal(at('/debug now'), null, 'the query ends at the first space');
+
+  const skills = [
+    { key: 'systematic-debugging', name: 'systematic-debugging', description: 'Trace a failure to its cause.' },
+    { key: 'focused-verification', name: 'focused-verification', description: 'Pick the smallest debug check.' },
+  ];
+  assert.equal(m.rankSkills('debug', skills)[0].key, 'systematic-debugging', 'a name hit outranks a description hit');
+  assert.equal(m.rankSkills('', skills).length, 2, 'an empty query still lists what there is');
+
+  const applied = m.applySkill('fix this /deb', 9, 13, 'systematic-debugging');
+  assert.equal(applied.text, 'fix this /systematic-debugging ', 'the chosen skill replaces the query');
+  assert.equal(applied.caret, applied.text.length, 'the caret lands after the inserted space');
 });
 
 test('typing @ in agent mode offers workspace files, and only where a mention can start', async () => {

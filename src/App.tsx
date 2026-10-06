@@ -45,6 +45,8 @@ import {
   saveStoredActiveChatId,
   saveStoredConversations,
   scheduleStoredConversations,
+  sanitizeConversations,
+  stripImagePayloads,
   saveStoredPreviewWidth,
   saveStoredProviders,
   saveStoredTheme,
@@ -66,6 +68,8 @@ import {
   getSandboxStatus,
   listWorkspaces,
   listWorkspaceFiles,
+  listSkills,
+  type AgentSkill,
   stopAgentRun,
   updateWorkspace as updateAgentWorkspace,
   wakeWorkspace,
@@ -224,6 +228,9 @@ export const App: React.FC = () => {
   // profile) must never be pushed over it — that is how a slow first request used to wipe
   // the saved chats.
   const [backendHydrated, setBackendHydrated] = useState(false);
+  /** The newest chats, readable from an unload handler that cannot wait for a render. */
+  const latestConversations = useRef<Conversation[]>([]);
+  const latestActiveChatId = useRef<string | null>(null);
 
   // Discover whether this backend requires the one-time sandbox access code.
   // The check endpoint is intentionally safe to call before authentication.
@@ -312,7 +319,11 @@ export const App: React.FC = () => {
     });
 
     let cancelled = false;
-    const RETRY_MS = [2000, 4000, 8000, 15000];
+    // Backing off to a steady beat, and then keeping that beat forever. Giving
+    // up used to mean `backendHydrated` stayed false for the life of the tab,
+    // which silently disabled EVERY save: a server that was restarting when
+    // the page loaded cost the user the whole session's chats on refresh.
+    const RETRY_MS = [1000, 2000, 4000, 8000, 15000];
     const hydrate = async (attempt = 0) => {
       const data = await fetchBackendConversations();
       if (cancelled) return;
@@ -331,10 +342,13 @@ export const App: React.FC = () => {
           }
         }
         setBackendHydrated(true);
-      } else if (attempt < RETRY_MS.length) {
-        // The server did not answer (starting up, a proxy hiccup): try again rather than
-        // guessing — saving before we have read it could overwrite what it holds.
-        setTimeout(() => hydrate(attempt + 1), RETRY_MS[attempt]);
+        setBackendSaveFailed(false);
+      } else {
+        // The server did not answer (starting up, a proxy hiccup): try again
+        // rather than guessing — saving before we have read it could overwrite
+        // what it holds. But never stop trying, and say so meanwhile.
+        setBackendSaveFailed(true);
+        setTimeout(() => hydrate(attempt + 1), RETRY_MS[Math.min(attempt, RETRY_MS.length - 1)]);
       }
     };
     hydrate();
@@ -430,18 +444,52 @@ export const App: React.FC = () => {
   useEffect(() => {
     // Coalesced, not immediate: this effect fires on every token of a stream.
     scheduleStoredConversations(conversations);
+    latestConversations.current = conversations;
+    latestActiveChatId.current = activeChatId;
     // Not before the server's own copy has been read (see backendHydrated above).
     if (!backendHydrated) return;
     if (backendSaveTimerRef.current) clearTimeout(backendSaveTimerRef.current);
     backendSaveTimerRef.current = setTimeout(() => {
       void saveBackendConversations(conversations, activeChatId).then((result) => {
-        if (!result.ok) setBackendSaveFailed(true);
+        setBackendSaveFailed(!result.ok);
       });
     }, 400);
     return () => {
       if (backendSaveTimerRef.current) clearTimeout(backendSaveTimerRef.current);
     };
   }, [conversations, activeChatId, backendHydrated]);
+
+  /**
+   * Get the last few hundred milliseconds onto disk before the page goes away.
+   *
+   * The save above is debounced, and a reload inside that window used to lose
+   * whatever was typed last. `pagehide` is the only event a browser reliably
+   * delivers on reload, back-navigation and tab close alike, and a beacon is
+   * the only request that survives it — a normal fetch is cancelled with the
+   * document. Nothing here can block the unload.
+   */
+  useEffect(() => {
+    if (!backendHydrated) return;
+    const flush = () => {
+      try {
+        const id = latestActiveChatId.current;
+        const active = latestConversations.current.find((c) => c.id === id);
+        if (!active) return;
+        // One conversation, images dropped: browsers cap a beacon at 64 KB and
+        // the whole store is bigger than that. The server merges this in.
+        const [light] = stripImagePayloads(sanitizeConversations([active]), new Set());
+        const body = JSON.stringify({ conversation: light, activeChatId: id });
+        navigator.sendBeacon?.(
+          '/api/conversations/one',
+          new Blob([body], { type: 'application/json' })
+        );
+      } catch {
+        /* An unload is no place to raise anything. */
+      }
+    };
+    window.addEventListener('pagehide', flush);
+    return () => window.removeEventListener('pagehide', flush);
+  }, [backendHydrated]);
 
   // Persist activeChatId
   useEffect(() => {
@@ -1954,6 +2002,23 @@ export const App: React.FC = () => {
     return () => { cancelled = true; };
   }, [agentOn, activeConversation?.agentWorkspaceId, filesRefresh]);
 
+  /**
+   * The playbooks this workspace offers, for the composer's "/" picker.
+   *
+   * Same source the agent reads, so the menu cannot offer a skill `load_skill`
+   * would then reject. Silent on failure, like the mention list.
+   */
+  const [skills, setSkills] = useState<AgentSkill[]>([]);
+  useEffect(() => {
+    const id = agentOn ? activeConversation?.agentWorkspaceId : null;
+    if (!id) { setSkills([]); return; }
+    let cancelled = false;
+    listSkills(id)
+      .then((r) => { if (!cancelled) setSkills(r.skills || []); })
+      .catch(() => { if (!cancelled) setSkills([]); });
+    return () => { cancelled = true; };
+  }, [agentOn, activeConversation?.agentWorkspaceId, filesRefresh]);
+
   // ---- Command palette -------------------------------------------------------
 
   /** ⌘ on a Mac, Ctrl everywhere else — shown in the UI, not just bound. */
@@ -2171,6 +2236,7 @@ export const App: React.FC = () => {
               isCentered={true}
               draftResetKey={composerReset}
                   mentionFiles={agentOn ? mentionFiles : undefined}
+                  skills={agentOn ? skills : undefined}
               onSend={onSendFromComposer}
               isLoading={isLoading}
               onStop={onStopStable}
@@ -2211,6 +2277,7 @@ export const App: React.FC = () => {
                   isCentered={false}
                   draftResetKey={composerReset}
                   mentionFiles={agentOn ? mentionFiles : undefined}
+                  skills={agentOn ? skills : undefined}
                   onSend={onSendFromComposer}
                   isLoading={isLoading}
                   onStop={onStopStable}

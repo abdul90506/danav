@@ -31,6 +31,7 @@ import {
   killSandboxById, listAccountSandboxes, pauseSandboxById, resumeSandboxById, workspaceSandboxStatus,
 } from './sandboxAdmin.js';
 import { TOOL_DEFINITIONS } from './tools.js';
+import { createSkillRegistry } from './skills.js';
 import { createRedactor, genId } from './util.js';
 import { WorkspaceError } from './workspaces/base.js';
 import {
@@ -189,6 +190,27 @@ export function registerAgentRoutes(app, {
       truncated: text.length > MAX_VIEW_CHARS,
       text: text.length > MAX_VIEW_CHARS ? text.slice(0, MAX_VIEW_CHARS) : text,
     });
+  }));
+
+  /**
+   * The skills this workspace can run, for the composer's picker.
+   *
+   * The same registry the agent uses, so what the user sees in the "/" menu is
+   * exactly what `load_skill` will accept — built-ins plus any SKILL.md the
+   * project carries.
+   */
+  router.get('/workspaces/:id/skills', wrap(async (req, res) => {
+    const ws = await openWorkspace(req.params.id);
+    await ws.init();
+    const registry = createSkillRegistry(ws, createRedactor());
+    let skills = [];
+    try {
+      skills = await registry.discover();
+    } catch {
+      // A picker is not worth failing a request over; an empty list is honest.
+      skills = [];
+    }
+    res.json({ success: true, skills });
   }));
 
   // ------------------------------------------------------------------ memory

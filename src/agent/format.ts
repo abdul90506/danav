@@ -465,11 +465,24 @@ function rawLabel(a: AgentAction): ActionLabel {
   }
 }
 
-/** The compact duration used by the Worked row: seconds below a minute, whole minutes after. */
+/**
+ * The compact duration used by the Worked row.
+ *
+ * Always an answer when the clock ran at all: a fast run reads "0.8s" rather
+ * than disappearing and leaving the row to say "Work complete", and a long one
+ * keeps its seconds ("1m 20s") instead of rounding a minute and a half to "1m".
+ */
 function workedDuration(ms?: number): string | undefined {
-  if (ms === undefined || !Number.isFinite(ms) || ms < 1000) return undefined;
+  if (ms === undefined || !Number.isFinite(ms) || ms < 0) return undefined;
+  if (ms < 1000) return `${Math.max(0.1, Math.round(ms / 100) / 10)}s`;
   const seconds = Math.round(ms / 1000);
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const leftover = minutes % 60;
+  return leftover ? `${hours}h ${leftover}m` : `${hours}h`;
 }
 
 /** 48320 -> "48.3k". Exact below 1000, because "900 tokens" reads better than "0.9k". */
@@ -518,17 +531,18 @@ export function workedSummary(run?: {
   stopReason?: string;
   usage?: { inputTokens?: number; outputTokens?: number };
 }): string | undefined {
+  // A turn that only talked has no work to summarise: the answer is the answer.
   if (!run || (!run.toolCalls && !(run.changed || []).length)) return undefined;
   const time = workedDuration(run.durationMs);
   const spent = usageSummary(run.usage);
   const withCost = (head: string) => (spent ? `${head} · ${spent}` : head);
   if (run.stopReason === 'aborted' || run.stopReason === 'error') {
-    return withCost(time ? `Stopped after ${time}` : 'Work stopped');
+    return withCost(time ? `Stopped after ${time}` : 'Stopped');
   }
   if (run.stopReason && run.stopReason !== 'completed') {
-    return withCost(time ? `Paused after ${time}` : 'Work paused');
+    return withCost(time ? `Paused after ${time}` : 'Paused');
   }
-  return withCost(time ? `Worked for ${time}` : 'Work complete');
+  return withCost(time ? `Worked for ${time}` : 'Worked');
 }
 
 /**
