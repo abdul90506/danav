@@ -52,14 +52,14 @@
    The composer publishes only its measured overflow, so multiline drafts and
    revealed controls move the arrow without a React render or a guessed height. */
 .chat-scroll-latest {
-  bottom: calc(6rem + max(0.75rem, env(safe-area-inset-bottom)) + 0.75rem + var(--danav-composer-extra, 0px));
+  bottom: calc(6rem + max(0.75rem, env(safe-area-inset-bottom)) + 0.75rem + var(--blackdesi-composer-extra, 0px));
   transition: bottom 160ms ease-out;
 }
 
 @media (min-width: 640px) {
   .safe-bottom { padding-bottom: 1rem; }
   .chat-scroll-latest {
-    bottom: calc(6rem + 1rem + 0.75rem + var(--danav-composer-extra, 0px));
+    bottom: calc(6rem + 1rem + 0.75rem + var(--blackdesi-composer-extra, 0px));
   }
 }
 
@@ -624,7 +624,7 @@
    silently doing nothing. Rather than add a dependency, the two classes are
    defined here — the elements animate again, and nothing else changes.
 --------------------------------------------------------------------------- */
-@keyframes danavEnter {
+@keyframes blackdesiEnter {
   from {
     opacity: 0;
     transform: translateY(2px);
@@ -636,12 +636,12 @@
 }
 
 .animate-in {
-  animation: danavEnter 160ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: blackdesiEnter 160ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 /* Kept as a separate class so `animate-in` alone stays a no-op-ish default. */
 .fade-in {
-  animation-name: danavEnter;
+  animation-name: blackdesiEnter;
 }
 
 @media (prefers-reduced-motion: reduce) {

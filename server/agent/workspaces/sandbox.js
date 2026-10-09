@@ -27,7 +27,7 @@ import {
 const posix = path.posix;
 const MAX_CAPTURE_CHARS = 400_000;
 const KEEPALIVE_EVERY_MS = 25_000;
-const BG_DIR = '/tmp/danav-bg';
+const BG_DIR = '/tmp/blackdesi-bg';
 
 let sdkPromise = null;
 
@@ -37,7 +37,7 @@ export function loadNovitaSdk() {
     sdkPromise = import('novita-sandbox').catch(() => {
       sdkPromise = null;
       throw new WorkspaceError(
-        'The "novita-sandbox" package is not installed. Run `npm install` in the Danav folder.',
+        'The "novita-sandbox" package is not installed. Run `npm install` in the BlackDesi folder.',
         'sdk_missing'
       );
     });
@@ -220,7 +220,7 @@ export class SandboxWorkspace extends BaseWorkspace {
       this.sbx = await Sandbox.create('base', {
         apiKey,
         timeoutMs,
-        metadata: { app: 'danav', workspace: this.id },
+        metadata: { app: 'blackdesi', workspace: this.id },
         lifecycle: { onTimeout: 'pause', autoResume: true },
       });
     } catch (err) {
@@ -342,7 +342,7 @@ export class SandboxWorkspace extends BaseWorkspace {
         throw new WorkspaceError(`${this.displayPath(abs)} is a non-empty directory. Pass recursive=true to delete it.`, 'not_empty');
       }
     }
-    await this.execRaw('rm -rf -- "$DANAV_P"', { envs: { DANAV_P: abs } });
+    await this.execRaw('rm -rf -- "$BLACKDESI_P"', { envs: { BLACKDESI_P: abs } });
     return { type: st.type };
   }
 
@@ -364,10 +364,10 @@ export class SandboxWorkspace extends BaseWorkspace {
     if (st.type === 'file') throw new WorkspaceError(`${this.displayPath(abs)} is a file, not a directory.`, 'not_dir');
     const prune = [...IGNORED_DIRS].map((n) => `-name ${shQuote(n)}`).join(' -o ');
     const cmd =
-      `find "$DANAV_P" -mindepth 1 -maxdepth ${Math.max(1, Math.min(6, depth))} ` +
+      `find "$BLACKDESI_P" -mindepth 1 -maxdepth ${Math.max(1, Math.min(6, depth))} ` +
       `\\( -type d \\( ${prune} \\) -printf '%y\\t0\\t%P\\n' -prune \\) -o -printf '%y\\t%s\\t%P\\n' 2>/dev/null ` +
       `| head -n ${maxEntries + 1}`;
-    const r = await this.execRaw(cmd, { envs: { DANAV_P: abs } });
+    const r = await this.execRaw(cmd, { envs: { BLACKDESI_P: abs } });
     const lines = r.stdout.split('\n').filter(Boolean);
     const truncated = lines.length > maxEntries;
     const entries = lines.slice(0, maxEntries).map((line) => {
@@ -391,9 +391,9 @@ export class SandboxWorkspace extends BaseWorkspace {
     try { new RegExp(pattern); } catch { literal = true; }
     // -H forces "path:line:text" whether the target is a file or a directory.
     const cmd =
-      `cd "$DANAV_D" && { grep -rnIH${literal ? 'F' : 'P'} ${ignoreCase ? '-i ' : ''}${include} ${excludes} --max-count=100 ` +
-      `-e "$DANAV_PAT" -- ${shQuote(target)} 2>&1 | head -n ${maxResults * 3 + 5}; exit \${PIPESTATUS[0]}; }`;
-    const r = await this.execRaw(cmd, { envs: { DANAV_D: dir, DANAV_PAT: pattern } });
+      `cd "$BLACKDESI_D" && { grep -rnIH${literal ? 'F' : 'P'} ${ignoreCase ? '-i ' : ''}${include} ${excludes} --max-count=100 ` +
+      `-e "$BLACKDESI_PAT" -- ${shQuote(target)} 2>&1 | head -n ${maxResults * 3 + 5}; exit \${PIPESTATUS[0]}; }`;
+    const r = await this.execRaw(cmd, { envs: { BLACKDESI_D: dir, BLACKDESI_PAT: pattern } });
 
     const matches = [];
     const errors = [];
@@ -417,8 +417,8 @@ export class SandboxWorkspace extends BaseWorkspace {
 
   async findFiles({ pattern, path: abs, maxResults = 200 }) {
     const prune = [...IGNORED_DIRS].map((n) => `-name ${shQuote(n)}`).join(' -o ');
-    const cmd = `find "$DANAV_D" \\( -type d \\( ${prune} \\) -prune \\) -o -type f -printf '%P\\n' 2>/dev/null | head -n 20000`;
-    const r = await this.execRaw(cmd, { envs: { DANAV_D: abs } });
+    const cmd = `find "$BLACKDESI_D" \\( -type d \\( ${prune} \\) -prune \\) -o -type f -printf '%P\\n' 2>/dev/null | head -n 20000`;
+    const r = await this.execRaw(cmd, { envs: { BLACKDESI_D: abs } });
     const useGlob = hasGlobChars(pattern);
     const needle = pattern.toLowerCase();
     const files = [];
@@ -461,11 +461,11 @@ export class SandboxWorkspace extends BaseWorkspace {
     try {
       // `timeout` runs the command in its own process group and kills the WHOLE
       // group on expiry, so a hung `npm test` can't leave children behind.
-      handle = await sbx.commands.run(`timeout -k 3 ${seconds} bash -c "$DANAV_CMD"`, {
+      handle = await sbx.commands.run(`timeout -k 3 ${seconds} bash -c "$BLACKDESI_CMD"`, {
         background: true,
         timeoutMs: 0,
         cwd: cwd || this.root,
-        envs: { ...NON_INTERACTIVE_ENV, ...envs, DANAV_CMD: command, DANAV_RUN: runId },
+        envs: { ...NON_INTERACTIVE_ENV, ...envs, BLACKDESI_CMD: command, BLACKDESI_RUN: runId },
         onStdout: onChunk,
         onStderr: onChunk,
       });
@@ -478,8 +478,8 @@ export class SandboxWorkspace extends BaseWorkspace {
       handle.kill().catch(() => {});
       // The handle only signals the wrapper shell. Kill everything that inherited our run id.
       await this.execRaw(
-        'for p in /proc/[0-9]*; do tr "\\0" "\\n" < $p/environ 2>/dev/null | grep -qx "DANAV_RUN=$DANAV_RUN_ID" && kill -KILL ${p#/proc/} 2>/dev/null; done; true',
-        { envs: { DANAV_RUN_ID: runId }, timeoutMs: 15_000 }
+        'for p in /proc/[0-9]*; do tr "\\0" "\\n" < $p/environ 2>/dev/null | grep -qx "BLACKDESI_RUN=$BLACKDESI_RUN_ID" && kill -KILL ${p#/proc/} 2>/dev/null; done; true',
+        { envs: { BLACKDESI_RUN_ID: runId }, timeoutMs: 15_000 }
       ).catch(() => {});
     };
     const onAbort = () => {
@@ -522,10 +522,10 @@ export class SandboxWorkspace extends BaseWorkspace {
     // that keeps the SDK's stdout pipe open, and this call would hang until its timeout.
     const launcher =
       `mkdir -p ${BG_DIR} && ` +
-      `(setsid bash -c 'echo $$ > "$1"; bash -c "$DANAV_CMD"; echo $? > "$2"' _ ${base}.pid ${base}.exit ` +
+      `(setsid bash -c 'echo $$ > "$1"; bash -c "$BLACKDESI_CMD"; echo $? > "$2"' _ ${base}.pid ${base}.exit ` +
       `> ${base}.log 2>&1 < /dev/null &) ; ` +
       `for i in $(seq 1 30); do [ -s ${base}.pid ] && break; sleep 0.1; done; cat ${base}.pid`;
-    const r = await this.execRaw(launcher, { cwd: cwd || this.root, envs: { DANAV_CMD: command } });
+    const r = await this.execRaw(launcher, { cwd: cwd || this.root, envs: { BLACKDESI_CMD: command } });
     const pid = Number(r.stdout.trim().split('\n').pop());
     if (!Number.isFinite(pid) || pid <= 0) {
       throw new WorkspaceError(`Could not start the background process: ${(r.stderr || r.stdout).slice(0, 200)}`, 'start_failed');

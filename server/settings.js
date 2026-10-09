@@ -186,6 +186,23 @@ function withAutoModel(provider) {
   ];
 }
 
+/**
+ * Tag the free models for a visitor who has no key of their own on this provider,
+ * and move them to the top of the provider's list.
+ */
+function withFreeFlags(provider, models) {
+  const ownKey = providerApiKeys(provider).length > 0;
+  const tagged = models.map((model) => {
+    const free = !ownKey && isFreeModel(provider.id, model.id);
+    return free ? { ...model, free: true } : model;
+  });
+  if (ownKey) return tagged;
+  return [
+    ...tagged.filter((model) => model.free),
+    ...tagged.filter((model) => !model.free),
+  ];
+}
+
 /** The only settings shape safe to return to the browser. */
 export function publicSettings(settings) {
   const value = isObject(settings) ? settings : {};
@@ -200,7 +217,7 @@ export function publicSettings(settings) {
         apiKeyConfigured: providerApiKeys(provider).length > 0,
         apiKeyCount: providerApiKeys(provider).length,
         ...(isObject(provider.quota) ? { quota: normalizeQuota(provider.quota) } : {}),
-        models: withAutoModel(provider),
+        models: withFreeFlags(provider, withAutoModel(provider)),
       }))
     : [];
 
@@ -258,4 +275,41 @@ export function resolveConfiguredProvider(provider, settings) {
     ...(Array.isArray(stored.models) && stored.models.length ? { models: stored.models } : {}),
     ...(isObject(stored.quota) ? { quota: stored.quota } : {}),
   };
+}
+
+/**
+ * Models the operator offers free to every visitor.
+ *
+ * They run on the operator's own key (from .env). A visitor who saves a key for
+ * that provider uses their own key instead, and the free tag disappears for them.
+ * Every other model on these providers needs the visitor's own key.
+ */
+export const FREE_MODELS = {
+  'provider-gemini': ['models/gemini-3.1-flash-lite', 'models/gemini-3.5-flash-lite'],
+  'provider-vyce': ['agnes-3.0-flash'],
+};
+
+/** The operator's shared key for a provider, read from the environment only. */
+export function operatorKeyFor(providerId) {
+  const env = process.env;
+  if (providerId === 'provider-gemini') return String(env.GEMINI_API_KEY || '').trim();
+  if (providerId === 'provider-vyce') return String(env.VYCE_API_KEY || '').trim();
+  return '';
+}
+
+export function isFreeModel(providerId, modelId) {
+  return (FREE_MODELS[providerId] || []).includes(String(modelId || ''));
+}
+
+/**
+ * Give a free model the operator's key when the visitor saved none.
+ * Non-free models and visitors with their own key are returned unchanged.
+ */
+export function withOperatorKey(provider, modelId) {
+  if (!isObject(provider)) return provider;
+  if (providerApiKeys(provider).length > 0) return provider;
+  if (!isFreeModel(provider.id, modelId)) return provider;
+  const key = operatorKeyFor(provider.id);
+  if (!key) return provider;
+  return { ...provider, apiKeys: [key], apiKey: key };
 }

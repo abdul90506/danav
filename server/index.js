@@ -23,7 +23,7 @@ import {
   snapshot as quotaSnapshot,
 } from './agent/quota.js';
 import { modelForProvider, normalizeThinkingLevel, thinkingParams } from './agent/thinking.js';
-import { mergeSettingsPatch, providerApiKeys, publicSettings, resolveAgentSummaryModel, resolveConfiguredProvider } from './settings.js';
+import { FREE_MODELS, mergeSettingsPatch, providerApiKeys, publicSettings, resolveAgentSummaryModel, resolveConfiguredProvider, withOperatorKey } from './settings.js';
 import {
   decodeHtmlEntities,
   describePageFetchFailure,
@@ -50,18 +50,18 @@ const PORT = process.env.PORT || 3001;
 /**
  * The preview access code.
  *
- * Danav is often served on a public URL (a tunnel, a hosting preview). Without a
+ * BlackDesi is often served on a public URL (a tunnel, a hosting preview). Without a
  * code, anyone who learns that URL can spend the configured provider key and
  * drive Agent mode — the app itself has no other gate. So when the app is
- * reachable beyond localhost (`DANAV_ALLOWED_HOSTS` is set), a code is required:
- * `DANAV_PREVIEW_TOKEN` if the operator gave one, otherwise a generated code kept
+ * reachable beyond localhost (`BLACKDESI_ALLOWED_HOSTS` is set), a code is required:
+ * `BLACKDESI_PREVIEW_TOKEN` if the operator gave one, otherwise a generated code kept
  * in `preview-token.txt` in the data directory.
  *
  * Local development is untouched: no allowed hosts, no code.
- * `DANAV_DISABLE_PREVIEW_AUTH=1` opts out (for deployments sitting behind their
+ * `BLACKDESI_DISABLE_PREVIEW_AUTH=1` opts out (for deployments sitting behind their
  * own authentication).
  */
-let PREVIEW_TOKEN = String(process.env.DANAV_PREVIEW_TOKEN || '').trim();
+let PREVIEW_TOKEN = String(process.env.BLACKDESI_PREVIEW_TOKEN || '').trim();
 
 function previewToken() {
   return PREVIEW_TOKEN;
@@ -77,7 +77,7 @@ function previewTokenMatches(req) {
   // so on a preview with an access code a refresh could genuinely swallow the
   // last message. A beacon may therefore present the same token in the query
   // string instead; it is the identical secret, checked the identical way.
-  const fromHeader = String(req.headers['x-danav-preview-token'] || '');
+  const fromHeader = String(req.headers['x-blackdesi-preview-token'] || '');
   const fromQuery = fromHeader ? '' : String(req.query?.token || '');
   const supplied = Buffer.from(fromHeader || fromQuery);
   return expected.length === supplied.length && timingSafeEqual(expected, supplied);
@@ -579,7 +579,8 @@ function formatFetchedPageResult({ url, title, markdown, searchQuery, fetchNote 
 }
 
 // Persistent Settings on Server Disk
-const DATA_DIR = process.env.DANAV_DATA_DIR || path.join(__dirname, 'data');
+// Vercel's filesystem is read-only except /tmp, which is wiped between cold starts.
+const DATA_DIR = process.env.BLACKDESI_DATA_DIR || (process.env.VERCEL ? '/tmp/blackdesi-data' : path.join(__dirname, 'data'));
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
@@ -592,8 +593,8 @@ fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
  */
 function resolvePreviewToken() {
   if (PREVIEW_TOKEN) return 'configured';
-  if (process.env.DANAV_DISABLE_PREVIEW_AUTH === '1') return 'disabled';
-  if (!String(process.env.DANAV_ALLOWED_HOSTS || '').trim()) return 'local';
+  if (process.env.BLACKDESI_DISABLE_PREVIEW_AUTH === '1') return 'disabled';
+  if (!String(process.env.BLACKDESI_ALLOWED_HOSTS || '').trim()) return 'local';
 
   const tokenFile = path.join(DATA_DIR, 'preview-token.txt');
   let code = '';
@@ -631,7 +632,7 @@ function generatePreviewCode() {
 
 const previewAuthMode = resolvePreviewToken();
 // The settings file can contain provider API keys. Restrict this store to the
-// account running Danav on POSIX systems; Windows uses its normal ACL model.
+// account running BlackDesi on POSIX systems; Windows uses its normal ACL model.
 if (process.platform !== 'win32') {
   try { fs.chmodSync(DATA_DIR, 0o700); } catch { /* best effort on unusual filesystems */ }
   if (fs.existsSync(SETTINGS_FILE)) {
@@ -663,19 +664,21 @@ function atomicWriteFileSync(filePath, contents) {
 
 const DEFAULT_SETTINGS = {
   agentSummaryModel: null,
+  // Provider keys are NOT stored here. A visitor's own saved key wins; otherwise
+  // the free models use the operator's key from .env (see withOperatorKey).
   providers: [
     {
       id: 'provider-gemini',
-      name: 'gemmni',
+      name: 'Google Gemini',
       baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-      apiKey: process.env.GEMINI_API_KEY || '',
+      apiKey: '',
       apiType: 'openai',
       isCustom: true,
       enabled: true,
       models: [
-        { id: 'models/gemini-3.5-flash', name: 'models/gemini-3.5-flash', providerId: 'provider-gemini', supportsThinking: true },
         { id: 'models/gemini-3.1-flash-lite', name: 'models/gemini-3.1-flash-lite', providerId: 'provider-gemini', supportsThinking: true },
         { id: 'models/gemini-3.5-flash-lite', name: 'models/gemini-3.5-flash-lite', providerId: 'provider-gemini', supportsThinking: true },
+        { id: 'models/gemini-3.5-flash', name: 'models/gemini-3.5-flash', providerId: 'provider-gemini', supportsThinking: true },
         { id: 'models/gemini-3.6-flash', name: 'models/gemini-3.6-flash', providerId: 'provider-gemini', supportsThinking: true },
         { id: 'models/gemma-4-26b-a4b-it', name: 'models/gemma-4-26b-a4b-it', providerId: 'provider-gemini', supportsThinking: false },
         { id: 'models/gemma-4-31b-it', name: 'models/gemma-4-31b-it', providerId: 'provider-gemini', supportsThinking: false },
@@ -685,7 +688,7 @@ const DEFAULT_SETTINGS = {
       id: 'provider-vyce',
       name: 'Vyce AI',
       baseUrl: 'https://vyceai.com/v1',
-      apiKey: process.env.VYCE_API_KEY || '',
+      apiKey: '',
       apiType: 'openai',
       isCustom: false,
       enabled: true,
@@ -702,7 +705,7 @@ const DEFAULT_SETTINGS = {
   ],
   theme: 'light',
   lastSelectedProviderId: 'provider-gemini',
-  lastSelectedModelId: 'models/gemini-3.5-flash',
+  lastSelectedModelId: 'models/gemini-3.1-flash-lite',
 };
 
 function readSettingsFromDisk() {
@@ -1191,7 +1194,7 @@ app.post('/api/conversations/restore', (req, res) => {
 // Ask the active model for a short chat title.
 app.post('/api/chat/title', async (req, res) => {
   const { provider: suppliedProvider, model, message } = req.body || {};
-  const provider = providerWithStoredCredentials(suppliedProvider);
+  const provider = providerWithStoredCredentials(suppliedProvider, typeof model === 'string' ? model : model?.id);
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'Message is required' });
   }
@@ -1311,8 +1314,9 @@ function metadataUrlRefusal(provider) {
   );
 }
 
-function providerWithStoredCredentials(provider) {
-  return resolveConfiguredProvider(provider, readSettingsFromDisk());
+function providerWithStoredCredentials(provider, modelId = '') {
+  const resolved = resolveConfiguredProvider(provider, readSettingsFromDisk());
+  return withOperatorKey(resolved, modelId);
 }
 
 const providerKeyCursors = new Map();
@@ -1730,7 +1734,7 @@ async function streamMockResponse(res, messages, model, thinkingLevel) {
 // long before it "runs out of answer". Overridable so a deployment whose
 // provider allows more (or requires less) can tune it without editing code.
 const CHAT_MAX_TOKENS =
-  Number(process.env.DANAV_MAX_TOKENS) > 0 ? Number(process.env.DANAV_MAX_TOKENS) : 32768;
+  Number(process.env.BLACKDESI_MAX_TOKENS) > 0 ? Number(process.env.BLACKDESI_MAX_TOKENS) : 32768;
 
 /**
  * The read-only web tools chat mode can call.
@@ -1823,8 +1827,8 @@ const CHAT_TOOLS = [
 ];
 
 /** How many tool rounds the model may run before it is made to answer. */
-const MAX_TOOL_ROUNDS = Number(process.env.DANAV_MAX_TOOL_ROUNDS) > 0
-  ? Number(process.env.DANAV_MAX_TOOL_ROUNDS)
+const MAX_TOOL_ROUNDS = Number(process.env.BLACKDESI_MAX_TOOL_ROUNDS) > 0
+  ? Number(process.env.BLACKDESI_MAX_TOOL_ROUNDS)
   : 5;
 
 /**
@@ -1902,7 +1906,7 @@ const MINUTE_WAIT_CAP_MS = 9_000;
 /**
  * Only what the provider actually asked for, in milliseconds.
  *
- * `retryWaitMs` blends the hint with Danav's own backoff, which is right for
+ * `retryWaitMs` blends the hint with BlackDesi's own backoff, which is right for
  * sleeping and wrong for the ledger: a cooldown must come from the provider or
  * from the module's defaults, never from a backoff curve.
  */
@@ -1926,8 +1930,8 @@ function retryWaitMs(response, retryNumber) {
       if (!Number.isNaN(when)) retryAfter = Math.max(when - Date.now(), 0);
     }
   }
-  const retryBase = Number(process.env.DANAV_CHAT_RETRY_BASE_MS) > 0
-    ? Number(process.env.DANAV_CHAT_RETRY_BASE_MS)
+  const retryBase = Number(process.env.BLACKDESI_CHAT_RETRY_BASE_MS) > 0
+    ? Number(process.env.BLACKDESI_CHAT_RETRY_BASE_MS)
     : 2000;
   const backoff = Math.min(retryBase * (2 ** Math.max(0, retryNumber - 1)), MAX_RETRY_WAIT_MS);
   // Respect an explicit immediate retry once, then resume distinct exponential
@@ -1974,7 +1978,7 @@ async function callProviderWithRetry(call, { onRetry, isCancelled, signal, provi
       const plan = () => planAttempts(provider, model, { credentialCount: pool.keys.length || 1, models: routable })[0];
       let planned = plan();
       // Only wait when the provider itself has refused us AND a slot is
-      // seconds away. An unconfirmed budget is Danav's arithmetic, not a
+      // seconds away. An unconfirmed budget is BlackDesi's arithmetic, not a
       // reason to leave a working key idle: send, and believe the answer.
       if (planned && !planned.available && planned.confirmed && Number.isFinite(planned.readyAt)) {
         const waitMs = Math.min(MINUTE_WAIT_CAP_MS, Math.max(0, planned.readyAt - Date.now()));
@@ -2104,7 +2108,7 @@ function trimOldestTurns(messages, keepTurns = 6) {
 
 app.post('/api/chat', async (req, res) => {
   const { provider: suppliedProvider, model: modelInput, messages, thinkingLevel, toolsEnabled } = req.body || {};
-  const provider = providerWithStoredCredentials(suppliedProvider);
+  const provider = providerWithStoredCredentials(suppliedProvider, typeof modelInput === 'string' ? modelInput : modelInput?.id);
 
   if (!provider) {
     return res.status(400).json({ error: 'Provider configuration is missing' });
@@ -2122,6 +2126,14 @@ app.post('/api/chat', async (req, res) => {
 
   if (!modelInput) {
     return res.status(400).json({ error: 'Model selection is missing' });
+  }
+
+  // A provider the operator gives free models on has no shared key for its other
+  // models: say so plainly instead of letting the upstream reject an empty key.
+  if (FREE_MODELS[provider.id] && providerApiKeys(provider).length === 0) {
+    return res.status(400).json({
+      error: 'Ye model free nahi hai. Settings → Providers mein is provider ki apni API key save karein, ya free model chunein.',
+    });
   }
 
   /**
@@ -2587,7 +2599,7 @@ app.post('/api/chat', async (req, res) => {
         ? 'thinking_unsupported'
         : undefined;
       if (code) {
-        errorMsg = `The provider rejected the selected ${selectedThinkingLevel} thinking effort. Danav did not lower or remove it; check that this model and endpoint support that level. (${errorMsg})`;
+        errorMsg = `The provider rejected the selected ${selectedThinkingLevel} thinking effort. BlackDesi did not lower or remove it; check that this model and endpoint support that level. (${errorMsg})`;
       }
 
       if (sseStarted) {
@@ -3673,14 +3685,14 @@ app.post('/api/search', handleSearchTool);
 // Agent mode: workspaces, files, commands, and the agent run itself.
 registerAgentRoutes(app, {
   runSearchTool,
-  resolveProvider: providerWithStoredCredentials,
+  resolveProvider: (provider, model) => providerWithStoredCredentials(provider, typeof model === 'string' ? model : model?.id),
   resolveSummaryModel: (provider, model) => resolveAgentSummaryModel(readSettingsFromDisk(), provider, model),
 });
 
 // A cloud sandbox bills while it is RUNNING, so one left behind after a run is
 // pure cost. This sweeper pauses app-managed sandboxes once they go quiet, and
 // is what makes "the agent finished, so the sandbox went to sleep" true.
-startIdlePauseSweeper({ isBusy: (workspaceId) => _activeRuns.has(workspaceId) });
+if (!process.env.VERCEL) startIdlePauseSweeper({ isBusy: (workspaceId) => _activeRuns.has(workspaceId) });
 
 /**
  * Run one of the read-only web tools and hand back its plain result object.
@@ -3811,11 +3823,16 @@ const listen = () => {
   if (previewAuthMode === 'generated') {
     console.log('');
     console.log('  This server is reachable beyond localhost, so the API needs an access code.');
-    console.log(`  (the generated code is saved privately in ${path.join(DATA_DIR, 'preview-token.txt')}; set DANAV_PREVIEW_TOKEN to choose your own)`);
+    console.log(`  (the generated code is saved privately in ${path.join(DATA_DIR, 'preview-token.txt')}; set BLACKDESI_PREVIEW_TOKEN to choose your own)`);
     console.log('');
   }
 };
 // The Vite dev server proxies /api requests locally. Keep its backend private by
 // default in dev so the exposed Vite preview is the only public entry point.
-if (process.env.DANAV_HOST) app.listen(PORT, process.env.DANAV_HOST, listen);
-else app.listen(PORT, listen);
+// On Vercel the app is imported as a serverless function (api/index.js), which
+// owns the request lifecycle; only a normal server process listens here.
+export default app;
+if (!process.env.VERCEL) {
+  if (process.env.BLACKDESI_HOST) app.listen(PORT, process.env.BLACKDESI_HOST, listen);
+  else app.listen(PORT, listen);
+}

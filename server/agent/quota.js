@@ -182,7 +182,7 @@ function load() {
         cooldownUntil: 0,
         lastStatus: 0,
         // Whether the provider itself has refused this pair today, as opposed
-        // to Danav's own estimate saying it should be full.
+        // to BlackDesi's own estimate saying it should be full.
         refused: value.refused === true,
       });
     }
@@ -343,7 +343,7 @@ export function headroom(provider, credentialIndex, model, at = Date.now()) {
     // it is a reason to prefer another model, never a reason to refuse to work.
     busy: busyUntil > at,
     busyUntil,
-    // Whether this budget is the provider's own word or Danav's assumption.
+    // Whether this budget is the provider's own word or BlackDesi's assumption.
     // Nothing is ever refused on an assumption alone.
     confirmed: confirmed || value.refused === true,
     refused: value.refused === true,
@@ -426,7 +426,7 @@ export function recordBusy(providerId, credentialIndex, model, { status = 0, ret
   const value = entry(providerId, credentialIndex, model, at);
   value.lastStatus = Number(status) || 0;
   if (status === 429) {
-    // The provider counted requests Danav did not. Believe it: fill the local
+    // The provider counted requests BlackDesi did not. Believe it: fill the local
     // window, remember that this pair was genuinely refused, and take any
     // limit it stated while it is being explicit about them.
     if (body) learnLimits(providerId, model, body);
@@ -486,7 +486,7 @@ export function snapshot(providers = [], at = Date.now()) {
         model,
         rpm,
         rpd,
-        // Whether these numbers are the provider's own, or Danav's estimate.
+        // Whether these numbers are the provider's own, or BlackDesi's estimate.
         confirmed,
         // The provider said this model is busy; it is skipped, not spent.
         busyInMs: busyUntil > at ? busyUntil - at : 0,

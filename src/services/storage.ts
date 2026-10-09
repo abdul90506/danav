@@ -1,11 +1,11 @@
 import type { AgentAction, Conversation, MessageBlock, Provider, Theme } from '../types';
 
 const STORAGE_KEYS = {
-  CONVERSATIONS: 'danav_chat_history_v2',
-  PROVIDERS: 'danav_chat_providers_v2',
-  THEME: 'danav_chat_theme_v2',
-  ACTIVE_CHAT: 'danav_active_chat_id_v2',
-  PREVIEW_WIDTH: 'danav_preview_width_v1',
+  CONVERSATIONS: 'blackdesi_chat_history_v2',
+  PROVIDERS: 'blackdesi_chat_providers_v2',
+  THEME: 'blackdesi_chat_theme_v2',
+  ACTIVE_CHAT: 'blackdesi_active_chat_id_v2',
+  PREVIEW_WIDTH: 'blackdesi_preview_width_v1',
 };
 
 export const DEFAULT_PROVIDERS: Provider[] = [

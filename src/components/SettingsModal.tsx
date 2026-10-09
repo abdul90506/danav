@@ -183,7 +183,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       null,
       2
     );
-    const fileName = `danav-chats-${new Date().toISOString().slice(0, 10)}.json`;
+    const fileName = `blackdesi-chats-${new Date().toISOString().slice(0, 10)}.json`;
     const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
     const link = document.createElement('a');
     link.href = url;
@@ -876,7 +876,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           Spread requests across keys and models
                         </span>
                         <span className="block text-[10px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                          For providers with a published free tier, such as Gemini. Danav counts
+                          For providers with a published free tier, such as Gemini. BlackDesi counts
                           requests per key and per model, moves to the next pair before a limit is
                           reached, and keeps a refused pair out of rotation.
                         </span>
@@ -1327,7 +1327,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div>
                 <h3 className="text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">Request limits</h3>
                 <p className="mt-1 text-[13px] text-zinc-500 dark:text-zinc-400">
-                  Keys are budgeted per model, not per key, so Danav picks the key and model that still have room
+                  Keys are budgeted per model, not per key, so BlackDesi picks the key and model that still have room
                   before it sends anything — and moves on the moment one is refused.
                 </p>
               </div>
@@ -1340,7 +1340,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div>
                 <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Task-step memory</h3>
                 <p className="text-xs text-zinc-500 mt-1">
-                  Danav keeps short notes about meaningful progress so long tasks can continue without replaying old work.
+                  BlackDesi keeps short notes about meaningful progress so long tasks can continue without replaying old work.
                 </p>
               </div>
 

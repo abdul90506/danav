@@ -50,7 +50,7 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
   if (!isOpen) return null;
 
   const needsKey = kind === 'sandbox' && !config?.novita.configured;
-  const defaultDir = config?.local.workspacesDir || '~/danav-workspaces';
+  const defaultDir = config?.local.workspacesDir || '~/blackdesi-workspaces';
 
   const submit = async () => {
     setError('');
@@ -131,7 +131,7 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
             <label className="block text-[12px] font-medium text-zinc-600 dark:text-zinc-300 mb-1.5">Where should the agent work?</label>
             <div className="flex gap-2">
               {option('sandbox', 'Cloud sandbox', 'An isolated Linux computer from Novita. Safe to experiment in; web apps get a public preview link.', Cloud)}
-              {option('local', 'This machine', 'A folder on the computer running Danav — files appear right on your disk.', Laptop)}
+              {option('local', 'This machine', 'A folder on the computer running BlackDesi — files appear right on your disk.', Laptop)}
             </div>
           </div>
 
@@ -175,7 +175,7 @@ export const WorkspaceDialog: React.FC<WorkspaceDialogProps> = ({ isOpen, onClos
                 <p className="mt-1.5 text-[12px] text-zinc-500 dark:text-zinc-400">
                   {config?.local.allowAnyPath
                     ? 'Any absolute folder works. Leave empty to create a new one.'
-                    : `Leave empty to create a new folder in ${defaultDir}. To open any folder, start Danav with DANAV_ALLOW_ANY_LOCAL_PATH=1.`}
+                    : `Leave empty to create a new folder in ${defaultDir}. To open any folder, start BlackDesi with BLACKDESI_ALLOW_ANY_LOCAL_PATH=1.`}
                 </p>
               </div>
               <label className="flex items-start gap-2 text-[12px] text-zinc-700 dark:text-zinc-300 cursor-pointer">

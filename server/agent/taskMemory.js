@@ -27,9 +27,9 @@ const MAX_BATCH_EVENTS = 5;
  * with update_plan at no extra call. The model pass only rewords all of that
  * more nicely, which is not worth a request.
  *
- * Off by default. DANAV_AGENT_MEMORY_SUMMARIES=<n> turns it back on.
+ * Off by default. BLACKDESI_AGENT_MEMORY_SUMMARIES=<n> turns it back on.
  */
-const MAX_MODEL_SUMMARIES = Math.max(0, Math.min(6, Number(process.env.DANAV_AGENT_MEMORY_SUMMARIES) || 0));
+const MAX_MODEL_SUMMARIES = Math.max(0, Math.min(6, Number(process.env.BLACKDESI_AGENT_MEMORY_SUMMARIES) || 0));
 const MAX_LIVE_MEMORIES = 6;
 const SUMMARY_TIMEOUT_MS = 120_000;
 

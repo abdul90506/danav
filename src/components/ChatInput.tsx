@@ -347,6 +347,11 @@ const ModelSelectorDropdown: React.FC<ModelSelectorDropdownProps> = ({
                         Fast
                       </span>
                     )}
+                    {model.free && (
+                      <span className="inline-flex items-center px-1 py-0.2 rounded text-[10px] bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-300 font-semibold shrink-0">
+                        FREE
+                      </span>
+                    )}
                     {isAuto && (
                       <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[10px] bg-sky-50 dark:bg-sky-950/60 text-sky-600 dark:text-sky-300 font-medium shrink-0">
                         <Shuffle className="w-2.5 h-2.5" />
@@ -708,8 +713,8 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
   const publishComposerOverflow = () => {
     const height = composerRootRef.current?.getBoundingClientRect().height ?? 96;
     const extra = Math.max(0, height - 96);
-    if (extra > 0) document.documentElement.style.setProperty('--danav-composer-extra', `${Math.round(extra)}px`);
-    else document.documentElement.style.removeProperty('--danav-composer-extra');
+    if (extra > 0) document.documentElement.style.setProperty('--blackdesi-composer-extra', `${Math.round(extra)}px`);
+    else document.documentElement.style.removeProperty('--blackdesi-composer-extra');
   };
   useEffect(() => {
     const el = textareaRef.current;
@@ -788,7 +793,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     setAttachmentNotice('');
     setDraft('');
     lastDraftLengthRef.current = 0;
-    document.documentElement.style.removeProperty('--danav-composer-extra');
+    document.documentElement.style.removeProperty('--blackdesi-composer-extra');
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = '';
@@ -802,7 +807,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
     () => () => {
       attachmentEpochRef.current += 1;
       attachmentsRef.current = [];
-      document.documentElement.style.removeProperty('--danav-composer-extra');
+      document.documentElement.style.removeProperty('--blackdesi-composer-extra');
     },
     []
   );
@@ -838,7 +843,7 @@ const ChatInputInner: React.FC<ChatInputProps> = ({
       textareaRef.current.style.height = '';
       textareaRef.current.style.overflowY = 'hidden';
     }
-    document.documentElement.style.removeProperty('--danav-composer-extra');
+    document.documentElement.style.removeProperty('--blackdesi-composer-extra');
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {

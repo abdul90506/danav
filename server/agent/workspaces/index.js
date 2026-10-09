@@ -66,7 +66,7 @@ async function validateLocalPath(input) {
   if (!allowAnyLocalPath() && !isInside(workspacesDir(), abs)) {
     throw new WorkspaceError(
       `For safety, local workspaces must live inside ${workspacesDir()}. ` +
-        'Set DANAV_ALLOW_ANY_LOCAL_PATH=1 (and restart) to open any folder.',
+        'Set BLACKDESI_ALLOW_ANY_LOCAL_PATH=1 (and restart) to open any folder.',
       'path_not_allowed'
     );
   }
@@ -76,8 +76,12 @@ async function validateLocalPath(input) {
 /**
  * @param {{ name?: string, kind: 'sandbox'|'local', path?: string, autoRun?: boolean }} opts
  */
+/** A local folder runs commands on the host itself; a hosted deployment is shared, so it is refused there. */
+const LOCAL_DISABLED_MESSAGE = 'Local folders are not available on the hosted site. Use a cloud sandbox workspace.';
+
 export async function createWorkspace({ name, kind, path: customPath, autoRun } = {}) {
   if (kind !== 'sandbox' && kind !== 'local') throw new WorkspaceError('kind must be "sandbox" or "local".', 'bad_request');
+  if (kind === 'local' && process.env.VERCEL) throw new WorkspaceError(LOCAL_DISABLED_MESSAGE, 'local_disabled');
 
   const existing = listWorkspaceRecords();
   const cleanName = String(name || '').trim().slice(0, 60) || `project-${existing.length + 1}`;
@@ -127,6 +131,7 @@ export async function openWorkspace(id) {
     instances.delete(id);
     throw new WorkspaceError('That workspace no longer exists. Create or pick another one.', 'not_found');
   }
+  if (record.kind === 'local' && process.env.VERCEL) throw new WorkspaceError(LOCAL_DISABLED_MESSAGE, 'local_disabled');
   if (!ws) {
     ws = makeInstance(record);
     instances.set(id, ws);

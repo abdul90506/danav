@@ -10,6 +10,8 @@ export interface Model {
   providerId: string;
   supportsThinking?: boolean;
   description?: string;
+  /** Offered free by the operator while this visitor has no key of their own. */
+  free?: boolean;
 }
 
 /** Background task-note model; null follows the provider/model of the current run. */
@@ -275,7 +277,7 @@ export interface AgentWorkspace {
 /** The lifecycle of a sandbox as Novita reports it. */
 export type SandboxState = 'running' | 'paused' | 'gone';
 
-/** One sandbox in the Novita account — whether or not Danav created it. */
+/** One sandbox in the Novita account — whether or not BlackDesi created it. */
 export interface SandboxSummary {
   sandboxId: string;
   state: SandboxState;
@@ -287,8 +289,8 @@ export interface SandboxSummary {
   /** When Novita will pause it on its own if nothing keeps it alive. */
   endAt: number | null;
   metadata: Record<string, string>;
-  /** Created by Danav at some point, even if its workspace is long gone. */
-  isDanav: boolean;
+  /** Created by BlackDesi at some point, even if its workspace is long gone. */
+  isBlackDesi: boolean;
   /** A workspace in this app still points at it. */
   managed: boolean;
   workspaceId: string | null;

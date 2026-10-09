@@ -1,4 +1,4 @@
-const TOKEN_KEY = 'danav_preview_access_code';
+const TOKEN_KEY = 'blackdesi_preview_access_code';
 
 export function savePreviewAccessCode(code: string): void {
   try {
@@ -19,7 +19,7 @@ export function clearPreviewAccessCode(): void {
 export function previewAuthHeaders(): Record<string, string> {
   try {
     const token = typeof sessionStorage === 'undefined' ? '' : sessionStorage.getItem(TOKEN_KEY) || '';
-    return token ? { 'x-danav-preview-token': token } : {};
+    return token ? { 'x-blackdesi-preview-token': token } : {};
   } catch {
     return {};
   }

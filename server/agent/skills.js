@@ -11,7 +11,7 @@
 import { looksLikeSecret } from './memory.js';
 import { BUILTIN_SKILLS } from './builtinSkills.js';
 
-const SKILL_ROOTS = ['.danav/skills', '.agents/skills', '.claude/skills', '.cursor/skills'];
+const SKILL_ROOTS = ['.blackdesi/skills', '.agents/skills', '.claude/skills', '.cursor/skills'];
 const MAX_SKILLS = 26;
 const MAX_SKILL_BYTES = 48_000;
 const MAX_DISCOVERY_BYTES = 480_000;
@@ -151,7 +151,7 @@ export function createSkillRegistry(workspace, redact = (text) => text) {
       const choices = items.slice(0, 12).map((skill) => skill.key);
       throw new Error(choices.length
         ? `No project skill named "${oneLine(requestedName, 80)}". Available: ${choices.join(', ')}.`
-        : 'No project skills were found. Skills are Markdown playbooks in .danav/skills, .agents/skills, .claude/skills, or .cursor/skills.');
+        : 'No project skills were found. Skills are Markdown playbooks in .blackdesi/skills, .agents/skills, .claude/skills, or .cursor/skills.');
     }
 
     if (item.bundled) {

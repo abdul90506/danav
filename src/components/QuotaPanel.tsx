@@ -267,7 +267,7 @@ export function QuotaPanel() {
                     {model.busyInMs > 0 && (
                       <span
                         className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 dark:bg-amber-500/10 dark:text-amber-400"
-                        title="The provider says this model is under heavy demand. Danav steps over it and uses another one; it is not using up your allowance."
+                        title="The provider says this model is under heavy demand. BlackDesi steps over it and uses another one; it is not using up your allowance."
                       >
                         busy {Math.ceil(model.busyInMs / 1000)}s
                       </span>
@@ -291,7 +291,7 @@ export function QuotaPanel() {
                       <p className="col-span-2 text-[10.5px] text-zinc-400 sm:col-span-4">
                         {model.confirmed
                           ? `${model.rpm} a minute and ${model.rpd} a day per key, as stated by the provider when it last refused a request.`
-                          : `${model.rpm} a minute and ${model.rpd} a day per key is an assumption. Danav never refuses to send on an assumption — if it is wrong, the provider says so and the real figure is learned from the refusal.`}
+                          : `${model.rpm} a minute and ${model.rpd} a day per key is an assumption. BlackDesi never refuses to send on an assumption — if it is wrong, the provider says so and the real figure is learned from the refusal.`}
                       </p>
                     </div>
                   )}
@@ -305,7 +305,7 @@ export function QuotaPanel() {
             give {provider.credentialCount}&nbsp;×&nbsp;{perKeyRpd(provider)} ={' '}
             {provider.credentialCount * perKeyRpd(provider)} per model, and{' '}
             {provider.dayLimit.toLocaleString()} across all {provider.models.length}. Pick <strong>Auto</strong> in the
-            model menu to let Danav spend them in whatever order still has room. Today&apos;s counts reset in{' '}
+            model menu to let BlackDesi spend them in whatever order still has room. Today&apos;s counts reset in{' '}
             {waitLabel(provider.resetsAtMs - Date.now())}, at {provider.resetsAt}.
           </p>
         </div>

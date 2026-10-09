@@ -1,5 +1,5 @@
 /**
- * A workspace that is a folder on the machine running Danav — your PC when you
+ * A workspace that is a folder on the machine running BlackDesi — your PC when you
  * run it locally.
  *
  * File tools are confined to the workspace root (symlinks included). Commands
@@ -34,7 +34,7 @@ export const isInside = (root, target) => {
 
 function shellFor(command) {
   if (process.platform === 'win32') {
-    if (process.env.DANAV_SHELL === 'cmd') {
+    if (process.env.BLACKDESI_SHELL === 'cmd') {
       return { file: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', command], name: 'cmd.exe' };
     }
     return {

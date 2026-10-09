@@ -55,7 +55,7 @@ const sleep = (ms, signal) =>
   });
 
 /** Base of retry backoff (ms). Overridable so focused tests do not wait. */
-const retryBaseMs = () => (Number(process.env.DANAV_LLM_RETRY_BASE_MS) > 0 ? Number(process.env.DANAV_LLM_RETRY_BASE_MS) : 2000);
+const retryBaseMs = () => (Number(process.env.BLACKDESI_LLM_RETRY_BASE_MS) > 0 ? Number(process.env.BLACKDESI_LLM_RETRY_BASE_MS) : 2000);
 
 function retryAfterMs(value) {
   if (!value) return 0;
@@ -66,7 +66,7 @@ function retryAfterMs(value) {
 }
 
 /**
- * Longest Danav will sit still waiting for a per-minute window to roll over.
+ * Longest BlackDesi will sit still waiting for a per-minute window to roll over.
  *
  * Deliberately short. A silent wait is indistinguishable from a hang, and with
  * several keys and several models there is almost always something else to
@@ -104,7 +104,7 @@ function credentialList(provider) {
   }))];
 }
 
-export const maxTokens = () => (Number(process.env.DANAV_MAX_TOKENS) > 0 ? Number(process.env.DANAV_MAX_TOKENS) : 32768);
+export const maxTokens = () => (Number(process.env.BLACKDESI_MAX_TOKENS) > 0 ? Number(process.env.BLACKDESI_MAX_TOKENS) : 32768);
 
 function errorMessageFrom(status, text, model) {
   let msg = `Provider error (HTTP ${status})`;
@@ -328,7 +328,7 @@ export async function streamCompletion({
       let planned = nextFromPlan();
       if (planned && !planned.available) {
         // Nothing has room. What happens next depends on whether that is the
-        // provider's word or Danav's arithmetic.
+        // provider's word or BlackDesi's arithmetic.
         const waitMs = Number.isFinite(planned.readyAt) ? Math.max(0, planned.readyAt - Date.now()) : Infinity;
         if (!planned.confirmed) {
           // The budget is an ESTIMATE. Refusing to send on an estimate is how
@@ -464,7 +464,7 @@ export async function streamCompletion({
             throw new LlmError(`This model or provider rejected tool calling, which Agent mode needs. Pick a model that supports tool calling. (${errorMessageFrom(400, text, model)})`, { status: 400, code: 'no_tools' });
           }
           const detail = errorMessageFrom(400, text, model);
-          throw new LlmError(`The provider rejected the selected ${normalizedLevel} thinking effort. Danav did not lower or remove it; check that this model and endpoint support that level. (${detail})`, { status: 400, code: 'thinking_unsupported' });
+          throw new LlmError(`The provider rejected the selected ${normalizedLevel} thinking effort. BlackDesi did not lower or remove it; check that this model and endpoint support that level. (${detail})`, { status: 400, code: 'thinking_unsupported' });
         }
         // Auto has no requested effort to preserve. Retry without optional thought
         // summaries if a compatible endpoint rejects that display-only parameter.

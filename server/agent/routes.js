@@ -425,7 +425,7 @@ export function registerAgentRoutes(app, {
   // -------------------------------------------------------------------- chat
   router.post('/chat', async (req, res) => {
     const { provider: suppliedProvider, model, thinkingLevel, messages, workspaceId, taskId, activity, resume } = req.body || {};
-    const provider = resolveProvider(suppliedProvider);
+    const provider = resolveProvider(suppliedProvider, model);
     if (!provider || typeof provider !== 'object') return res.status(400).json({ error: 'Provider configuration is missing.' });
     if (provider.apiType === 'mock') {
       return res.status(400).json({ error: 'The Demo provider cannot run the agent. Pick a real model (it must support tool calling).' });

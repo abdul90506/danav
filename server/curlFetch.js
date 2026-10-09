@@ -28,7 +28,7 @@ export function fetchViaCurl(targetUrl, { timeoutMs = 20000, userAgent = '' } = 
 
     const tmpFile = path.join(
       os.tmpdir(),
-      `danav-fetch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`
+      `blackdesi-fetch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`
     );
     const cleanup = () => {
       try {

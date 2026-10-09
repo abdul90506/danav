@@ -305,7 +305,7 @@ const ChatAreaInner: React.FC<ChatAreaProps> = ({
                 answer. It publishes how much extra room it needs as a CSS variable
                 (no re-render, no measurement loop), and this spacer clears it.
               */}
-              <div style={{ height: 'var(--danav-composer-extra, 0px)' }} aria-hidden="true" />
+              <div style={{ height: 'var(--blackdesi-composer-extra, 0px)' }} aria-hidden="true" />
               <div ref={bottomRef} className="h-2" />
             </div>
           )}

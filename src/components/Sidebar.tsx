@@ -317,12 +317,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           isMobileOpen ? 'translate-x-0 w-72' : '-translate-x-full lg:translate-x-0'
         } ${isCollapsed ? 'lg:hidden' : 'lg:w-64'}`}
       >
-        {/* Header: Danav AI logo on left, Search & Sidebar Toggle on right */}
+        {/* Header: BlackDesi AI logo on left, Search & Sidebar Toggle on right */}
         <div className="flex items-center justify-between h-12 px-3.5 border-b border-zinc-200/50 dark:border-zinc-800/60">
           {/* Title / Logo */}
           <div className="flex items-center gap-2">
             <span className="font-semibold text-[14.5px] sm:text-[15px] tracking-tight text-zinc-900 dark:text-zinc-100 font-sans select-none">
-              Danav AI
+              BlackDesi AI
             </span>
           </div>
 
@@ -503,6 +503,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <SettingsIcon className="w-4 h-4 shrink-0 text-zinc-500 dark:text-zinc-400 stroke-[1.75]" />
             <span>Settings</span>
           </button>
+          <a
+            href="mailto:Contact@blackdesi.com"
+            className="block px-3 pt-1.5 pb-0.5 text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 truncate"
+          >
+            Contact: Contact@blackdesi.com
+          </a>
         </div>
       </aside>
     </>

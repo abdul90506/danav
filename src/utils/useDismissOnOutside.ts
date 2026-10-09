@@ -16,7 +16,7 @@ import { useEffect, useRef, type RefObject } from 'react';
  */
 
 /** Broadcast on open; every other open popover closes when it sees an id that is not its own. */
-const OPEN_EVENT = 'danav:popover-open';
+const OPEN_EVENT = 'blackdesi:popover-open';
 let surfaceSeq = 0;
 /** How many dismissible surfaces are open right now — see `hasOpenPopover`. */
 let openPopovers = 0;

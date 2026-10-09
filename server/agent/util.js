@@ -10,7 +10,7 @@ export const IGNORED_DIRS = new Set([
   '.git', 'node_modules', 'dist', 'build', '.next', '.nuxt', '.svelte-kit', '.cache',
   // Bodies parked for a write whose path went missing (see loop.js): a hand-off
   // buffer, never part of the project.
-  '.danav-recovered',
+  '.blackdesi-recovered',
   '.turbo', '.vite', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache',
   'coverage', '.idea', '.vscode', 'target', '.gradle', '.parcel-cache',
 ]);
@@ -156,7 +156,7 @@ export function createRedactor(extraSecrets = []) {
 export function sanitizedEnv(base = process.env) {
   const env = { ...base };
   for (const name of SECRET_ENV_NAMES) delete env[name];
-  for (const key of Object.keys(env)) if (key.startsWith('DANAV_')) delete env[key];
+  for (const key of Object.keys(env)) if (key.startsWith('BLACKDESI_')) delete env[key];
   return env;
 }
 

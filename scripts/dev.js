@@ -86,10 +86,10 @@ async function startBackend() {
     env: {
       ...process.env,
       PORT: String(BACKEND_PORT),
-      DANAV_HOST: process.env.DANAV_HOST || '127.0.0.1',
+      BLACKDESI_HOST: process.env.BLACKDESI_HOST || '127.0.0.1',
       // Dev preview is open by default so no unlock modal interrupts startup.
-      // Operators can set DANAV_DISABLE_PREVIEW_AUTH=0 or supply DANAV_PREVIEW_TOKEN to re-enable a gate.
-      DANAV_DISABLE_PREVIEW_AUTH: process.env.DANAV_DISABLE_PREVIEW_AUTH || '1',
+      // Operators can set BLACKDESI_DISABLE_PREVIEW_AUTH=0 or supply BLACKDESI_PREVIEW_TOKEN to re-enable a gate.
+      BLACKDESI_DISABLE_PREVIEW_AUTH: process.env.BLACKDESI_DISABLE_PREVIEW_AUTH || '1',
     },
   });
 
@@ -149,7 +149,7 @@ async function startVite() {
 
 async function main() {
   console.log('');
-  console.log('  Danav AI Chat — starting backend + frontend');
+  console.log('  BlackDesi AI Chat — starting backend + frontend');
   console.log('  ------------------------------------------------');
 
   await startBackend();

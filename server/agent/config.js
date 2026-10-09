@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export const dataDir = () => process.env.DANAV_DATA_DIR || path.join(__dirname, '..', 'data');
+export const dataDir = () => process.env.BLACKDESI_DATA_DIR || (process.env.VERCEL ? '/tmp/blackdesi-data' : path.join(__dirname, '..', 'data'));
 
 export function ensureDataDir() {
   const dir = dataDir();
@@ -81,10 +81,10 @@ export function clearNovitaKey() {
 
 /** Where new local workspaces are created. Outside the repo on purpose. */
 export const workspacesDir = () =>
-  path.resolve(process.env.DANAV_WORKSPACES_DIR || path.join(os.homedir(), 'danav-workspaces'));
+  path.resolve(process.env.BLACKDESI_WORKSPACES_DIR || path.join(os.homedir(), 'blackdesi-workspaces'));
 
 /** Opt-in: let a local workspace point at any folder, not just the workspaces dir. */
-export const allowAnyLocalPath = () => process.env.DANAV_ALLOW_ANY_LOCAL_PATH === '1';
+export const allowAnyLocalPath = () => process.env.BLACKDESI_ALLOW_ANY_LOCAL_PATH === '1';
 
 const num = (name, fallback) => {
   const n = Number(process.env[name]);
@@ -93,14 +93,14 @@ const num = (name, fallback) => {
 
 export const limits = {
   /** LLM rounds per run. Each round may run several tools. */
-  maxSteps: () => num('DANAV_AGENT_MAX_STEPS', 80),
+  maxSteps: () => num('BLACKDESI_AGENT_MAX_STEPS', 80),
   /** Hard wall-clock cap for one run. */
-  maxRunMs: () => num('DANAV_AGENT_MAX_RUN_MINUTES', 45) * 60_000,
+  maxRunMs: () => num('BLACKDESI_AGENT_MAX_RUN_MINUTES', 45) * 60_000,
   /** Characters of conversation kept before old tool output is elided. */
-  contextChars: () => num('DANAV_AGENT_CONTEXT_CHARS', 420_000),
+  contextChars: () => num('BLACKDESI_AGENT_CONTEXT_CHARS', 420_000),
   /** Default command timeout. */
-  commandTimeoutMs: () => num('DANAV_AGENT_COMMAND_TIMEOUT_SECONDS', 120) * 1000,
-  maxCommandTimeoutMs: () => num('DANAV_AGENT_MAX_COMMAND_TIMEOUT_SECONDS', 900) * 1000,
+  commandTimeoutMs: () => num('BLACKDESI_AGENT_COMMAND_TIMEOUT_SECONDS', 120) * 1000,
+  maxCommandTimeoutMs: () => num('BLACKDESI_AGENT_MAX_COMMAND_TIMEOUT_SECONDS', 900) * 1000,
   /**
    * Platform-level backstop: Novita itself pauses the sandbox this long after the
    * last activity, even if this server died. It is refreshed on every use, so it
@@ -109,13 +109,13 @@ export const limits = {
    */
   sandboxTimeoutMs: () => num('NOVITA_SANDBOX_TIMEOUT_MINUTES', 15) * 60_000,
   /** No activity in a workspace for this long -> the sandbox is paused. */
-  sandboxIdlePauseMs: () => num('DANAV_SANDBOX_IDLE_PAUSE_SECONDS', 180) * 1000,
+  sandboxIdlePauseMs: () => num('BLACKDESI_SANDBOX_IDLE_PAUSE_SECONDS', 180) * 1000,
   /**
    * A finished run is a strong "we are done here" signal, so the clock starts
    * shorter: after this long with nothing else happening the sandbox pauses,
    * even if the general idle window has not elapsed yet.
    */
-  sandboxRunGraceMs: () => num('DANAV_SANDBOX_RUN_GRACE_SECONDS', 90) * 1000,
+  sandboxRunGraceMs: () => num('BLACKDESI_SANDBOX_RUN_GRACE_SECONDS', 90) * 1000,
   maxOutputChars: 30_000,
   maxReadChars: 100_000,
   maxReadLines: 2000,
@@ -133,11 +133,11 @@ export const limits = {
    *
    * This does not invent progress, line counts or file contents: it only keeps
    * the row that names the file on screen long enough to be read before it is
-   * replaced by the result. Set DANAV_ROW_MIN_MS=0 to turn it off.
+   * replaced by the result. Set BLACKDESI_ROW_MIN_MS=0 to turn it off.
    */
   rowMinVisibleMs: () => {
     // Unlike the other limits, 0 is a meaningful value here: it turns the hold off.
-    const n = Number(process.env.DANAV_ROW_MIN_MS);
+    const n = Number(process.env.BLACKDESI_ROW_MIN_MS);
     return Number.isFinite(n) && n >= 0 ? n : 420;
   },
 
@@ -152,13 +152,13 @@ export const limits = {
    * those lines land.
    *
    * Every number published is read back off the file by the writer; nothing is
-   * estimated from the buffer. Only the CADENCE is chosen here. Set DANAV_REVEAL=0
+   * estimated from the buffer. Only the CADENCE is chosen here. Set BLACKDESI_REVEAL=0
    * to switch it off and have such a file land in one go.
    */
-  revealEnabled: () => !/^(0|false|off|no)$/i.test(String(process.env.DANAV_REVEAL ?? '').trim()),
-  revealCharsPerSec: () => num('DANAV_REVEAL_CHARS_PER_SEC', 1100),
-  revealMinMs: () => num('DANAV_REVEAL_MIN_MS', 900),
-  revealMaxMs: () => num('DANAV_REVEAL_MAX_MS', 4000),
+  revealEnabled: () => !/^(0|false|off|no)$/i.test(String(process.env.BLACKDESI_REVEAL ?? '').trim()),
+  revealCharsPerSec: () => num('BLACKDESI_REVEAL_CHARS_PER_SEC', 1100),
+  revealMinMs: () => num('BLACKDESI_REVEAL_MIN_MS', 900),
+  revealMaxMs: () => num('BLACKDESI_REVEAL_MAX_MS', 4000),
 };
 
 // ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ export const limits = {
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 function hostRules() {
-  return (process.env.DANAV_ALLOWED_HOSTS || '')
+  return (process.env.BLACKDESI_ALLOWED_HOSTS || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
@@ -187,7 +187,7 @@ export function isAllowedHostname(hostname) {
   );
 }
 
-export const AGENT_HEADER = 'x-danav-agent';
+export const AGENT_HEADER = 'x-blackdesi-agent';
 
 export function agentRequestGuard(req, res, next) {
   const hostname = String(req.headers.host || '').replace(/:\d+$/, '').toLowerCase();
@@ -195,7 +195,7 @@ export function agentRequestGuard(req, res, next) {
     return res.status(403).json({
       error:
         `Agent routes only answer on localhost by default (got "${hostname}"). ` +
-        'To expose them, add the hostname to DANAV_ALLOWED_HOSTS — and put the app behind authentication first.',
+        'To expose them, add the hostname to BLACKDESI_ALLOWED_HOSTS — and put the app behind authentication first.',
     });
   }
   if (req.headers[AGENT_HEADER] !== '1') {

@@ -176,7 +176,7 @@ export const App: React.FC = () => {
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [filesRefresh, setFilesRefresh] = useState(0);
-  // Account-wide sandbox manager (sees sandboxes Danav no longer tracks).
+  // Account-wide sandbox manager (sees sandboxes BlackDesi no longer tracks).
   const [sandboxesOpen, setSandboxesOpen] = useState(false);
   // What the active workspace's own sandbox is doing right now.
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
@@ -1008,7 +1008,7 @@ export const App: React.FC = () => {
     setPreviewAuthError('');
     try {
       const response = await fetch('/api/preview-auth/check', {
-        headers: { 'x-danav-preview-token': code },
+        headers: { 'x-blackdesi-preview-token': code },
         cache: 'no-store',
       });
       if (!response.ok) {
@@ -2444,9 +2444,9 @@ export const App: React.FC = () => {
           <form onSubmit={handlePreviewUnlock} className="w-full max-w-sm rounded-2xl border border-zinc-700 bg-zinc-900 p-6 text-zinc-100 shadow-2xl">
             <div className="mb-5">
               <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo-300">Private sandbox</p>
-              <h1 id="preview-auth-title" className="mt-2 text-xl font-semibold">Unlock Danav preview</h1>
+              <h1 id="preview-auth-title" className="mt-2 text-xl font-semibold">Unlock BlackDesi preview</h1>
               <p className="mt-2 text-sm leading-6 text-zinc-400">
-                Danav answers only to someone holding this code, so an open preview cannot spend your provider key or your Agent sandboxes.
+                BlackDesi answers only to someone holding this code, so an open preview cannot spend your provider key or your Agent sandboxes.
               </p>
               <p className="mt-2 text-xs leading-5 text-zinc-500">
                 It is printed where the server starts, and saved in <span className="font-mono">server/data/preview-token.txt</span>. Unlocking keeps it in this tab only.

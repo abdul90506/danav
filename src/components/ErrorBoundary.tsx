@@ -40,7 +40,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     // Keep it in the console too: the fallback is for the user, this is for
     // whoever opens devtools afterwards.
-    console.error('[danav] render crashed:', error, info.componentStack);
+    console.error('[blackdesi] render crashed:', error, info.componentStack);
     this.setState({ info: info.componentStack || '' });
   }
 
@@ -52,7 +52,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
   private copy = async () => {
     const { error, info } = this.state;
     const report = [
-      `Danav error: ${error?.name}: ${error?.message}`,
+      `BlackDesi error: ${error?.name}: ${error?.message}`,
       `When: ${new Date().toISOString()}`,
       `Page: ${typeof location !== 'undefined' ? location.href : 'unknown'}`,
       '',

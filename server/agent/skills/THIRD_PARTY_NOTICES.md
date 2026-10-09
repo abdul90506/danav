@@ -1,6 +1,6 @@
 # Third-party skill notices
 
-The built-in `systematic-debugging` playbook is an independently written, concise adaptation of the debugging approach in `obra/superpowers` (`skills/systematic-debugging`). The built-in `focused-verification` playbook likewise adapts its verification guidance. The Superpowers test-driven-development skill was reviewed but not adopted because its unconditional full-suite requirement conflicts with Danav's focused-check policy.
+The built-in `systematic-debugging` playbook is an independently written, concise adaptation of the debugging approach in `obra/superpowers` (`skills/systematic-debugging`). The built-in `focused-verification` playbook likewise adapts its verification guidance. The Superpowers test-driven-development skill was reviewed but not adopted because its unconditional full-suite requirement conflicts with BlackDesi's focused-check policy.
 
 Source: https://github.com/obra/superpowers
 License: MIT, Copyright (c) 2025 Jesse Vincent.

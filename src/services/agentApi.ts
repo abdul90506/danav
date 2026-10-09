@@ -12,11 +12,11 @@ import type {
 import { previewAuthHeaders } from './previewAuth.ts';
 
 /**
- * Client for the Agent mode API. Every request carries `x-danav-agent: 1`:
+ * Client for the Agent mode API. Every request carries `x-blackdesi-agent: 1`:
  * the server refuses these routes without it, which is what stops other web
  * pages from driving them (browsers can't add that header cross-origin).
  */
-const agentHeaders = () => ({ 'Content-Type': 'application/json', 'x-danav-agent': '1', ...previewAuthHeaders() });
+const agentHeaders = () => ({ 'Content-Type': 'application/json', 'x-blackdesi-agent': '1', ...previewAuthHeaders() });
 
 export class AgentApiError extends Error {
   code?: string;
@@ -38,7 +38,7 @@ async function call<T = any>(method: string, url: string, body?: unknown): Promi
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    throw new AgentApiError('Could not reach the Danav server. Is it running?');
+    throw new AgentApiError('Could not reach the BlackDesi server. Is it running?');
   }
   let json: any = null;
   try {

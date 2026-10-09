@@ -66,9 +66,9 @@ export function normalizeSandbox(info, bySandboxId = new Map()) {
     startedAt: ms(info.startedAt),
     endAt: ms(info.endAt),
     metadata,
-    /** Created by Danav (any session, even if its workspace is long gone). */
-    isDanav: metadata.app === 'danav',
-    /** A Danav workspace in THIS app still points at it. */
+    /** Created by BlackDesi (any session, even if its workspace is long gone). */
+    isBlackDesi: metadata.app === 'blackdesi',
+    /** A BlackDesi workspace in THIS app still points at it. */
     managed: Boolean(workspace),
     workspaceId: workspace?.id || null,
     workspaceName: workspace?.name || null,

@@ -46,7 +46,7 @@ export function withCacheBust(url: string, token: string): string {
   const hash = hashAt === -1 ? '' : url.slice(hashAt);
   const base = hashAt === -1 ? url : url.slice(0, hashAt);
   const sep = base.includes('?') ? '&' : '?';
-  return `${base}${sep}__danav=${encodeURIComponent(token)}${hash}`;
+  return `${base}${sep}__blackdesi=${encodeURIComponent(token)}${hash}`;
 }
 
 interface PreviewPanelProps {

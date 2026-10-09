@@ -208,7 +208,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
           <div className="min-w-0">
             <h2 id="sandbox-dialog-title" className="text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">Sandboxes</h2>
             <p className="text-[12px] text-zinc-500 dark:text-zinc-400 truncate">
-              Everything in your Novita account — including ones Danav no longer tracks.
+              Everything in your Novita account — including ones BlackDesi no longer tracks.
             </p>
           </div>
           <div className="flex items-center gap-1 shrink-0">
@@ -242,7 +242,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
           <div className="flex items-start gap-2 text-[12px] leading-snug text-zinc-600 dark:text-zinc-300">
             <Zap className="w-3.5 h-3.5 mt-[1px] shrink-0 text-amber-500" />
             <p>
-              Sandboxes bill while <span className="font-medium">running</span>. Danav pauses the ones it manages after{' '}
+              Sandboxes bill while <span className="font-medium">running</span>. BlackDesi pauses the ones it manages after{' '}
               <span className="font-medium">{idleLabel}</span> with no activity, or <span className="font-medium">{graceLabel}</span>{' '}
               after a run finishes — whichever comes first. Paused sandboxes keep their files and cost nothing.
             </p>
@@ -303,7 +303,7 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
                   <span className={`text-[12px] font-medium shrink-0 ${style.text}`}>{style.label}</span>
 
                   <span className="flex items-center gap-1.5 min-w-0 text-[12px] text-zinc-800 dark:text-zinc-100">
-                    {s.isDanav ? (
+                    {s.isBlackDesi ? (
                       <Cloud className="w-3.5 h-3.5 shrink-0 text-zinc-400" />
                     ) : (
                       <Server className="w-3.5 h-3.5 shrink-0 text-zinc-400" />
@@ -311,12 +311,12 @@ export const SandboxManagerDialog: React.FC<SandboxManagerDialogProps> = ({
                     <span className="truncate font-medium">{s.workspaceName || s.name || s.templateId || 'sandbox'}</span>
                   </span>
 
-                  {s.isDanav && (
+                  {s.isBlackDesi && (
                     <span className="shrink-0 px-1.5 py-[1px] rounded text-[10px] font-medium bg-zinc-200/70 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">
-                      Danav
+                      BlackDesi
                     </span>
                   )}
-                  {!s.managed && s.isDanav && (
+                  {!s.managed && s.isBlackDesi && (
                     <span className="shrink-0 px-1.5 py-[1px] rounded text-[10px] font-medium bg-amber-100 dark:bg-amber-500/15 text-amber-700 dark:text-amber-400">
                       no workspace
                     </span>
