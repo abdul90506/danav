@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Check, Copy } from 'lucide-react';
-import Prism from 'prismjs';
+import Prism from '../utils/prismGlobal';
 import { copyText } from '../utils/clipboard.ts';
 
 // Import essential language grammars
